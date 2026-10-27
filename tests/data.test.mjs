@@ -43,17 +43,14 @@ test('every change-set file breaks into well-formed, triageable hunks (review co
   }
 })
 
-test('telemetry tiles: at most 8, polymorphic phases, every tiled thread carries a big numeral', () => {
-  const tiled = seedThreads.filter((t) => t.tile)
-  assert.ok(tiled.length >= 2 && tiled.length <= 8, `expected 2..8 tiles, got ${tiled.length}`)
-  for (const t of tiled) {
-    assert.ok(['blocked', 'ready', 'testing', 'running', 'exploring'].includes(t.tile.phase), `thread ${t.id} tile phase ${t.tile.phase}`)
-    for (const k of ['big', 'sub', 'tail']) assert.ok(t.tile[k]?.length > 0, `thread ${t.id} tile missing ${k}`)
-    assert.ok(t.tile.progress >= 0 && t.tile.progress <= 100, `thread ${t.id} tile progress out of range`)
-    assert.ok(t.scope?.startsWith(':'), `thread ${t.id} needs a module scope for tile zone 1`)
+test('threads carry module scope; agents are numeric and thread-linked (tiles derive from these)', () => {
+  for (const t of seedThreads) if (t.scope) assert.ok(t.scope.startsWith(':'), `thread ${t.id} scope malformed`)
+  const ids = new Set(seedThreads.map((t) => t.id))
+  for (const a of seedAgents) {
+    assert.ok(ids.has(a.threadId), `agent ${a.id} links to unknown thread ${a.threadId}`)
+    assert.ok(typeof a.tokens === 'number' && typeof a.rate === 'number', `agent ${a.id} telemetry must be numeric, not display strings`)
+    assert.ok((a.state === 'running') === (a.rate > 0) || a.state !== 'running', `agent ${a.id} rate/state incoherent`)
   }
-  assert.ok(tiled.some((t) => t.tile.phase === 'blocked'), 'spec requires one hot interrupt tile to judge the pattern by')
-  assert.ok(seedThreads.some((t) => !t.tile), 'idle threads must exist to prove demotion to text rows')
 })
 
 test('epochs segment the long session and every anchor lands on a real turn', () => {
@@ -62,7 +59,8 @@ test('epochs segment the long session and every anchor lands on a real turn', ()
   const board = seedTurns.board
   for (const e of seedEpochs) {
     assert.ok(board[e.anchor], `epoch E${e.n} anchor ${e.anchor} has no turn`)
-    assert.ok(e.turns > 0 && e.summary.length > 0 && e.when.length > 0, `epoch E${e.n} incomplete`)
+    assert.ok(e.summary.length > 0 && e.when.length > 0, `epoch E${e.n} incomplete`)
+    assert.ok(board.some((t) => t.epoch === e.n), `epoch E${e.n} has no real turns`)
   }
   for (const t of board) {
     if (t.epoch) assert.ok(seedEpochs.some((e) => e.n === t.epoch), `turn epoch ${t.epoch} not in seedEpochs`)
