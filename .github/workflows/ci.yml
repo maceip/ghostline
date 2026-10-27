@@ -1,0 +1,51 @@
+# Adapted from maceip/zode's CI pattern (ci.yml web job): unit tests, a real
+# production build, then serve the artifact and fetch every asset the page
+# references so a green build actually ships a loadable app.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: web (test + build + serve)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Tests (plain JS layers, no secrets)
+        # node --test over data/router/config. No live model or API key needed.
+        run: npm test
+      - name: Production build
+        run: npm run build
+      - name: Serve dist and fetch every referenced asset
+        run: |
+          npx vite preview --host 127.0.0.1 --port 4173 &
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:4173/ && break; sleep 1; done
+          curl -sf http://127.0.0.1:4173/ | tee /tmp/index.html >/dev/null
+          grep -oE '(href|src)="[^"]+"' /tmp/index.html | sed -E 's/^(href|src)="//; s/"$//' | sort -u | while read -r asset; do
+            case "$asset" in
+              /*) url="http://127.0.0.1:4173$asset" ;;
+              *) url="http://127.0.0.1:4173/$asset" ;;
+            esac
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$url")
+            echo "$code  $asset"
+            test "$code" = "200"
+          done
+      - name: Brand assets carried over verbatim
+        # The zode mark / icons are preserved assets; fail if they stop shipping.
+        run: |
+          test -f public/zode-mark.svg
+          test -f public/favicon.ico
+          test -f public/zode-256.png
