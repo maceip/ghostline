@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.11.35222.181
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Zode.Shell", "Zode.Shell\Zode.Shell.csproj", "{7C1E4A55-9E33-4A5C-9E5D-0B0C2D5F1A21}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Debug|ARM64 = Debug|ARM64
+		Release|x64 = Release|x64
+		Release|ARM64 = Release|ARM64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{7C1E4A55-9E33-4A5C-9E5D-0B0C2D5F1A21}.Debug|x64.ActiveCfg = Debug|x64
+		{7C1E4A55-9E33-4A5C-9E5D-0B0C2D5F1A21}.Debug|x64.Build.0 = Debug|x64
+		{7C1E4A55-9E33-4A5C-9E5D-0B0C2D5F1A21}.Debug|ARM64.ActiveCfg = Debug|ARM64
+		{7C1E4A55-9E33-4A5C-9E5D-0B0C2D5F1A21}.Debug|ARM64.Build.0 = Debug|ARM64
+		{7C1E4A55-9E33-4A5C-9E5D-0B0C2D5F1A21}.Release|x64.ActiveCfg = Release|x64
+		{7C1E4A55-9E33-4A5C-9E5D-0B0C2D5F1A21}.Release|x64.Build.0 = Release|x64
+		{7C1E4A55-9E33-4A5C-9E5D-0B0C2D5F1A21}.Release|ARM64.ActiveCfg = Release|ARM64
+		{7C1E4A55-9E33-4A5C-9E5D-0B0C2D5F1A21}.Release|ARM64.Build.0 = Release|ARM64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {2F0A9B4D-5C6E-4E2A-9E31-7B8D6C4F2A90}
+	EndGlobalSection
+EndGlobal

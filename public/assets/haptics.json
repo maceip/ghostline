@@ -1,0 +1,186 @@
+{
+  "$schema": "https://zode.dev/schemas/haptics-v1.json",
+  "version": 1,
+  "description": "Canonical haptic waveform programs for Zode. Defined ONCE and rendered by the best engine available on each platform: CoreHaptics (macOS/iOS), WebAudio (web/Android), WASAPI audio synthesis (Windows desktop, which has no rich haptic hardware). Every renderer MUST reproduce the same envelope, timing and relative amplitude.",
+  "semantics": {
+    "track.kind": "continuous = sustained waveform with a parameter curve envelope; transient = instantaneous hit with fixed intensity/sharpness",
+    "curve": "Array of [normalizedTimeWithinEvent, value] control points. Renderers MUST interpolate linearly between control points unless they support curvature (CoreHaptics CHHapticParameterCurve.controlPoints).",
+    "intensity": "0.0..1.0 perceived strength",
+    "sharpness": "0.0..1.0 perceived brightness/crispness",
+    "carrierHz": "Carrier frequency for platforms that synthesize the waveform as audio. CoreHaptics ignores this (hardware has no carrier); WebAudio and WASAPI use it as the sine carrier.",
+    "loop": "If true the program repeats seamlessly until stop() is called. Used for 'working'."
+  },
+  "programs": {
+    "done": {
+      "label": "Done — triple roll",
+      "description": "Three crisp ascending rolls that swell and fall. Confirms a completed agent task. Each roll is a continuous event whose intensity rises to a peak then falls away, giving the characteristic 'roll' rather than a click.",
+      "durationMs": 580,
+      "loop": false,
+      "tracks": [
+        {
+          "kind": "continuous",
+          "startMs": 0,
+          "durationMs": 170,
+          "carrierHz": 150,
+          "intensity": [[0.0, 0.10], [0.42, 0.95], [0.62, 0.55], [1.0, 0.18]],
+          "sharpness": [[0.0, 0.55], [0.42, 0.90], [1.0, 0.45]]
+        },
+        {
+          "kind": "continuous",
+          "startMs": 190,
+          "durationMs": 170,
+          "carrierHz": 150,
+          "intensity": [[0.0, 0.14], [0.42, 1.00], [0.62, 0.58], [1.0, 0.22]],
+          "sharpness": [[0.0, 0.60], [0.42, 0.95], [1.0, 0.50]]
+        },
+        {
+          "kind": "continuous",
+          "startMs": 380,
+          "durationMs": 200,
+          "carrierHz": 150,
+          "intensity": [[0.0, 0.18], [0.42, 1.00], [0.62, 0.62], [1.0, 0.26]],
+          "sharpness": [[0.0, 0.65], [0.42, 1.00], [1.0, 0.55]]
+        }
+      ]
+    },
+    "working": {
+      "label": "Agent working — tiny slow wave",
+      "description": "A very low amplitude, very slow swell that repeats for as long as the agent is busy. Must read as 'alive but unobtrusive' — never a buzz. Loop until stopped.",
+      "durationMs": 2400,
+      "loop": true,
+      "tracks": [
+        {
+          "kind": "continuous",
+          "startMs": 0,
+          "durationMs": 2400,
+          "carrierHz": 90,
+          "intensity": [[0.0, 0.02], [0.25, 0.18], [0.50, 0.06], [0.75, 0.20], [1.0, 0.02]],
+          "sharpness": [[0.0, 0.05], [0.25, 0.12], [0.50, 0.06], [0.75, 0.13], [1.0, 0.05]]
+        }
+      ]
+    },
+    "tick": {
+      "label": "Tick",
+      "description": "Single crisp click for scrub ticks and key presses.",
+      "durationMs": 40,
+      "loop": false,
+      "tracks": [
+        {
+          "kind": "transient",
+          "startMs": 0,
+          "intensity": 0.50,
+          "sharpness": 0.90,
+          "carrierHz": 220
+        }
+      ]
+    },
+    "select": {
+      "label": "Select",
+      "description": "Softer, duller tick used when an item is focused or selected.",
+      "durationMs": 50,
+      "loop": false,
+      "tracks": [
+        {
+          "kind": "transient",
+          "startMs": 0,
+          "intensity": 0.35,
+          "sharpness": 0.70,
+          "carrierHz": 180
+        }
+      ]
+    },
+    "drop": {
+      "label": "Drop — file accepted",
+      "description": "A soft low thud with a short bright tail; confirms an attachment landed.",
+      "durationMs": 220,
+      "loop": false,
+      "tracks": [
+        {
+          "kind": "continuous",
+          "startMs": 0,
+          "durationMs": 130,
+          "carrierHz": 110,
+          "intensity": [[0.0, 0.85], [1.0, 0.05]],
+          "sharpness": [[0.0, 0.25], [1.0, 0.10]]
+        },
+        {
+          "kind": "transient",
+          "startMs": 45,
+          "intensity": 0.30,
+          "sharpness": 0.85,
+          "carrierHz": 300
+        }
+      ]
+    },
+    "attach": {
+      "label": "Attach — item received",
+      "description": "Rising pop used when a file arrives from the dock, a drop, or the share sheet.",
+      "durationMs": 260,
+      "loop": false,
+      "tracks": [
+        {
+          "kind": "continuous",
+          "startMs": 0,
+          "durationMs": 220,
+          "carrierHz": 160,
+          "intensity": [[0.0, 0.05], [0.55, 0.70], [1.0, 0.30]],
+          "sharpness": [[0.0, 0.40], [0.55, 0.85], [1.0, 0.60]]
+        }
+      ]
+    },
+    "open": {
+      "label": "Open — panel in",
+      "description": "Upward swell used when a view or panel opens.",
+      "durationMs": 280,
+      "loop": false,
+      "tracks": [
+        {
+          "kind": "continuous",
+          "startMs": 0,
+          "durationMs": 240,
+          "carrierHz": 130,
+          "intensity": [[0.0, 0.02], [1.0, 0.55]],
+          "sharpness": [[0.0, 0.15], [1.0, 0.55]]
+        }
+      ]
+    },
+    "close": {
+      "label": "Close — panel out",
+      "description": "Downward swell used when a view or panel closes.",
+      "durationMs": 260,
+      "loop": false,
+      "tracks": [
+        {
+          "kind": "continuous",
+          "startMs": 0,
+          "durationMs": 220,
+          "carrierHz": 130,
+          "intensity": [[0.0, 0.50], [1.0, 0.02]],
+          "sharpness": [[0.0, 0.50], [1.0, 0.10]]
+        }
+      ]
+    },
+    "error": {
+      "label": "Error",
+      "description": "Two dull low thuds.",
+      "durationMs": 420,
+      "loop": false,
+      "tracks": [
+        {
+          "kind": "transient",
+          "startMs": 0,
+          "intensity": 0.70,
+          "sharpness": 0.15,
+          "carrierHz": 90
+        },
+        {
+          "kind": "transient",
+          "startMs": 190,
+          "intensity": 0.60,
+          "sharpness": 0.15,
+          "carrierHz": 80
+        }
+      ]
+    }
+  }
+}

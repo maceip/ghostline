@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The system search description for Zode (contract §10). The suggestions are
+    answered by com.zode.app.intents.ZodeSearchProvider.
+-->
+<searchable xmlns:android="http://schemas.android.com/apk/res/android"
+    android:label="@string/search_label"
+    android:hint="@string/search_hint"
+    android:searchSuggestAuthority="com.zode.app.search"
+    android:searchSuggestIntentAction="android.intent.action.SEARCH"
+    android:searchSuggestSelection=" ?"
+    android:searchSuggestThreshold="1"
+    android:includeInGlobalSearch="false" />

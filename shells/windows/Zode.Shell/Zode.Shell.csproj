@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Windows 11 24H2 (build 26100) projections.  The Windows SDK
+         projection (Microsoft.Windows.SDK.NET.Ref) comes with the TFM, so the
+         only NuGet package of this shell is Microsoft.Web.WebView2. -->
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <OutputType>WinExe</OutputType>
+
+    <!-- No WinUI 3, no WPF, no WinForms: raw Win32 + WebView2. -->
+    <UseWindowsForms>false</UseWindowsForms>
+    <UseWPF>false</UseWPF>
+
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+
+    <AssemblyName>Zode.Shell</AssemblyName>
+    <RootNamespace>Zode.Shell</RootNamespace>
+    <Product>Zode</Product>
+    <Description>Zode — the Zune for Windows. Borderless WebView2 shell.</Description>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <Company>Zode</Company>
+
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\icons\zode.ico</ApplicationIcon>
+
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The ONLY third-party package in this shell. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Contract §7: the canonical haptic programs live in the shared package.
+         They are embedded (and copied next to the executable) so the shell
+         never has to invent a waveform. -->
+    <EmbeddedResource Include="..\..\..\packages\shared\haptics.json" LogicalName="Zode.Shell.haptics.json" />
+    <None Include="..\..\..\packages\shared\haptics.json" Link="haptics.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\icons\zode.ico" Link="zode.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The Zune bracket mark, used as the status bar notification icon.
+    Notification icons must be a flat silhouette, so this is the mark only.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M6,6 h5 v2 H8 v8 h3 v2 H6 z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M18,6 h-5 v2 h3 v8 h-3 v2 h5 z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M13.5,12 a1.5,1.5 0 1,1 -3,0 a1.5,1.5 0 1,1 3,0 z" />
+</vector>

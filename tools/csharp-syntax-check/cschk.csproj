@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A syntax-only checker for the C# sources.
+
+    The Windows shell can only be fully compiled on Windows (it is Win32 and
+    Edge WebView2), but a *syntax* check works anywhere the .NET SDK is
+    installed: Roslyn parses the files without resolving a single reference,
+    so the Win32 types never have to exist.
+
+    That is worth having: it catches an unbalanced brace or a malformed
+    attribute in seconds on any machine, instead of waiting for the Windows
+    CI runner.
+
+    The Roslyn assemblies are referenced straight out of the .NET SDK, so this
+    project needs no NuGet packages and no network.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>zode-csharp-syntax-check</AssemblyName>
+    <RootNamespace>Zode.CSharpSyntaxCheck</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Microsoft.CodeAnalysis">
+      <HintPath>$(MSBuildToolsPath)\Roslyn\bincore\Microsoft.CodeAnalysis.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.CodeAnalysis.CSharp">
+      <HintPath>$(MSBuildToolsPath)\Roslyn\bincore\Microsoft.CodeAnalysis.CSharp.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>

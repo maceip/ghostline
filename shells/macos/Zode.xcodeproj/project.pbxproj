@@ -1,0 +1,439 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		DC86675F63E388F68C622C8F /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8B92B2D30452B74B4F924E4 /* AppDelegate.swift */; };
+		8D18F8A93C9AA2EF4BAB5096 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B8FA18644A594FE11B39A425 /* Assets.xcassets */; };
+		E975031B7EE64366016E23CA /* Attachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E029C32AB358A13BA65A816 /* Attachment.swift */; };
+		85B868DE02BE67EE467CA464 /* AttachmentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8917DA4EE553992E0B64CCB8 /* AttachmentService.swift */; };
+		DF623B2F0970DFD0BD870716 /* AudioHapticSynth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63855175009F40361B45BF48 /* AudioHapticSynth.swift */; };
+		EF0A78C3E8A0E148F2BF7D8A /* CHapticEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A9256A16B55A3FAA730DAE6 /* CHapticEngine.swift */; };
+		ADABEAF34F97D7F666DE7D30 /* HapticProgram.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10E640036A28F191F21D4D89 /* HapticProgram.swift */; };
+		FE00C58D8BAB513DE709436F /* HapticService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8B3ED411B62CB9681035E77 /* HapticService.swift */; };
+		A59CBEDBE8008D5FDDB5D032 /* IntentRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A109FC7BC1976D03F68742EC /* IntentRouter.swift */; };
+		0E7F26BC2ACDAFE3D6465193 /* JournalService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35087FE7557FB0E47CA6224C /* JournalService.swift */; };
+		3450DF3D3EE21922BE4CDFBE /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 800C8FD1E9CDA77FD88E1968 /* NotificationService.swift */; };
+		C88DC8F14C4D07F4FE9FB3AB /* SearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 533B33DF3E9CF562B8E8DFB4 /* SearchService.swift */; };
+		564129F604604290F5FF8E71 /* SelfTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FCEFFC076DFA93816A3D379 /* SelfTest.swift */; };
+		5ECF1E056F954483ADBFB3AE /* ZodeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DD16D58F0D2E1E477330816 /* ZodeApp.swift */; };
+		FE821FE912B82DACE68C95C6 /* ZodeAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C7BE2ECA0EEA480655DB56E /* ZodeAppModel.swift */; };
+		F74D9B0EF158514075B38DE3 /* ZodeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA01B6462AA0058F9B6C0936 /* ZodeBridge.swift */; };
+		5B325D544F3D4230889865FD /* ZodeCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D56FB164EC17DB9017E7C140 /* ZodeCommands.swift */; };
+		EFC0FF2F660526289027E661 /* ZodeEntities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C28E3986D0E2A0895D48F7C /* ZodeEntities.swift */; };
+		2F70796B3530B051F48FE484 /* ZodeEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E5CB3A48B3786719E0EA6EB /* ZodeEnvelope.swift */; };
+		0A939277F1F49768C78ADC08 /* ZodeIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5946A10C7DBC5993735E3857 /* ZodeIntents.swift */; };
+		675B5CCA6007B3952B435F72 /* ZodeIntentsBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2D629F0605B3F95B508E05E /* ZodeIntentsBridge.swift */; };
+		82230739CFA3264EEF53E03A /* ZodeResizeEdge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8D97371FC99044DF89361E7 /* ZodeResizeEdge.swift */; };
+		065BFB0AC979AF344049C14A /* ZodeResources.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0587947AC4FFEACE6DC9DF35 /* ZodeResources.swift */; };
+		5DDDA9739A4EEB5AA9C4E449 /* ZodeRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A99F57F8FE752585B4D68503 /* ZodeRootView.swift */; };
+		9E2FD5055BF144AB4A00764E /* ZodeSchemeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 297726A3D02A197812439D2F /* ZodeSchemeHandler.swift */; };
+		64889C069D17D066BE951A1C /* ZodeWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E65E3A90CA18C827B4CB40C2 /* ZodeWebView.swift */; };
+		94ED22DB99FD71E9E3DC45FB /* ZodeWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D47B097606D8E1A8D1A5EC1 /* ZodeWindow.swift */; };
+		82D0A0A40BB6D75432CDF85F /* haptics.json in Resources */ = {isa = PBXBuildFile; fileRef = 0D2E253A193DCAC6A6BBCAB0 /* haptics.json */; };
+		DA6B132052AE8A37F794F081 /* web in Resources */ = {isa = PBXBuildFile; fileRef = 2EAF76F0DD25448B51C2BAFC /* web */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		E8B92B2D30452B74B4F924E4 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		B8FA18644A594FE11B39A425 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		9E029C32AB358A13BA65A816 /* Attachment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Attachment.swift; sourceTree = "<group>"; };
+		8917DA4EE553992E0B64CCB8 /* AttachmentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentService.swift; sourceTree = "<group>"; };
+		63855175009F40361B45BF48 /* AudioHapticSynth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioHapticSynth.swift; sourceTree = "<group>"; };
+		4A9256A16B55A3FAA730DAE6 /* CHapticEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CHapticEngine.swift; sourceTree = "<group>"; };
+		10E640036A28F191F21D4D89 /* HapticProgram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HapticProgram.swift; sourceTree = "<group>"; };
+		F8B3ED411B62CB9681035E77 /* HapticService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HapticService.swift; sourceTree = "<group>"; };
+		AC533C0944E764A1399785B0 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A109FC7BC1976D03F68742EC /* IntentRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentRouter.swift; sourceTree = "<group>"; };
+		35087FE7557FB0E47CA6224C /* JournalService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JournalService.swift; sourceTree = "<group>"; };
+		800C8FD1E9CDA77FD88E1968 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
+		533B33DF3E9CF562B8E8DFB4 /* SearchService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchService.swift; sourceTree = "<group>"; };
+		5FCEFFC076DFA93816A3D379 /* SelfTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfTest.swift; sourceTree = "<group>"; };
+		2614177D603322213C40B500 /* Zode.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zode.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		58DADDFB10424FA799418B69 /* Zode.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Zode.entitlements; sourceTree = "<group>"; };
+		4DD16D58F0D2E1E477330816 /* ZodeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeApp.swift; sourceTree = "<group>"; };
+		2C7BE2ECA0EEA480655DB56E /* ZodeAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeAppModel.swift; sourceTree = "<group>"; };
+		CA01B6462AA0058F9B6C0936 /* ZodeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeBridge.swift; sourceTree = "<group>"; };
+		D56FB164EC17DB9017E7C140 /* ZodeCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeCommands.swift; sourceTree = "<group>"; };
+		3C28E3986D0E2A0895D48F7C /* ZodeEntities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeEntities.swift; sourceTree = "<group>"; };
+		8E5CB3A48B3786719E0EA6EB /* ZodeEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeEnvelope.swift; sourceTree = "<group>"; };
+		5946A10C7DBC5993735E3857 /* ZodeIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeIntents.swift; sourceTree = "<group>"; };
+		C2D629F0605B3F95B508E05E /* ZodeIntentsBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeIntentsBridge.swift; sourceTree = "<group>"; };
+		B8D97371FC99044DF89361E7 /* ZodeResizeEdge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeResizeEdge.swift; sourceTree = "<group>"; };
+		0587947AC4FFEACE6DC9DF35 /* ZodeResources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeResources.swift; sourceTree = "<group>"; };
+		A99F57F8FE752585B4D68503 /* ZodeRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeRootView.swift; sourceTree = "<group>"; };
+		297726A3D02A197812439D2F /* ZodeSchemeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeSchemeHandler.swift; sourceTree = "<group>"; };
+		E65E3A90CA18C827B4CB40C2 /* ZodeWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeWebView.swift; sourceTree = "<group>"; };
+		7D47B097606D8E1A8D1A5EC1 /* ZodeWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZodeWindow.swift; sourceTree = "<group>"; };
+		0D2E253A193DCAC6A6BBCAB0 /* haptics.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = haptics.json; sourceTree = "<group>"; };
+		2EAF76F0DD25448B51C2BAFC /* web */ = {isa = PBXFileReference; lastKnownFileType = folder; path = web; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D48C6C9579EC509703ABA7DC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		CC5D242D023A9271190EA7C6 = {
+			isa = PBXGroup;
+			children = (
+				82C5A6DE6207DDF42C5AFCBF,
+				AE7805B56D1DCAFAA071416F,
+			);
+			sourceTree = "<group>";
+		};
+		E04AC53BA30F8B6C7BCB14F9 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				E8B92B2D30452B74B4F924E4,
+				4DD16D58F0D2E1E477330816,
+				2C7BE2ECA0EEA480655DB56E,
+				D56FB164EC17DB9017E7C140,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		76049F7B4DDA479656FCF242 /* Attachments */ = {
+			isa = PBXGroup;
+			children = (
+				9E029C32AB358A13BA65A816,
+				8917DA4EE553992E0B64CCB8,
+			);
+			path = Attachments;
+			sourceTree = "<group>";
+		};
+		4AE8669BA63C805D4661271B /* Bridge */ = {
+			isa = PBXGroup;
+			children = (
+				CA01B6462AA0058F9B6C0936,
+				8E5CB3A48B3786719E0EA6EB,
+				297726A3D02A197812439D2F,
+				E65E3A90CA18C827B4CB40C2,
+			);
+			path = Bridge;
+			sourceTree = "<group>";
+		};
+		BB211BCDE58B7EFA04B3457B /* Diagnostics */ = {
+			isa = PBXGroup;
+			children = (
+				5FCEFFC076DFA93816A3D379,
+			);
+			path = Diagnostics;
+			sourceTree = "<group>";
+		};
+		37DA477EAE11D408450B73CB /* Haptics */ = {
+			isa = PBXGroup;
+			children = (
+				63855175009F40361B45BF48,
+				4A9256A16B55A3FAA730DAE6,
+				10E640036A28F191F21D4D89,
+				F8B3ED411B62CB9681035E77,
+			);
+			path = Haptics;
+			sourceTree = "<group>";
+		};
+		1E133C98BFB91F0BAB493431 /* Intents */ = {
+			isa = PBXGroup;
+			children = (
+				3C28E3986D0E2A0895D48F7C,
+				5946A10C7DBC5993735E3857,
+				C2D629F0605B3F95B508E05E,
+			);
+			path = Intents;
+			sourceTree = "<group>";
+		};
+		AE7805B56D1DCAFAA071416F /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				2614177D603322213C40B500,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		6F57A37EBCCA4EBE5865BAAC /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				B8FA18644A594FE11B39A425,
+				0D2E253A193DCAC6A6BBCAB0,
+				2EAF76F0DD25448B51C2BAFC,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		A00DC81BB23D4D835004515A /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				A109FC7BC1976D03F68742EC,
+				35087FE7557FB0E47CA6224C,
+				800C8FD1E9CDA77FD88E1968,
+				533B33DF3E9CF562B8E8DFB4,
+				0587947AC4FFEACE6DC9DF35,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		6D5127E75854E889EE5C1671 /* Window */ = {
+			isa = PBXGroup;
+			children = (
+				B8D97371FC99044DF89361E7,
+				A99F57F8FE752585B4D68503,
+				7D47B097606D8E1A8D1A5EC1,
+			);
+			path = Window;
+			sourceTree = "<group>";
+		};
+		82C5A6DE6207DDF42C5AFCBF /* Zode */ = {
+			isa = PBXGroup;
+			children = (
+				E04AC53BA30F8B6C7BCB14F9,
+				76049F7B4DDA479656FCF242,
+				4AE8669BA63C805D4661271B,
+				BB211BCDE58B7EFA04B3457B,
+				37DA477EAE11D408450B73CB,
+				AC533C0944E764A1399785B0,
+				1E133C98BFB91F0BAB493431,
+				6F57A37EBCCA4EBE5865BAAC,
+				A00DC81BB23D4D835004515A,
+				6D5127E75854E889EE5C1671,
+				58DADDFB10424FA799418B69,
+			);
+			path = Zode;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		F40317CF274D5BCB53B80CD0 /* Zode */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 31107D0D11ECF16E15FA6E65 /* Build configuration list for PBXNativeTarget "Zode" */;
+			buildPhases = (
+				BFF8C0EEBFDBA765D961B7AA /* Sources */,
+				D48C6C9579EC509703ABA7DC /* Frameworks */,
+				85EE40EDFB77C3A0B4B5E533 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Zode;
+			productName = Zode;
+			productReference = 2614177D603322213C40B500 /* Zode.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		740F2F9B0F4A11AD1C27130B /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					F40317CF274D5BCB53B80CD0 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = 9F6B1A7BCFF26D263B843F95 /* Build configuration list for PBXProject "Zode" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = CC5D242D023A9271190EA7C6;
+			productRefGroup = AE7805B56D1DCAFAA071416F /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F40317CF274D5BCB53B80CD0 /* Zode */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		85EE40EDFB77C3A0B4B5E533 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8D18F8A93C9AA2EF4BAB5096 /* Assets.xcassets in Resources */,
+				82D0A0A40BB6D75432CDF85F /* haptics.json in Resources */,
+				DA6B132052AE8A37F794F081 /* web in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		BFF8C0EEBFDBA765D961B7AA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DC86675F63E388F68C622C8F /* AppDelegate.swift in Sources */,
+				E975031B7EE64366016E23CA /* Attachment.swift in Sources */,
+				85B868DE02BE67EE467CA464 /* AttachmentService.swift in Sources */,
+				DF623B2F0970DFD0BD870716 /* AudioHapticSynth.swift in Sources */,
+				EF0A78C3E8A0E148F2BF7D8A /* CHapticEngine.swift in Sources */,
+				ADABEAF34F97D7F666DE7D30 /* HapticProgram.swift in Sources */,
+				FE00C58D8BAB513DE709436F /* HapticService.swift in Sources */,
+				A59CBEDBE8008D5FDDB5D032 /* IntentRouter.swift in Sources */,
+				0E7F26BC2ACDAFE3D6465193 /* JournalService.swift in Sources */,
+				3450DF3D3EE21922BE4CDFBE /* NotificationService.swift in Sources */,
+				C88DC8F14C4D07F4FE9FB3AB /* SearchService.swift in Sources */,
+				564129F604604290F5FF8E71 /* SelfTest.swift in Sources */,
+				5ECF1E056F954483ADBFB3AE /* ZodeApp.swift in Sources */,
+				FE821FE912B82DACE68C95C6 /* ZodeAppModel.swift in Sources */,
+				F74D9B0EF158514075B38DE3 /* ZodeBridge.swift in Sources */,
+				5B325D544F3D4230889865FD /* ZodeCommands.swift in Sources */,
+				EFC0FF2F660526289027E661 /* ZodeEntities.swift in Sources */,
+				2F70796B3530B051F48FE484 /* ZodeEnvelope.swift in Sources */,
+				0A939277F1F49768C78ADC08 /* ZodeIntents.swift in Sources */,
+				675B5CCA6007B3952B435F72 /* ZodeIntentsBridge.swift in Sources */,
+				82230739CFA3264EEF53E03A /* ZodeResizeEdge.swift in Sources */,
+				065BFB0AC979AF344049C14A /* ZodeResources.swift in Sources */,
+				5DDDA9739A4EEB5AA9C4E449 /* ZodeRootView.swift in Sources */,
+				9E2FD5055BF144AB4A00764E /* ZodeSchemeHandler.swift in Sources */,
+				64889C069D17D066BE951A1C /* ZodeWebView.swift in Sources */,
+				94ED22DB99FD71E9E3DC45FB /* ZodeWindow.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		184B519F8E1416CCE38CFFD7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = ("DEBUG=1", "$(inherited)");
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A824290273A346217D9BE6F4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		D33AAFE35EDBC07AD2F20989 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Zode/Zode.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "$(ZODE_TEAM_ID)";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Zode/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks");
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.zode.app;
+				PRODUCT_NAME = Zode;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		A4F6FDF00412DAC7A3965672 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Zode/Zode.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "$(ZODE_TEAM_ID)";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Zode/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks");
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.zode.app;
+				PRODUCT_NAME = Zode;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		9F6B1A7BCFF26D263B843F95 /* Build configuration list for PBXProject "Zode" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				184B519F8E1416CCE38CFFD7 /* Debug */,
+				A824290273A346217D9BE6F4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		31107D0D11ECF16E15FA6E65 /* Build configuration list for PBXNativeTarget "Zode" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D33AAFE35EDBC07AD2F20989 /* Debug */,
+				A4F6FDF00412DAC7A3965672 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 740F2F9B0F4A11AD1C27130B /* Project object */;
+}

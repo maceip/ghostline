@@ -62,9 +62,12 @@ export default function App() {
     : 'litert-lm · local (no key set)'
   const [runProgress, setRunProgress] = useState(41)
   const [runLabel, setRunLabel] = useState('m1_worker_1 · implementing fragments.auth in :ui')
-  const [accent, setAccent] = useState(ACCENTS[0])
-  const [theme, setTheme] = useState('dark')
-  const [density, setDensity] = useState(1) // high-DPI type scale
+  const accent = ACCENTS.find((a) => a.name === config.accentName) || ACCENTS[0]
+  const setAccent = (a) => setCfg({ accentName: a.name })
+  const theme = config.theme || 'dark'
+  const setTheme = (t) => setCfg({ theme: t })
+  const density = config.density || 1
+  const setDensity = (d) => setCfg({ density: d })
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false) // active pivot word morphs into the search cursor
   const [altHeld, setAltHeld] = useState(false) // key hints exist only while Alt is held…
@@ -253,6 +256,7 @@ export default function App() {
   function resolveGate(answer) {
     if (gateResolved) return false
     setGateResolved(answer)
+    window.zode?.haptic?.('select')?.catch?.(() => {})
     setAgents((as) => as.map((a) => (a.id === 'a6' ? { ...a, state: 'running', phase: answer === 'yes' ? 'rerunning :dev suite' : 'strict rerun' } : a)))
     pushActivity(answer === 'yes' ? 'gate resolved · MockPcr0Provider injected in :dev only' : 'gate resolved · strict PCR0 kept, dev suite stays red')
     return true
@@ -268,6 +272,7 @@ export default function App() {
   }
   /* hunk triage: mutate exactly one hunk's review state */
   function setHunkState(state, comment) {
+    window.zode?.haptic?.('select')?.catch?.(() => {})
     setChangeSets((css) => css.map((cs) => cs.id !== reviewSetId ? cs : {
       ...cs,
       files: cs.files.map((f) => f.name !== reviewFile ? f : {
@@ -282,7 +287,7 @@ export default function App() {
     if (here === 'settings' && key === 'r') {
       if (setDomain === 1) setCfg({ tilePolicy: { onFail: true, onAmbiguity: true, onBigDiff: true, bigDiffLines: 250, autoApproveUnder: 0 } })
       else if (setDomain === 2) setCfg({ gates: { strictPcr: true, haltOnMismatch: true, advTests: true } })
-      else if (setDomain === 4) setCfg({ motion: { tilt: true, spotlight: true, glow: true, shimmer: true, cascade: true } })
+      else if (setDomain === 4) setCfg({ accentName: 'magenta', theme: 'dark', density: 1, motion: { tilt: true, spotlight: true, glow: true, shimmer: true, cascade: true } })
       pushActivity('settings domain reset to defaults')
       return true
     }
@@ -544,6 +549,41 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gates.strictPcr])
   useEffect(() => () => timers.current.forEach(clearTimeout), [])
+  useEffect(() => {
+    const zode = window.zode
+    if (!zode) return undefined
+    const unsubs = [
+      zode.onAttachment?.((att) => {
+        const name = att?.name || 'attachment'
+        window.zode?.haptic?.('drop')?.catch?.(() => {})
+        pushActivity(`attached ${name} (${att?.source || 'drop'})`)
+        setDraft((d) => (d ? `${d} @${name}` : `inspect @${name}`))
+        setPromptOpen(true)
+        setPivot(PIVOTS.indexOf('conversation'))
+      }),
+      zode.onSearch?.(({ query: q }) => {
+        if (q) { setQuery(q); setSearchOpen(true) }
+      }),
+      zode.onDeepLink?.(({ url }) => {
+        const raw = String(url || '').replace(/^zode:\/\//i, '').split(/[/?#]/)[0].toLowerCase()
+        const idx = PIVOTS.indexOf(raw === 'agent' ? 'agents' : raw)
+        if (idx >= 0) { setZoom(1); setPivot(idx) }
+      }),
+      zode.onIntent?.(({ intent, payload }) => {
+        if (intent === 'zode.search' && payload?.query) { setQuery(String(payload.query)); setSearchOpen(true) }
+        else if (intent === 'zode.agent.newTask') {
+          if (payload?.prompt) setDraft(String(payload.prompt))
+          setPivot(PIVOTS.indexOf('conversation'))
+          setPromptOpen(true)
+        } else if (intent === 'zode.show' && payload?.view) {
+          const v = String(payload.view).toLowerCase()
+          const idx = PIVOTS.indexOf(v === 'agent' ? 'agents' : v)
+          if (idx >= 0) { setZoom(1); setPivot(idx) }
+        }
+      }),
+    ].filter(Boolean)
+    return () => unsubs.forEach((fn) => fn())
+  }, [])
 
   function pushActivity(what) { setActivity((a) => [{ when: 'now', what }, ...a].slice(0, 8)) }
 
@@ -581,6 +621,7 @@ export default function App() {
     setCursorId(`conv-turn:${existing.length + 1}`)
     setRunProgress(3); setRunLabel(`${engineSummary} · ${text.slice(0, 52)}`)
     pushActivity(`you asked: ${text.slice(0, 48)}`)
+    window.zode?.haptic?.('working', { loop: true })?.catch?.(() => {})
     const patchTurn = (patch) => setTurnsByThread((m) => {
       const ts = [...(m[id] || [])]
       if (!ts.length) return m
@@ -608,6 +649,9 @@ export default function App() {
       setRunProgress(100)
       setThreads((ts) => ts.map((t) => (t.id === id ? { ...t, status: 'complete' } : t)))
       pushActivity(`${result.label} finished${result.fallbackFrom ? ' (remote failed, answered locally)' : ''}`)
+      window.zode?.hapticStop?.('working')?.catch?.(() => {})
+      window.zode?.haptic?.('done')?.catch?.(() => {})
+      window.zode?.notify?.({ title: 'Zode', body: firstLine.slice(0, 72) })?.catch?.(() => {})
       maybePreloadLocal(config, result.engine)
     } catch (e) {
       const msg = String(e?.message || e)
@@ -617,6 +661,8 @@ export default function App() {
       })
       setThreads((ts) => ts.map((t) => (t.id === id ? { ...t, status: 'engine error' } : t)))
       pushActivity(`engine error: ${msg.slice(0, 60)}`)
+      window.zode?.hapticStop?.('working')?.catch?.(() => {})
+      window.zode?.haptic?.('error')?.catch?.(() => {})
     } finally {
       sendingRef.current = false
     }
@@ -769,8 +815,9 @@ export default function App() {
     <div className={`app ${motion.cascade ? "" : "m-nocascade "}${motion.shimmer ? "" : "m-noshimmer "}${motion.glow ? "" : "m-noglow "}${motion.tilt ? "" : "m-notilt"}`} style={style} data-theme={theme} onWheel={onWheel} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={(e) => { onTouchDone(e); onTouchEnd(e) }} onTouchCancel={onTouchDone}
       onMouseOver={(e) => { const n = e.target.closest?.('[data-cursor]'); if (n && n.dataset.cursor !== cursorId) setCursorId(n.dataset.cursor) }}
       onFocusCapture={(e) => { const n = e.target.closest?.('[data-cursor]'); if (n) setCursorId(n.dataset.cursor) }}>
-      <div className="topline" data-drag-zone="true" title="double-click to fill"
-        onDoubleClick={(e) => { if (e.target.closest('button,input,a')) return; if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else document.documentElement.requestFullscreen?.().catch(() => {}) }}>
+      <div className="topline" data-drag-zone="true" data-zode-drag-zone="true" title="drag to move · double-click to fill"
+        onPointerDown={(e) => { if (e.target.closest('button,input,a,[data-zode-drag-ignore]')) return; window.zode?.window?.dragStart?.(e.screenX, e.screenY) }}
+        onDoubleClick={(e) => { if (e.target.closest('button,input,a,[data-zode-drag-ignore]')) return; if (window.zode?.window?.toggleFillScreen) window.zode.window.toggleFillScreen().catch(() => {}); else if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else document.documentElement.requestFullscreen?.().catch(() => {}) }}>
         <img className="brandmark" src="/zode-mark.svg" alt="zode mark" />
         <span className="wordmark">zune <b>code</b></span>
         {/* Tier 1 · horizontal session strip (Cmd+1..9) — replaces vertical browser tabs */}

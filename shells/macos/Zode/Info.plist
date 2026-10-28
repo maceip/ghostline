@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Zode</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Zode — a Zune (2006-2011) × Microsoft Metro music and agent app.</string>
+	<!-- Contract §1.3 / §2 — the `zode://` deep link scheme. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>com.zode.app.deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>zode</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Contract §10 — the Spotlight / Handoff activities. -->
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>com.zode.app.search</string>
+		<string>com.zode.app.play</string>
+		<string>com.zode.app.library</string>
+	</array>
+	<!-- Dev mode (contract §1.3) loads the app from a local dev server, so
+	     local networking has to be allowed. Everything else keeps the default
+	     (TLS required). -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- The native file picker (contract §8) works on a sandboxed app too. -->
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Zode needs access to the files you attach.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Zode needs access to the files you attach.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Zode needs access to the files you attach.</string>
+</dict>
+</plist>

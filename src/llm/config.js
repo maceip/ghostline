@@ -14,6 +14,9 @@ export const DEFAULT_CONFIG = {
   bgPreload: true, // after the first successful remote turn, pull the local model in the background
   bridgeUrl: '', // optional native sidecar speaking BRIDGE.md (e.g. http://127.0.0.1:17861)
   remoteTimeoutMs: 45000, // remote gets this long before auto falls back to local
+  accentName: 'magenta',
+  theme: 'dark',
+  density: 1,
   motion: { tilt: true, spotlight: true, glow: true, shimmer: true, cascade: true }, // per-card effects still opt in individually
 }
 

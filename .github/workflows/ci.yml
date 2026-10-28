@@ -1,51 +1,371 @@
-# Adapted from maceip/zode's CI pattern (ci.yml web job): unit tests, a real
-# production build, then serve the artifact and fetch every asset the page
-# references so a green build actually ships a loadable app.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
-permissions:
-  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Never let a CI build try to sign anything.
+  ZODE_TEAM_ID: ""
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # The web app + the frozen shared contract. Runs everywhere, always.
+  # ---------------------------------------------------------------------------
   web:
-    name: web (test + build + serve)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    name: web app + contract
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-      - name: Install
+
+      - name: Install dependencies
         run: npm ci
-      - name: Tests (plain JS layers, no secrets)
-        # node --test over data/router/config. No live model or API key needed.
-        run: npm test
-      - name: Production build
-        run: npm run build
-      - name: Serve dist and fetch every referenced asset
+
+      - name: Shared contract assets are present
         run: |
-          npx vite preview --host 127.0.0.1 --port 4173 &
-          for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:4173/ && break; sleep 1; done
-          curl -sf http://127.0.0.1:4173/ | tee /tmp/index.html >/dev/null
-          grep -oE '(href|src)="[^"]+"' /tmp/index.html | sed -E 's/^(href|src)="//; s/"$//' | sort -u | while read -r asset; do
-            case "$asset" in
-              /*) url="http://127.0.0.1:4173$asset" ;;
-              *) url="http://127.0.0.1:4173/$asset" ;;
-            esac
-            code=$(curl -s -o /dev/null -w '%{http_code}' "$url")
-            echo "$code  $asset"
-            test "$code" = "200"
-          done
-      - name: Brand assets carried over verbatim
-        # The zode mark / icons are preserved assets; fail if they stop shipping.
-        run: |
+          test -f packages/shared/contract.md
+          test -f packages/shared/haptics.json
+          test -f packages/shared/tokens.css
           test -f public/zode-mark.svg
           test -f public/favicon.ico
           test -f public/zode-256.png
+          python3 -c "import json;d=json.load(open('packages/shared/haptics.json'));\
+          assert d['version']==1;\
+          assert 'done' in d['programs'], 'missing done program';\
+          assert 'working' in d['programs'], 'missing working program';\
+          print('haptics.json OK:', len(d['programs']), 'programs')"
+
+      - name: Every JS module parses
+        run: |
+          fail=0
+          while IFS= read -r -d '' f; do
+            node --check "$f" || { echo "PARSE FAIL: $f"; fail=1; }
+          done < <(find src tests -name '*.js' -o -name '*.mjs' -print0)
+          exit $fail
+
+      - name: Unit and contract tests
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Serve the built app and smoke-test every asset it references
+        run: |
+          npx vite preview --host 127.0.0.1 --port 4173 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:4173/ >/dev/null && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:4173/ >/dev/null || { echo "server never came up"; exit 1; }
+          curl -sf http://127.0.0.1:4173/ | tee /tmp/index.html >/dev/null
+          grep -oE '(href|src)="[^"]+"' /tmp/index.html \
+            | sed -E 's/^(href|src)="//; s/"$//' \
+            | grep -v '^https?://' \
+            | grep -v '^#' \
+            | sort -u \
+            | while read -r asset; do
+                code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:4173/${asset#/}")
+                echo "$code  $asset"
+                [ "$code" = "200" ] || exit 1
+              done
+
+      - name: The library is the same library on every platform
+        run: python3 scripts/export_library.py --check
+
+      - name: The release tooling is wired together
+        run: python3 scripts/verify_release.py
+
+  # ---------------------------------------------------------------------------
+  # Everything that does not need a Mac, a Windows box or an Android SDK.
+  # ---------------------------------------------------------------------------
+  checks:
+    name: repo checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: The full local suite
+        run: bash scripts/verify.sh
+
+      - name: Every shell script parses
+        run: |
+          fail=0
+          while IFS= read -r -d '' f; do
+            bash -n "$f" || { echo "SYNTAX FAIL: $f"; fail=1; }
+          done < <(find . -name '*.sh' -not -path './.git/*' -not -path './node_modules/*' -print0)
+          exit $fail
+
+  # ---------------------------------------------------------------------------
+  # Icons must be reproducible: regenerating them must not change the tree.
+  # ---------------------------------------------------------------------------
+  icons:
+    name: icons are reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Pillow
+        run: pip install --quiet -r icons/requirements.txt
+      - name: Regenerate and diff
+        run: |
+          python3 icons/make_icons.py
+          if ! git diff --quiet -- icons/; then
+            echo "icons/ is not reproducible — committed icons differ from freshly generated ones"
+            git diff --stat -- icons/
+            exit 1
+          fi
+          echo "icons reproducible"
+
+  # ---------------------------------------------------------------------------
+  # macOS shell — REAL Swift compilation on a real macOS runner.
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS shell (compile)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Build the web app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Stage the web app and regenerate the Xcode project
+        run: |
+          cd shells/macos
+          ./build.sh --stage-only
+
+      - name: Generate the Xcode project (must be deterministic)
+        run: |
+          cd shells/macos
+          python3 tools/generate_xcodeproj.py
+          shasum -a 256 Zode.xcodeproj/project.pbxproj
+          python3 tools/generate_xcodeproj.py
+          shasum -a 256 Zode.xcodeproj/project.pbxproj
+
+      - name: Validate the generated project structure
+        run: python3 shells/macos/tools/validate_pbxproj.py
+
+      - name: Parse every Swift source
+        run: |
+          fail=0
+          while IFS= read -r -d '' f; do
+            swiftc -parse "$f" || { echo "PARSE FAIL: $f"; fail=1; }
+          done < <(find shells/macos/Zode -name '*.swift' -print0)
+          exit $fail
+
+      - name: Every Swift file is in the Sources build phase
+        run: python3 shells/macos/tools/check_project_sources.py
+
+      - name: Build the app (unsigned)
+        run: |
+          cd shells/macos
+          xcodebuild \
+            -project Zode.xcodeproj \
+            -scheme Zode \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Info.plist and entitlements parse
+        run: |
+          plutil -lint shells/macos/Zode/Info.plist
+          plutil -lint shells/macos/Zode.entitlements
+
+      - name: The shell can start and finds its resources
+        run: |
+          APP=$(find "$HOME/Library/Developer/Xcode/DerivedData" shells/macos \
+                 -name "Zode.app" -type d -path "*Debug*" 2>/dev/null | head -1)
+          if [ -z "$APP" ]; then
+            echo "the built app was not found" >&2
+            exit 1
+          fi
+          echo "testing $APP"
+          "$APP/Contents/MacOS/Zode" --selftest
+          echo "the shell proved itself"
+
+  # ---------------------------------------------------------------------------
+  # Windows shell — REAL C# compilation on a real Windows runner.
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows shell (compile)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build the web app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Static contract validation
+        run: python3 shells/windows/tools/verify_shell.py
+
+      - name: Parse every C# source
+        run: bash scripts/check_csharp.sh
+
+      - name: Build the shell
+        run: |
+          cd shells/windows
+          dotnet build Zode.Shell/Zode.Shell.csproj -c Release -v minimal
+
+      - name: The shell can start and finds its resources
+        shell: pwsh
+        run: |
+          $out = "shells/windows/Zode.Shell/bin/Release/net10.0-windows10.0.26100.0"
+          Copy-Item -Recurse -Force dist "$out/web"
+          $exe = "$out/Zode.Shell.exe"
+          if (-not (Test-Path $exe)) { throw "the executable is missing: $exe" }
+          & $exe --selftest
+          if ($LASTEXITCODE -ne 0) { throw "the shell self test failed (exit $LASTEXITCODE)" }
+          Write-Host "the shell proved itself"
+
+      - name: App Actions and manifest are valid
+        run: |
+          python -c "import json;json.load(open('shells/windows/msix/appactions.json'));print('appactions.json OK')"
+          python -c "import xml.dom.minidom as m;m.parse('shells/windows/msix/Package.appxmanifest');print('Package.appxmanifest OK')"
+
+  # ---------------------------------------------------------------------------
+  # iOS — REAL Swift compilation on a macOS runner.
+  # ---------------------------------------------------------------------------
+  ios:
+    name: iOS client (compile)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Build the web app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Stage the web app and regenerate the Xcode project
+        run: |
+          cd mobile/ios
+          mkdir -p ZodeMobile/Resources/web
+          cp -R ../../dist/. ZodeMobile/Resources/web/
+          python3 tools/generate_xcodeproj.py
+
+      - name: Generate the Xcode project (must be deterministic)
+        run: |
+          cd mobile/ios
+          python3 tools/generate_xcodeproj.py
+          shasum -a 256 ZodeMobile.xcodeproj/project.pbxproj
+          python3 tools/generate_xcodeproj.py
+          shasum -a 256 ZodeMobile.xcodeproj/project.pbxproj
+
+      - name: Validate the generated project structure
+        run: python3 mobile/ios/tools/validate_pbxproj.py
+
+      - name: Every Swift file is in the Sources build phase
+        run: python3 mobile/ios/tools/check_project_sources.py
+
+      - name: Build for the simulator (unsigned)
+        run: |
+          cd mobile/ios
+          xcodebuild \
+            -project ZodeMobile.xcodeproj \
+            -scheme ZodeMobile \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+  # ---------------------------------------------------------------------------
+  # Android — REAL Gradle build.
+  # ---------------------------------------------------------------------------
+  android:
+    name: Android client (assemble)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Build the web app
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '12266719'
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+          accept-android-sdk-licenses: true
+
+      - name: Static validation
+        run: python3 mobile/android/tools/verify_android.py
+
+      - name: Restore the Gradle wrapper jar
+        run: |
+          cd mobile/android
+          gradle wrapper --gradle-version 8.11.1
+
+      - name: Assemble debug APK
+        run: |
+          cd mobile/android
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zode-android-debug
+          path: mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

@@ -1,0 +1,153 @@
+{
+  "$schema": "https://zode.dev/schemas/appactions-v1.json",
+  "version": 1,
+  "description": "Windows 11 App Actions for Zode. Every action maps 1:1 onto an intent name of the frozen native bridge contract (contract §4). The action names ARE the intent names, so the shell can route an activation without a translation table. Requires package identity (MSIX) — see msix/Package.appxmanifest and build-msix.ps1.",
+  "actions": [
+    {
+      "name": "zode.search",
+      "title": "Search the library",
+      "description": "Search the Zune library for a track, album, artist or playlist.",
+      "icon": "Assets\\Search.png",
+      "inputs": [
+        {
+          "name": "query",
+          "type": "Text",
+          "title": "Query",
+          "description": "What to look for.",
+          "required": true
+        }
+      ],
+      "invoke": {
+        "kind": "protocol",
+        "uri": "zode://search?q={query}"
+      }
+    },
+    {
+      "name": "zode.play",
+      "title": "Play",
+      "description": "Start playing a track, album, artist or playlist.",
+      "icon": "Assets\\Play.png",
+      "inputs": [
+        {
+          "name": "id",
+          "type": "Text",
+          "title": "Item id",
+          "description": "The id of the item to play.",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "type": "Text",
+          "title": "Item kind",
+          "description": "track | album | artist | playlist",
+          "required": true
+        }
+      ],
+      "invoke": {
+        "kind": "protocol",
+        "uri": "zode://play/{id}?kind={kind}"
+      }
+    },
+    {
+      "name": "zode.pause",
+      "title": "Pause",
+      "description": "Pause the current track.",
+      "icon": "Assets\\Pause.png",
+      "inputs": [],
+      "invoke": {
+        "kind": "protocol",
+        "uri": "zode://pause"
+      }
+    },
+    {
+      "name": "zode.next",
+      "title": "Next track",
+      "description": "Skip to the next track.",
+      "icon": "Assets\\Next.png",
+      "inputs": [],
+      "invoke": {
+        "kind": "protocol",
+        "uri": "zode://next"
+      }
+    },
+    {
+      "name": "zode.previous",
+      "title": "Previous track",
+      "description": "Skip back to the previous track.",
+      "icon": "Assets\\Previous.png",
+      "inputs": [],
+      "invoke": {
+        "kind": "protocol",
+        "uri": "zode://previous"
+      }
+    },
+    {
+      "name": "zode.agent.newTask",
+      "title": "New agent task",
+      "description": "Start a new agent task in Zode.",
+      "icon": "Assets\\Agent.png",
+      "inputs": [
+        {
+          "name": "prompt",
+          "type": "Text",
+          "title": "Prompt",
+          "description": "What the agent should do.",
+          "required": true
+        }
+      ],
+      "invoke": {
+        "kind": "protocol",
+        "uri": "zode://agent/newTask?prompt={prompt}"
+      }
+    },
+    {
+      "name": "zode.agent.stop",
+      "title": "Stop the agent",
+      "description": "Stop the running agent task.",
+      "icon": "Assets\\Stop.png",
+      "inputs": [],
+      "invoke": {
+        "kind": "protocol",
+        "uri": "zode://agent/stop"
+      }
+    },
+    {
+      "name": "zode.attach",
+      "title": "Attach files",
+      "description": "Hand one or more files to Zode.",
+      "icon": "Assets\\Attach.png",
+      "inputs": [
+        {
+          "name": "path",
+          "type": "Text",
+          "title": "File path",
+          "description": "The file that should be attached.",
+          "required": true
+        }
+      ],
+      "invoke": {
+        "kind": "protocol",
+        "uri": "zode://attach/{path}"
+      }
+    },
+    {
+      "name": "zode.show",
+      "title": "Show a view",
+      "description": "Navigate to a view of the app.",
+      "icon": "Assets\\Show.png",
+      "inputs": [
+        {
+          "name": "view",
+          "type": "Text",
+          "title": "View",
+          "description": "now-playing | collection | library | search | agent",
+          "required": true
+        }
+      ],
+      "invoke": {
+        "kind": "protocol",
+        "uri": "zode://show/{view}"
+      }
+    }
+  ]
+}

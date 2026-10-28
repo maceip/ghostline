@@ -1,0 +1,10 @@
+# The version of Pillow that the icons are generated with.
+#
+# CI regenerates the icons and fails if they differ from the committed ones,
+# so the renderer has to be pinned: a different Pillow rasterises the text of
+# the social preview a little differently and the PNG bytes change.
+#
+# Bump this only together with a regeneration of icons/:
+#     pip install -r icons/requirements.txt
+#     python3 icons/make_icons.py
+Pillow==12.2.0

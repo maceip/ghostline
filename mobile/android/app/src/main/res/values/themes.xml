@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The app draws its own UI with Compose, so the platform theme only has to
+    provide a dark canvas and no action bar. The colours come from
+    packages/shared/tokens.css.
+-->
+<resources>
+    <style name="Theme.Zode" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/zode_ink</item>
+        <item name="android:statusBarColor">@color/zode_ink</item>
+        <item name="android:navigationBarColor">@color/zode_ink</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

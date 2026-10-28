@@ -1,0 +1,170 @@
+/* =============================================================================
+   Zode design tokens — Zune (2006–2011) × Microsoft Metro
+   -----------------------------------------------------------------------------
+   One source of truth for the web app, the native shells' splash/background
+   colour, and the mobile apps. Values are plain CSS custom properties so that
+   the same file can be consumed by:
+     • the web app            (imported directly)
+     • the iOS app            (parsed at build time into a Swift token file)
+     • the Android app        (parsed at build time into a Compose theme)
+   ============================================================================= */
+
+:root {
+  /* ---- brand ------------------------------------------------------------ */
+  --zode-orange:        #ff4e00;   /* sampled from the app icon */
+  --zode-orange-bright: #ff6a26;
+  --zode-orange-deep:   #c93d00;
+  --zode-orange-ghost:  rgba(255, 78, 0, 0.14);
+
+  /* ---- surfaces --------------------------------------------------------- */
+  --zode-ink:      #141414;        /* dark canvas — Metro near-black        */
+  --zode-ink-2:    #1f1f1f;        /* raised card on dark                    */
+  --zode-ink-3:    #2b2b2b;        /* card on card / divider on dark         */
+  --zode-ink-4:    #3a3a3a;        /* hairlines on dark                      */
+  --zode-paper:    #f4f2ef;        /* light canvas — warm paper              */
+  --zode-paper-2:  #e5e1db;
+  --zode-paper-3:  #d2ccc3;
+  --zode-white:    #ffffff;
+
+  /* ---- text ------------------------------------------------------------- */
+  --zode-text:         #161616;    /* on light */
+  --zode-text-muted:   #6a6660;
+  --zode-text-invert:  #f7f5f2;    /* on dark  */
+  --zode-text-invert-muted: #9a968f;
+
+  /* ---- Metro accent set (Zune-era secondary palette) -------------------- */
+  --zode-accent-orange: #f25022;
+  --zode-accent-blue:   #00a0e1;
+  --zode-accent-green:  #a4c400;
+  --zode-accent-purple: #7a3e9d;
+  --zode-accent-teal:   #00aba9;
+  --zode-accent-yellow: #f2c80f;
+
+  /* ---- typography -------------------------------------------------------
+     Zune and Metro both shipped on Segoe UI. Selawik is Microsoft's metric-
+     compatible open replacement; the rest is a sane cross-platform stack. */
+  --font-ui: "Segoe UI", "Selawik", -apple-system, BlinkMacSystemFont,
+             "Helvetica Neue", "Noto Sans", "Liberation Sans", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", "SF Mono", "JetBrains Mono", "Roboto Mono",
+               Menlo, Consolas, monospace;
+
+  --type-display: 44px;   /* Metro hero — big, light weight                */
+  --type-title:   30px;
+  --type-subtitle:20px;
+  --type-body:    15px;
+  --type-label:   12px;
+  --type-micro:   10px;
+
+  --weight-light:  200;
+  --weight-regular:400;
+  --weight-semi:   600;
+  --weight-bold:   700;
+
+  --tracking-label: 0.14em;   /* Metro small-caps label tracking           */
+  --tracking-tight: -0.01em;
+
+  /* ---- metrics ---------------------------------------------------------- */
+  --drag-zone-height: 34px;   /* MUST match DRAG_ZONE_HEIGHT in the contract */
+  --gutter: 24px;
+  --card-radius: 2px;         /* Metro is square-cornered                 */
+  --tile-radius: 0px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* ---- motion -----------------------------------------------------------
+     Metro's "reveal" motion: fast out, gentle settle. */
+  --ease-reveal: cubic-bezier(0.1, 0.9, 0.2, 1);
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur-base: 220ms;
+  --dur-slow: 420ms;
+
+  /* ---- elevation -------------------------------------------------------- */
+  --shadow-card:  0 1px 0 rgba(255,255,255,0.06) inset, 0 8px 24px rgba(0,0,0,0.35);
+  --shadow-tile:  0 2px 14px rgba(0,0,0,0.45);
+}
+
+/* ---- light canvas -------------------------------------------------------- */
+.on-paper {
+  --zode-text: var(--zode-text);
+  background: var(--zode-paper);
+  color: var(--zode-text);
+}
+
+/* ---- dark canvas --------------------------------------------------------- */
+.on-ink {
+  background: var(--zode-ink);
+  color: var(--zode-text-invert);
+}
+
+/* ---- utilities ----------------------------------------------------------- */
+.u-label {
+  font-family: var(--font-ui);
+  font-size: var(--type-label);
+  font-weight: var(--weight-semi);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--zode-text-muted);
+}
+.on-ink .u-label { color: var(--zode-text-invert-muted); }
+
+.u-display {
+  font-family: var(--font-ui);
+  font-size: var(--type-display);
+  font-weight: var(--weight-light);
+  letter-spacing: var(--tracking-tight);
+  line-height: 1.05;
+}
+
+.u-title {
+  font-family: var(--font-ui);
+  font-size: var(--type-title);
+  font-weight: var(--weight-light);
+  letter-spacing: var(--tracking-tight);
+  line-height: 1.15;
+}
+
+.u-subtitle {
+  font-family: var(--font-ui);
+  font-size: var(--type-subtitle);
+  font-weight: var(--weight-regular);
+  line-height: 1.3;
+}
+
+.u-body {
+  font-family: var(--font-ui);
+  font-size: var(--type-body);
+  font-weight: var(--weight-regular);
+  line-height: 1.5;
+}
+
+.u-mono {
+  font-family: var(--font-mono);
+  font-size: var(--type-body);
+  font-variant-ligatures: none;
+}
+
+/* Square-cornered Metro tiles */
+.u-tile {
+  border-radius: var(--tile-radius);
+  background: var(--zode-ink-2);
+  box-shadow: var(--shadow-tile);
+  overflow: hidden;
+  position: relative;
+}
+
+/* The Zune "bracket" wordmark glyph, drawn in CSS to match the app icon. */
+.u-bracket { font-family: var(--font-mono); font-weight: var(--weight-bold); }
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 1ms;
+    --dur-base: 1ms;
+    --dur-slow: 1ms;
+  }
+}
