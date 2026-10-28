@@ -75,6 +75,10 @@ export default function App() {
   const setTheme = useCallback((t) => setCfg({ theme: t }), [setCfg])
   const density = config.density || 1
   const setDensity = useCallback((d) => setCfg({ density: d }), [setCfg])
+  /* The theme has to reach <html>. body paints the page background and the
+     inherited text colour out of --bg/--fg, and body sits outside .app — so with
+     the attribute only on .app the light theme rendered black-on-dark. */
+  useEffect(() => { document.documentElement.setAttribute('data-theme', theme) }, [theme])
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false) // active pivot word morphs into the search cursor
   const [altHeld, setAltHeld] = useState(false) // key hints exist only while Alt is held…

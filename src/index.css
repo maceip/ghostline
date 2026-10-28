@@ -40,7 +40,7 @@ button:hover { opacity:.85; } button:active { opacity:.65; }
 ::selection { background:var(--accent); color:#fff; }
 .mono { font-family:Consolas,"Cascadia Mono",monospace; }
 
-.app { height:100%; height:100dvh; display:flex; flex-direction:column; font-size:calc(15px * var(--scale)); overflow-x:clip; padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+.app { height:100%; height:100dvh; display:flex; flex-direction:column; font-size:calc(15px * var(--scale)); overflow-x:clip; background:var(--bg); color:var(--fg); padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 .onlynarrow { display:none; }
 
 /* ---- top line: wordmark + search. type only, no bar ---- */
