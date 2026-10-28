@@ -3,37 +3,48 @@
 // old fold — reimplemented in plain CSS + rAF-free pointer math so the laws hold:
 // zero radius, no blurred shadows, no gradients-as-chrome, type stays the surface.
 // Every effect is opt-in per card and globally toggleable in Settings.
+import { useMemo, useRef } from 'react'
+
+const NO_HANDLERS = {}
 
 /**
  * WP-style press tilt + grid-snapped square spotlight.
  * Spread the returned handlers on any element with class "tiltcard" and/or "spotcard".
  * Writes styles imperatively (no re-render per pointer move).
+ *
+ * The returned object is referentially stable: it is spread onto every tilt card
+ * in the app, and a fresh object each render would defeat the memoized pages.
  */
 export function useTiltSpotlight({ tilt = false, spotlight = false } = {}) {
-  if (!tilt && !spotlight) return {}
-  const apply = (e) => {
-    const el = e.currentTarget
-    const r = el.getBoundingClientRect()
-    const px = (e.clientX - r.left) / r.width
-    const py = (e.clientY - r.top) / r.height
-    if (spotlight) {
-      const snap = 12
-      el.style.setProperty('--mx', `${Math.round((e.clientX - r.left) / snap) * snap - 60}px`)
-      el.style.setProperty('--my', `${Math.round((e.clientY - r.top) / snap) * snap - 60}px`)
-      el.style.setProperty('--spot', '1')
+  const opts = useRef({ tilt, spotlight })
+  opts.current.tilt = tilt
+  opts.current.spotlight = spotlight
+  const handlers = useMemo(() => {
+    const apply = (e) => {
+      const el = e.currentTarget
+      const r = el.getBoundingClientRect()
+      const px = (e.clientX - r.left) / r.width
+      const py = (e.clientY - r.top) / r.height
+      if (opts.current.spotlight) {
+        const snap = 12
+        el.style.setProperty('--mx', `${Math.round((e.clientX - r.left) / snap) * snap - 60}px`)
+        el.style.setProperty('--my', `${Math.round((e.clientY - r.top) / snap) * snap - 60}px`)
+        el.style.setProperty('--spot', '1')
+      }
+      if (opts.current.tilt) {
+        const rx = (0.5 - py) * 7 // WP TiltEffect territory: max ~7deg
+        const ry = (px - 0.5) * 7
+        el.style.transform = `perspective(700px) rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg)`
+      }
     }
-    if (tilt) {
-      const rx = (0.5 - py) * 7 // WP TiltEffect territory: max ~7deg
-      const ry = (px - 0.5) * 7
-      el.style.transform = `perspective(700px) rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg)`
+    const clear = (e) => {
+      const el = e.currentTarget
+      if (opts.current.tilt) el.style.transform = ''
+      if (opts.current.spotlight) el.style.setProperty('--spot', '0')
     }
-  }
-  const clear = (e) => {
-    const el = e.currentTarget
-    if (tilt) el.style.transform = ''
-    if (spotlight) el.style.setProperty('--spot', '0')
-  }
-  return { onPointerMove: apply, onPointerDown: apply, onPointerLeave: clear, onPointerUp: clear }
+    return { onPointerMove: apply, onPointerDown: apply, onPointerLeave: clear, onPointerUp: clear }
+  }, [])
+  return (tilt || spotlight) ? handlers : NO_HANDLERS
 }
 
 /**

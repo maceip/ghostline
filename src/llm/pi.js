@@ -9,20 +9,50 @@ import { localStream } from './litert.js'
 let piPromise = null
 export function loadPi() {
   piPromise ??= (async () => {
-    const [core, anthropic, openai, ai] = await Promise.all([
+    const [core, ai] = await Promise.all([
       import('@mariozechner/pi-agent-core'),
-      import('@mariozechner/pi-ai/anthropic'),
-      import('@mariozechner/pi-ai/openai-completions'),
       import('@mariozechner/pi-ai'),
     ])
     return {
       Agent: core.Agent,
-      streamSimpleAnthropic: anthropic.streamSimpleAnthropic,
-      streamSimpleOpenAICompletions: openai.streamSimpleOpenAICompletions,
       createAssistantMessageEventStream: ai.createAssistantMessageEventStream,
     }
   })()
   return piPromise
+}
+
+/* The provider SDKs are the one part of the pi graph the app does not always need:
+   the Anthropic module is ~104 KB and the OpenAI-compatible module ~124 KB of
+   parsed JS, and exactly one of them is ever used. They are loaded per provider
+   and memoised, so switching providers in settings fetches the other one on
+   demand instead of paying for both on every first turn. */
+const providerPromises = new Map()
+export function loadPiProvider(provider) {
+  const key = provider === 'openai' ? 'openai' : 'anthropic'
+  let p = providerPromises.get(key)
+  if (!p) {
+    p = key === 'openai'
+      ? import('@mariozechner/pi-ai/openai-completions').then((m) => m.streamSimpleOpenAICompletions)
+      : import('@mariozechner/pi-ai/anthropic').then((m) => m.streamSimpleAnthropic)
+    providerPromises.set(key, p)
+  }
+  return p
+}
+
+/* Warm the engine graph while the user is still reading the shell: the first
+   turn then starts streaming instead of downloading and parsing ~1 MB of JS.
+   Fire-and-forget; a failure here is harmless because send() loads on demand. */
+export function warmPi(config) {
+  const warm = () => {
+    loadPi().catch(() => {})
+    loadPiProvider(config.provider).catch(() => {})
+  }
+  if (typeof requestIdleCallback === 'function') {
+    const id = requestIdleCallback(warm, { timeout: 5000 })
+    return () => cancelIdleCallback?.(id)
+  }
+  const t = setTimeout(warm, 1500)
+  return () => clearTimeout(t)
 }
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
@@ -52,8 +82,7 @@ export function localModel(config) {
 }
 
 export async function remoteStreamFn(config) {
-  const pi = await loadPi()
-  return config.provider === 'openai' ? pi.streamSimpleOpenAICompletions : pi.streamSimpleAnthropic
+  return loadPiProvider(config.provider)
 }
 
 /** LiteRT-LM as a pi StreamFn. Text only: small local models don't get tools in v1. */

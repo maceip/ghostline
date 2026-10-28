@@ -7,9 +7,16 @@ import {
 import { loadConfig, saveConfig } from './llm/config.js'
 import { runTurn, historyFromTurns } from './llm/router.js'
 import { buildRunners, maybePreloadLocal } from './llm/engines.js'
-import { onLocalStatus, getLocalStatus, ensureLocal } from './llm/litert.js'
-import { bridgeHealthy } from './llm/bridge.js'
+import { onLocalStatus, getLocalStatus } from './llm/litert.js'
 import { useTiltSpotlight } from './motion.jsx'
+import { warmPi } from './llm/pi.js'
+import HubPage from './pages/HubPage.jsx'
+import ConversationPage from './pages/ConversationPage.jsx'
+import CollectionPage from './pages/CollectionPage.jsx'
+import ReviewPage from './pages/ReviewPage.jsx'
+import TerminalPage from './pages/TerminalPage.jsx'
+import AgentsPage from './pages/AgentsPage.jsx'
+import SettingsPage from './pages/SettingsPage.jsx'
 import {
   fmtTokens, parseCeiling, fleetCounts as deriveFleet, fleetVelocity, epochTurnCounts,
   facetPartition, changeSetForThread, changeSetTotals, tileForThread,
@@ -48,13 +55,13 @@ export default function App() {
   const [draft, setDraft] = useState('')
   const [config, setConfig] = useState(loadConfig)
   /* (tile flip retired: f is the gutter jump now — see SPEC.md §4) */
-  const motion = { tilt: true, spotlight: true, glow: true, shimmer: true, cascade: true, ...(config.motion || {}) }
+  const motion = useMemo(() => ({ tilt: true, spotlight: true, glow: true, shimmer: true, cascade: true, ...(config.motion || {}) }), [config.motion])
   const tiltSpot = useTiltSpotlight({ tilt: motion.tilt, spotlight: motion.spotlight })
   const [localStatus, setLocalStatus] = useState(getLocalStatus)
   const [bridgeStatus, setBridgeStatus] = useState('not checked')
   useEffect(() => onLocalStatus(setLocalStatus), [])
   useEffect(() => { saveConfig(config) }, [config])
-  const setCfg = (patch) => setConfig((c) => ({ ...c, ...patch }))
+  const setCfg = useCallback((patch) => setConfig((c) => ({ ...c, ...patch })), [])
   const engineSummary = config.mode === 'demo' ? 'demo · simulated'
     : config.mode === 'local' ? 'litert-lm · local'
     : config.bridgeUrl ? 'native bridge'
@@ -63,11 +70,11 @@ export default function App() {
   const [runProgress, setRunProgress] = useState(41)
   const [runLabel, setRunLabel] = useState('m1_worker_1 · implementing fragments.auth in :ui')
   const accent = ACCENTS.find((a) => a.name === config.accentName) || ACCENTS[0]
-  const setAccent = (a) => setCfg({ accentName: a.name })
+  const setAccent = useCallback((a) => setCfg({ accentName: a.name }), [setCfg])
   const theme = config.theme || 'dark'
-  const setTheme = (t) => setCfg({ theme: t })
+  const setTheme = useCallback((t) => setCfg({ theme: t }), [setCfg])
   const density = config.density || 1
-  const setDensity = (d) => setCfg({ density: d })
+  const setDensity = useCallback((d) => setCfg({ density: d }), [setCfg])
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false) // active pivot word morphs into the search cursor
   const [altHeld, setAltHeld] = useState(false) // key hints exist only while Alt is held…
@@ -75,9 +82,24 @@ export default function App() {
   const [cursorId, setCursorId] = useState(null) // spatial keyboard cursor: data-cursor id in the active page
   const [selectedAgentId, setSelectedAgentId] = useState('a1')
   const [turnsByThread, setTurnsByThread] = useState(() => savedSession?.turnsByThread || seedTurns)
-  /* sessions are durable: threads + turns survive reload (pi gets the same transcript as history) */
+  /* sessions are durable: threads + turns survive reload (pi gets the same transcript as history).
+     Written on a debounce, not on every state change: a streamed answer changes state
+     once per token, and serialising the whole transcript on each one blocks the main
+     thread for the length of the session. Diagnostics are capped so a long run cannot
+     grow the payload without bound. */
   useEffect(() => {
-    try { localStorage.setItem(SESSION_KEY, JSON.stringify({ threads, turnsByThread, threadId })) } catch { /* quota */ }
+    const t = setTimeout(() => {
+      try {
+        const trimmed = {}
+        for (const [tid, ts] of Object.entries(turnsByThread)) {
+          trimmed[tid] = ts.map((tn) => (tn.trace || tn.stdout
+            ? { ...tn, trace: tn.trace?.slice(-60), stdout: tn.stdout?.slice(-60) }
+            : tn))
+        }
+        localStorage.setItem(SESSION_KEY, JSON.stringify({ threads, turnsByThread: trimmed, threadId }))
+      } catch { /* quota */ }
+    }, 600)
+    return () => clearTimeout(t)
   }, [threads, turnsByThread, threadId])
   const [selectedTurn, setSelectedTurn] = useState(3) // board · turn 04 (the running one)
   const [promptOpen, setPromptOpen] = useState(false) // i — borderless prompt at the top of col 3
@@ -93,8 +115,8 @@ export default function App() {
   const [jumpHint, setJumpHint] = useState(null) // f — two-letter gutter jump badges (string prefix while armed)
   const [splitTurn, setSplitTurn] = useState(null) // v — Z3 pin split: turn index pinned beside the active one
   const [setDomain, setSetDomain] = useState(0) // settings col 1 selection
-  const tilePolicy = { onFail: true, onAmbiguity: true, onBigDiff: true, bigDiffLines: 250, autoApproveUnder: 0, ...(config.tilePolicy || {}) }
-  const gates = { strictPcr: true, haltOnMismatch: true, advTests: true, ...(config.gates || {}) }
+  const tilePolicy = useMemo(() => ({ onFail: true, onAmbiguity: true, onBigDiff: true, bigDiffLines: 250, autoApproveUnder: 0, ...(config.tilePolicy || {}) }), [config.tilePolicy])
+  const gates = useMemo(() => ({ strictPcr: true, haltOnMismatch: true, advTests: true, ...(config.gates || {}) }), [config.gates])
   /* phone drill-in: at ≤760px each matrix column is its own page (Dorado-HD detail scaffold).
      levels are inert on desktop — the ≤760 CSS is the only thing that reads them. */
   const [narrow, setNarrow] = useState(() => window.innerWidth <= 760)
@@ -149,7 +171,7 @@ export default function App() {
   const wheelLock = useRef(0)
   const thread = threads.find((t) => t.id === threadId) || threads[0]
   const file = files.find((f) => f.name === fileName) || files[0]
-  const runningAgents = agents.filter((a) => a.state === 'running')
+  const runningAgents = useMemo(() => agents.filter((a) => a.state === 'running'), [agents])
 
   /* ---- pivots: active header sits on the left margin, the rest bleed off-edge ---- */
   const [pivotShift, setPivotShift] = useState(0)
@@ -549,6 +571,9 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gates.strictPcr])
   useEffect(() => () => timers.current.forEach(clearTimeout), [])
+  /* Warm the engine graph while the shell sits idle: the first turn then starts
+     streaming instead of downloading and parsing ~1 MB of JS on the critical path. */
+  useEffect(() => warmPi(config), [config.provider])
   useEffect(() => {
     const zode = window.zode
     if (!zode) return undefined
@@ -606,6 +631,13 @@ export default function App() {
      bridge -> remote (pi agent loop + workspace tools) -> LiteRT-LM local on error. */
   async function send() {
     const text = draft.trim(); if (!text || sendingRef.current) return
+    /* ! escapes to the pty: the rest of the line is a shell command, not a prompt. */
+    if (text.startsWith('!')) {
+      const cmd = text.slice(1).trim()
+      setDraft('')
+      if (cmd) { runTerm(cmd); goPivot(PIVOTS.indexOf('terminal')) }
+      return
+    }
     sendingRef.current = true
     setDraft('')
     setPromptOpen(false)
@@ -621,6 +653,12 @@ export default function App() {
     setCursorId(`conv-turn:${existing.length + 1}`)
     setRunProgress(3); setRunLabel(`${engineSummary} · ${text.slice(0, 52)}`)
     pushActivity(`you asked: ${text.slice(0, 48)}`)
+    /* @mentions resolve against the workspace and ride along as engine context. */
+    const refs = resolveMentions(text)
+    const prompt = refs.length
+      ? `${text}\n\n[referenced]\n${refs.map((r) => `- ${r.kind}: ${r.name} — ${r.detail}`).join('\n')}`
+      : text
+    if (refs.length) pushActivity(`referenced ${refs.map((r) => r.name).join(', ')}`)
     window.zode?.haptic?.('working', { loop: true })?.catch?.(() => {})
     const patchTurn = (patch) => setTurnsByThread((m) => {
       const ts = [...(m[id] || [])]
@@ -628,18 +666,34 @@ export default function App() {
       ts[ts.length - 1] = { ...ts[ts.length - 1], ...(typeof patch === 'function' ? patch(ts[ts.length - 1]) : patch) }
       return { ...m, [id]: ts }
     })
+    /* Coalesce the token stream. The provider emits chunks far faster than anyone
+       reads them, and flushing every one of them re-rendered the whole app and
+       rewrote the session snapshot. One flush every 50ms reads as smooth and is
+       roughly 30x cheaper. */
+    let tokenText = ''
+    let tokenTimer = 0
+    const flushTokens = () => {
+      tokenTimer = 0
+      if (!tokenText) return
+      const text = tokenText
+      tokenText = ''
+      patchTurn({ synthesis: text, full: text })
+      setRunProgress(Math.min(96, 4 + Math.ceil(text.length / 14)))
+    }
+    const stopTokens = () => { if (tokenTimer) { clearTimeout(tokenTimer); tokenTimer = 0 } tokenText = '' }
     try {
       const runners = buildRunners(config, { files, folders, changeSets }, agentReply)
       const result = await runTurn({
-        config, prompt: text, history, runners,
+        config, prompt, history, runners,
         hooks: {
           sessionId: id,
           onEngine: (name) => patchTurn({ engine: name }),
-          onToken: (soFar) => { patchTurn({ synthesis: soFar, full: soFar }); setRunProgress(Math.min(96, 4 + Math.ceil(soFar.length / 14))) },
+          onToken: (soFar) => { tokenText = soFar; if (!tokenTimer) tokenTimer = setTimeout(flushTokens, 50) },
           onTrace: (line) => patchTurn((t) => ({ trace: [...(t.trace || []), line] })),
           onStatus: (line) => patchTurn((t) => ({ trace: [...(t.trace || []), line] })),
         },
       })
+      stopTokens()
       const firstLine = result.text.split('\n').find((l) => l.trim()) || 'complete'
       patchTurn({
         actor: result.label, engine: result.label, synthesis: result.text, full: result.text,
@@ -654,6 +708,7 @@ export default function App() {
       window.zode?.notify?.({ title: 'Zode', body: firstLine.slice(0, 72) })?.catch?.(() => {})
       maybePreloadLocal(config, result.engine)
     } catch (e) {
+      stopTokens()
       const msg = String(e?.message || e)
       patchTurn({
         actor: 'engine error', engine: 'error', synthesis: `No engine could answer.\n${msg}\n\nFix it in settings: add an API key (anthropic / openai), start the native bridge, or load the local LiteRT-LM model. Mode is currently "${config.mode}".`,
@@ -664,6 +719,7 @@ export default function App() {
       window.zode?.hapticStop?.('working')?.catch?.(() => {})
       window.zode?.haptic?.('error')?.catch?.(() => {})
     } finally {
+      stopTokens()
       sendingRef.current = false
     }
   }
@@ -754,11 +810,11 @@ export default function App() {
   const showHints = altHeld || helpOn
 
   /* ---- derivations: everything below traces to live state via derive.js ---- */
-  const facets = facetPartition(turns)
+  const facets = useMemo(() => facetPartition(turns), [turns])
   const promptTurns = facets.prompts
   const decisionTurns = facets.decisions
-  const sessionChangeSet = changeSetForThread(thread, changeSets) || reviewSet
-  const sessionHunks = sessionChangeSet.files.flatMap((f) => f.hunks.map((h) => ({ ...h, file: f.name })))
+  const sessionChangeSet = useMemo(() => changeSetForThread(thread, changeSets) || reviewSet, [thread, changeSets, reviewSet])
+  const sessionHunks = useMemo(() => sessionChangeSet.files.flatMap((f) => f.hunks.map((h) => ({ ...h, file: f.name }))), [sessionChangeSet])
   const facetCounts = {
     all: turns.length,
     prompts: facets.prompts.length,
@@ -767,7 +823,7 @@ export default function App() {
     pty: facets.pty.length,
     artifacts: [...new Set(turns.flatMap((t) => t.artifacts || []))].length,
   }
-  const fleetCounts = deriveFleet(agents)
+  const fleetCounts = useMemo(() => deriveFleet(agents), [agents])
   const fleetTotal = Math.max(1, agents.length)
   const fleetSegs = [
     { k: 'running', n: fleetCounts.running, c: 'var(--accent)' },
@@ -781,10 +837,10 @@ export default function App() {
   const suitesTotal = agents.reduce((n, a) => n + (a.total || 0), 0)
   const allTurnsCount = Object.values(turnsByThread).reduce((n, ts) => n + ts.length, 0)
   /* halt-on-mismatch off = the gate warns (amber) instead of holding the merge (accent) */
-  const effectivePolicy = gates.haltOnMismatch ? tilePolicy : { ...tilePolicy, onFail: false, onAmbiguity: false }
+  const effectivePolicy = useMemo(() => (gates.haltOnMismatch ? tilePolicy : { ...tilePolicy, onFail: false, onAmbiguity: false }), [gates.haltOnMismatch, tilePolicy])
   const gateBlocking = gateOpen && gates.haltOnMismatch && gates.advTests
-  const tileCtx = { agents, changeSets, gate: seedGate, gateOpen }
-  const threadTiles = new Map(threads.map((t) => [t.id, tileForThread(t, tileCtx)]))
+  const tileCtx = useMemo(() => ({ agents, changeSets, gate: seedGate, gateOpen }), [agents, changeSets, gateOpen])
+  const threadTiles = useMemo(() => new Map(threads.map((t) => [t.id, tileForThread(t, tileCtx)])), [threads, tileCtx])
   const sessionTag = (t) => {
     const tile = threadTiles.get(t.id)
     if (tile?.phase === 'blocked') return gateBlocking ? '[1 BLOCKED]' : '[GATE · WARN]'
@@ -792,9 +848,9 @@ export default function App() {
     if (tile) return '[RUN]'
     return /review/.test(t.status) ? '[REVIEW]' : '[IDLE]'
   }
-  const tiledThreads = threads.filter((t) => threadTiles.get(t.id)).slice(0, 8)
-  const idleThreads = threads.filter((t) => !threadTiles.get(t.id))
-  const epochCounts = epochTurnCounts(turnsByThread.board || [])
+  const tiledThreads = useMemo(() => threads.filter((t) => threadTiles.get(t.id)).slice(0, 8), [threads, threadTiles])
+  const idleThreads = useMemo(() => threads.filter((t) => !threadTiles.get(t.id)), [threads, threadTiles])
+  const epochCounts = useMemo(() => epochTurnCounts(turnsByThread.board || []), [turnsByThread])
   const activeEpoch = seedEpochs.find((e) => e.n === (activeTurn?.epoch || 6)) || seedEpochs[seedEpochs.length - 1]
   const facetTurns = facets[facet] || facets.all
   /* Z0 treemap: block area is proportional to real weight (turns, files, hunks, workers) */
@@ -810,6 +866,92 @@ export default function App() {
     { badge: 't', id: 'e2e', title: 'e2e demo', weight: (turnsByThread.e2e || []).length, sub: 'complete · 6d', go: () => openThread('e2e') },
   ]
   const mapMaxWeight = Math.max(...mapBlocks.map((b) => b.weight), 1)
+
+  /* ---- stable action surface ---------------------------------------------------
+     The seven pivot pages are memoized components. Every handler they receive must
+     keep its identity across renders, or React re-renders the page anyway — and the
+     1.6s fleet tick would take the whole app down with it. These wrappers never
+     change identity; the closures behind them read live state through `live`. */
+  const live = useRef({})
+  live.current = {
+    openThread, openFile, goPivot, resolveGate, toggleAgent, killAgent, pushActivity, newThread,
+    togglePin, sendInstruction, jumpToEpoch, setHunkState, scrollPayloadIntoView, runTerm, send,
+    setPromptOpen, setZoom, setSelectedAgentId, setAgentsLevel, setEpochGrid, setReviewSetId,
+    setReviewFile, setSelectedTurn, setThreadId, setThreads, setDraft, setRunProgress, setRunLabel,
+    setInstructOpen, setBridgeStatus, composerKey, setConvLevel, setRevLevel, setColLevel,
+    setFolder, setFileName, setTermInput, setSearchOpen, setQuery, setFacet, setSplitTurn,
+    setSetDomain, setCfg, setAccent, setTheme, setDensity, setGateResolved, setTurnsByThread,
+    setAgents, setActivity, setChangeSets, setCursorId,
+  }
+  const actions = useMemo(() => {
+    const out = {}
+    for (const k of Object.keys(live.current)) out[k] = (...args) => live.current[k]?.(...args)
+    return out
+  }, [])
+
+  /* ---- composer affixes --------------------------------------------------------
+     The composer advertised "@ to mention", "/ for actions", ": for command" and
+     "! for raw shell" and implemented none of them. Now it does:
+       /   opens the command registry — pty commands and app actions
+       !   runs the rest of the line in the pty
+       @   mentions a file, an agent or a thread by name                        */
+  const CMD_LIST = useMemo(() => [
+    { id: 'new', label: 'new conversation', group: 'action', run: () => actions.newThread() },
+    { id: 'review', label: 'jump to review diff', group: 'action', run: () => actions.goPivot(PIVOTS.indexOf('review')) },
+    { id: 'collection', label: 'open collection', group: 'action', run: () => actions.goPivot(PIVOTS.indexOf('collection')) },
+    { id: 'agents', label: 'open agents pivot', group: 'action', run: () => actions.goPivot(PIVOTS.indexOf('agents')) },
+    { id: 'terminal', label: 'open terminal', group: 'action', run: () => actions.goPivot(PIVOTS.indexOf('terminal')) },
+    { id: 'map', label: 'semantic zoom map · Z0', group: 'action', run: () => actions.setZoom(0) },
+    { id: 'gate-yes', label: 'resolve gate · yes', group: 'action', run: () => actions.resolveGate('yes') },
+    { id: 'gate-no', label: 'resolve gate · no', group: 'action', run: () => actions.resolveGate('no') },
+    { id: 'shell-help', label: 'pty · help', group: 'pty', run: () => { actions.runTerm('help'); actions.goPivot(PIVOTS.indexOf('terminal')) } },
+    { id: 'shell-test', label: 'pty · test', group: 'pty', run: () => { actions.runTerm('test'); actions.goPivot(PIVOTS.indexOf('terminal')) } },
+    { id: 'shell-build', label: 'pty · build', group: 'pty', run: () => { actions.runTerm('build'); actions.goPivot(PIVOTS.indexOf('terminal')) } },
+    { id: 'shell-status', label: 'pty · status', group: 'pty', run: () => { actions.runTerm('status'); actions.goPivot(PIVOTS.indexOf('terminal')) } },
+    { id: 'shell-clear', label: 'pty · clear', group: 'pty', run: () => { actions.runTerm('clear'); actions.goPivot(PIVOTS.indexOf('terminal')) } },
+    { id: 'shell-whoami', label: 'pty · whoami', group: 'pty', run: () => { actions.runTerm('whoami'); actions.goPivot(PIVOTS.indexOf('terminal')) } },
+  ], [actions])
+
+  const cmdMode = /^\s*\//.test(draft)
+  const cmdHits = useMemo(() => {
+    if (!cmdMode) return []
+    const q = draft.replace(/^\s*\//, '').trim().toLowerCase()
+    return q ? CMD_LIST.filter((c) => c.label.toLowerCase().includes(q)) : CMD_LIST
+  }, [cmdMode, draft, CMD_LIST])
+  const mentions = useMemo(() => resolveMentions(draft), [draft, agents, threads])
+
+  function runCommand(cmd) {
+    setDraft('')
+    cmd.run()
+    if (cmd.group !== 'pty') pushActivity(`command · ${cmd.label}`)
+  }
+
+  /* @name resolves against the workspace: files first, then agents, then threads. */
+  function resolveMentions(text) {
+    const out = []
+    for (const m of String(text).matchAll(/@([\w.\-/]+)/g)) {
+      const tok = m[1].toLowerCase()
+      const f = files.find((x) => x.name.toLowerCase() === tok || x.name.toLowerCase().includes(tok))
+      if (f) { out.push({ kind: 'file', name: f.name, detail: `${f.folder} · ${f.lines} lines · ${f.lang}` }); continue }
+      const a = agents.find((x) => x.name.toLowerCase() === tok || x.name.toLowerCase().includes(tok))
+      if (a) { out.push({ kind: 'agent', name: a.name, detail: a.task }); continue }
+      const th = threads.find((x) => x.title.toLowerCase().includes(tok))
+      if (th) out.push({ kind: 'thread', name: th.title, detail: `${th.project} · ${th.age}` })
+    }
+    return out
+  }
+
+  /* Enter in the composer: a command line runs the top match, anything else goes
+     to the engine. The pty escape (!) is handled in send(). */
+  function composerKey(e) {
+    if (e.key !== 'Enter' || e.shiftKey) return
+    e.preventDefault()
+    if (cmdMode) {
+      if (cmdHits.length) runCommand(cmdHits[0])
+      return
+    }
+    send()
+  }
 
   return (
     <div className={`app ${motion.cascade ? "" : "m-nocascade "}${motion.shimmer ? "" : "m-noshimmer "}${motion.glow ? "" : "m-noglow "}${motion.tilt ? "" : "m-notilt"}`} style={style} data-theme={theme} onWheel={onWheel} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={(e) => { onTouchDone(e); onTouchEnd(e) }} onTouchCancel={onTouchDone}
@@ -881,744 +1023,78 @@ export default function App() {
       <div className="viewport">
         <div className="canvas" style={{ transform: `translateX(${-pivot * 100}%)` }}>
           {/* ============ HUB ============ */}
-          <section className={pivot === 0 ? "page isactive" : "page"} aria-label="hub">
-            <div className="hub" data-cascade>
-              <div>
-                <p className="label">active workstreams <span className="n">{tiledThreads.length} tiles · cap 8</span></p>
-                {/* polymorphic telemetry tiles: only active / staged / blocked workstreams earn a square.
-                    the big numeral changes meaning by phase; blocked goes solid accent with inline [y]/[n]. */}
-                <div className="tilegrid">
-                  {tiledThreads.map((t) => {
-                    const tile = threadTiles.get(t.id)
-                    const level = escalationLevel(tile, effectivePolicy)
-                    const blocked = tile.phase === 'blocked'
-                    return (
-                      <div key={t.id} className={`tile tile-${level === 'accent' ? 'blocked' : level === 'amber' ? 'amber' : tile.phase} tiltcard spotcard`} {...tiltSpot}>
-                        <button className="tileface" data-cursor={`hub-pin:${t.id}`} onClick={() => openThread(t.id)}>
-                          <span className="tiletop"><span>{blocked ? `${t.scope} · ${level === 'accent' ? 'BLOCK' : 'GATE'}` : t.scope}</span><span>{blocked ? seedGate.age : tile.phase === 'ready' ? 'READY' : t.age}</span></span>
-                          <span className="tilebig">{tile.big}</span>
-                          <span className="tilesub">{tile.sub}</span>
-                          <span className="tiletitle">{t.title.replace(/ UI Enhancement| Verification/g, '')}</span>
-                          <span className="tiletail">{tile.tail}</span>
-                          <span className="tileprog"><i style={{ width: `${tile.progress}%` }} /></span>
-                        </button>
-                        {blocked && (
-                          <span className="tileyn">
-                            <button onClick={() => resolveGate('yes')}>[y] yes</button>
-                            <button onClick={() => resolveGate('no')}>[n] no</button>
-                            <button onClick={() => { openThread(t.id); setZoom(3) }}>[enter]</button>
-                          </span>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-                {gateResolved && <p className="dim" style={{ fontWeight: 300 }}>gate resolved · {gateResolved === 'yes' ? 'mock PCR0 in :dev only' : 'strict kept'} — verifier rerunning</p>}
-                <p className="label" style={{ marginTop: 30 }}>idle conversations <span className="n">no tile</span></p>
-                <div className="rows">
-                  {idleThreads.map((t) => (
-                    <button key={t.id} data-cursor={`hub-thread:${t.id}`} onClick={() => openThread(t.id)}>
-                      {t.title}{t.unread > 0 && <span className="unread"> {t.unread}</span>}
-                      <span className="meta"> · {t.age} · {t.project}</span>
-                    </button>
-                  ))}
-                </div>
-                <p className="label" style={{ marginTop: 30 }}>conversation epochs <span className="n">z jump grid</span></p>
-                <div className="rows">
-                  <button data-cursor="hub-epoch:board" onClick={() => { openThread('board'); setEpochGrid(true) }}>
-                    Board of Directors <span className="unread">3</span><span className="meta"> · now · {(turnsByThread.board || []).length} turns · {seedEpochs.length} epochs</span>
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <p className="label">subagent pipeline <span className="n">now focused · {thread.title.toLowerCase()}</span></p>
-                <p className="huge">{runningAgents[0]?.name || 'idle'}</p>
-                <p className="big dim" style={{ marginTop: 8 }}>{runningAgents[0]?.task || 'no agent is running'}</p>
-                <div className="progress"><i style={{ width: `${sendingRef.current ? runProgress : (runningAgents[0]?.progress ?? 0)}%` }} /></div>
-                <p className="dim" style={{ fontWeight: 300 }}>{sendingRef.current ? runLabel : runningAgents[0] ? `${runningAgents[0].name} · ${runningAgents[0].phase} · ${fmtTokens(runningAgents[0].tokens)} tokens` : 'fleet idle'}</p>
-                <div style={{ marginTop: 26 }}>
-                  {agents.map((a) => (
-                    <button key={a.id} className="rowbtn" data-cursor={`hub-agent:${a.id}`} onClick={() => { setSelectedAgentId(a.id); setAgentsLevel(1); goPivot(PIVOTS.indexOf('agents')) }}>
-                      <span className={a.state === 'running' && motion.shimmer ? 'shimmer' : `state-${a.state}`}>{a.name}</span>
-                      <span className="meta faint"> · {a.phase || a.state} · {a.progress}%</span>
-                      <span className="progress thin compact" style={{ display: 'block' }}><i style={{ width: `${a.progress}%`, background: a.state === 'running' ? 'var(--accent)' : 'color-mix(in srgb, var(--fg) 45%, transparent)' }} /></span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <p className="label">recent mutation stream</p>
-                <div className="activity">
-                  {activity.map((a, i) => <div key={i}><span className="when">{a.when}</span>{a.what}</div>)}
-                </div>
-                <p className="label" style={{ marginTop: 34 }}>staged artifacts <span className="n">({artifacts.length})</span></p>
-                <div className="rows">
-                  {artifacts.slice(0, 4).map((a) => (
-                    <button key={a} data-cursor={`hub-artifact:${a}`} onClick={() => { const f = files.find((x) => x.name === a); if (f) openFile(f); else openThread('board') }}>{a}</button>
-                  ))}
-                </div>
-                <p className="label" style={{ marginTop: 34 }}>session metrics <span className="n">active pool</span></p>
-                <div style={{ display: 'flex', gap: 44, alignItems: 'baseline' }}>
-                  <span><span className="bignum">{String(agents.length).padStart(2, '0')}</span><span className="dim"> subagents · {fleetCounts.running} running</span></span>
-                  <span><span className="bignum">{suitesPass} / {suitesTotal}</span><span className="dim"> suites green{gateBlocking ? ' · gate holding' : ''}</span></span>
-                </div>
-                <p className="dim" style={{ fontWeight: 300, marginTop: 10 }}>{allTurnsCount} turns across {threads.length} sessions · {fmtTokens(fleetSpent)} tokens burned · {tokVelocity} tok/s</p>
-              </div>
-            </div>
-          </section>
+                    <HubPage
+            active={pivot === 0}
+            tiledThreads={tiledThreads} threadTiles={threadTiles} effectivePolicy={effectivePolicy}
+            gateBlocking={gateBlocking} gateResolved={gateResolved} idleThreads={idleThreads}
+            turnsByThread={turnsByThread} thread={thread} threads={threads} runningAgents={runningAgents}
+            sendingRef={sendingRef} runProgress={runProgress} runLabel={runLabel} agents={agents}
+            activity={activity} fleetCounts={fleetCounts} suitesPass={suitesPass} suitesTotal={suitesTotal}
+            allTurnsCount={allTurnsCount} tokVelocity={tokVelocity} fleetSpent={fleetSpent}
+            tiltSpot={tiltSpot} motion={motion} actions={actions}
+          />
 
           {/* ============ CONVERSATION — spatial turn matrix. no bubbles, no scroll-of-death. ============ */}
-          <section className={pivot === 1 ? "page isactive" : "page"} aria-label="conversation">
-            <div key={focusTick} className="focusenter">
-              {zoom === 2 && activeTurn ? (
-                /* Z2 · decisions & mutations ledger: no conversational filler, no raw stdout —
-                   user prompts, architectural decisions, and AST hunks side-by-side */
-                <div>
-                  <p className="label">decisions & mutations ledger · {thread.title} <span className="n">Z2 · enter Z3 · esc Z1</span></p>
-                  <div className="swiss3" data-cascade>
-                    <div data-col="1">
-                      <p className="label">my prompts <span className="n">{promptTurns.length}</span></p>
-                      {promptTurns.map((t) => (
-                        <button key={t.i} className={t.i === selectedTurn ? 'turnrow sel' : 'turnrow'} data-cursor={`conv-turn:${t.i}`} onClick={() => setSelectedTurn(t.i)} onDoubleClick={() => setZoom(3)}>
-                          <span className="turnhead"><span className="turnnum">{String(t.i + 1).padStart(2, '0')}</span> you <span className="faint">· E{String(t.epoch || activeEpoch.n).padStart(2, '0')}</span></span>
-                          <span className="turnsummary">{t.intent}</span>
-                        </button>
-                      ))}
-                      {promptTurns.length === 0 && <p className="faint" style={{ fontWeight: 300 }}>no prompts yet</p>}
-                    </div>
-                    <div data-col="2">
-                      <p className="label">decisions <span className="n">{decisionTurns.length}</span></p>
-                      {decisionTurns.map((t) => (
-                        <button key={t.i} className={t.i === selectedTurn ? 'turnrow sel' : 'turnrow'} data-cursor={`conv-turn:${t.i}`} onClick={() => setSelectedTurn(t.i)} onDoubleClick={() => setZoom(3)}>
-                          <span className="turnhead"><span className="turnnum">{String(t.i + 1).padStart(2, '0')}</span> {t.actor}</span>
-                          <span className="turnsummary">{t.decision || t.summary}</span>
-                        </button>
-                      ))}
-                      {threadId === seedGate.threadId && (
-                        <div className={`gateblock ${gateOpen ? 'open' : 'resolved'}`} data-cursor="conv-gate:board" role="group" aria-label="interrupt gate">
-                          <p className="label" style={{ margin: 0 }}>interrupt gate · {seedGate.by}</p>
-                          <p className="prose" style={{ margin: '6px 0' }}>{gateOpen ? seedGate.question : `resolved · ${gateResolved === 'yes' ? seedGate.yes : seedGate.no}`}</p>
-                          {gateOpen && <span className="tileyn"><button onClick={() => resolveGate('yes')}>[y] {seedGate.yes}</button><button onClick={() => resolveGate('no')}>[n] {seedGate.no}</button></span>}
-                        </div>
-                      )}
-                    </div>
-                    <div data-col="3">
-                      <p className="label">file mutations <span className="n">{sessionHunks.length} hunks · {sessionChangeSet.task}</span></p>
-                      {sessionHunks.map((h, hi) => (
-                        <button key={hi} className="turnrow" data-cursor={`conv-artifact:${h.file}`} onClick={() => { setReviewSetId(sessionChangeSet.id); setReviewFile(h.file); goPivot(PIVOTS.indexOf('review')) }}>
-                          <span className="turnhead">{h.file} <span className="faint">· {h.range} · {h.fn}</span></span>
-                          <span className="turnsummary"><span style={{ color: 'var(--add)' }}>+{h.adds}</span> / <span style={{ color: 'var(--del)' }}>−{h.dels}</span> · {h.tag} · <span className={`hunkstate state-${h.state}`}>{h.state}</span></span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              ) : zoom === 3 && activeTurn ? (
-                /* Z3 · full-bleed session: 60% structured stream / 40% pinned context.
-                   Tier-2 header above is the facet bar; epochs sit directly under it. */
-                <div>
-                  <div className="epochstrip" aria-label="epochs">
-                    <span className="label" style={{ margin: 0 }}>epochs [z]:</span>
-                    {seedEpochs.map((ep) => (
-                      <button key={ep.n} className={ep.n === activeEpoch.n ? 'epochchip on' : 'epochchip'} data-cursor={`conv-epoch:${ep.n}`} onClick={() => jumpToEpoch(ep)}>
-                        {ep.n === activeEpoch.n ? '■ ' : ''}[E{String(ep.n).padStart(2, '0')} {ep.name}]
-                      </button>
-                    ))}
-                    <button className="ghostbtn" onClick={() => setEpochGrid(true)}>jump grid</button>
-                  </div>
-                  <div className={splitTurn !== null ? 'z3grid split' : 'z3grid'}>
-                    <div>
-                      <p className="label">{facet === 'all' ? `active stream · epoch ${String(activeEpoch.n).padStart(2, '0')}` : `facet · ${facet}`} <span className="n">{thread.title}</span></p>
-                      {facetTurns.map((t, fi) => (
-                        <div key={t.i}>
-                          {(fi === 0 || facetTurns[fi - 1].epoch !== t.epoch) && t.epoch && (
-                            <button className="milestone" onClick={() => setEpochGrid(true)}>[ E{String(t.epoch).padStart(2, '0')} · {(seedEpochs.find((e) => e.n === t.epoch) || {}).name || 'SESSION'} · {epochCounts.get(t.epoch) || ''} turns ]</button>
-                          )}
-                          <button className={t.i === selectedTurn ? 'streamturn sel' : 'streamturn'} data-cursor={`conv-turn:${t.i}`} onClick={() => setSelectedTurn(t.i)}>
-                            <span className="streamhead">{t.actor === 'user' ? 'YOU' : t.actor} <span className="faint">[{t.kind ? t.kind.toUpperCase() : 'TURN'} #{String(t.i + 1).padStart(2, '0')} · {t.age}]</span>{splitTurn === t.i && <span className="accent"> · pinned (v)</span>}</span>
-                            <span className="prose" style={{ display: 'block' }}>{t.full || t.synthesis}</span>
-                            {(t.stdout || []).length > 0 && <span className="stdout mono" style={{ display: 'block' }}>{t.stdout.map((l, li) => <span key={li} style={{ display: 'block' }}>{l}</span>)}</span>}
-                            {t.state === 'running' && <span className="progress thin compact" style={{ display: 'block' }}><i style={{ width: `${t.progress || 0}%` }} /></span>}
-                          </button>
-                        </div>
-                      ))}
-                      {facetTurns.length === 0 && <p className="faint" style={{ fontWeight: 300 }}>nothing in this facet yet</p>}
-                      {threadId === seedGate.threadId && (facet === 'all' || facet === 'decisions') && (
-                        <div className={`gateblock ${gateOpen ? 'open' : 'resolved'}`} data-cursor="conv-gate:board" role="group" aria-label="interrupt gate">
-                          <p className="label" style={{ margin: 0 }}>interrupt gate [{seedGate.by} · {seedGate.kind}]</p>
-                          <p className="prose" style={{ margin: '8px 0' }}>{seedGate.text}</p>
-                          <p className="prose accent" style={{ margin: '4px 0' }}>? {seedGate.question}</p>
-                          {gateOpen
-                            ? <span className="tileyn"><button onClick={() => resolveGate('yes')}>[y] {seedGate.yes}</button><button onClick={() => resolveGate('no')}>[n] {seedGate.no}</button><button onClick={() => { setPromptOpen(true) }}>[c] custom</button></span>
-                            : <p className="prose dim">resolved · {gateResolved === 'yes' ? seedGate.yes : seedGate.no} — verifier rerunning</p>}
-                        </div>
-                      )}
-                      {promptOpen ? (
-                        <>
-                          <p className="label" style={{ marginTop: 26 }}>prompt · {engineSummary} <span className="n">enter send · esc close</span></p>
-                          <textarea ref={promptRef} className="inlineprompt" rows={3} placeholder="instruct swarm, : for command, ! for raw shell" value={draft}
-                            onChange={(e) => setDraft(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
-                        </>
-                      ) : (
-                        <button className="promptcue" onClick={() => setPromptOpen(true)}>&gt; _ <span className="faint">[i] instruct swarm or type raw shell command into pty…</span></button>
-                      )}
-                    </div>
-                    <div>
-                      {splitTurn !== null && turns[splitTurn] ? (
-                        <>
-                          <p className="label">pinned · turn {String(splitTurn + 1).padStart(2, '0')} <span className="n">v unpin · 50/50 split</span></p>
-                          <p className="big" style={{ marginBottom: 10 }}>{turns[splitTurn].actor}</p>
-                          <p className="prose">{turns[splitTurn].full || turns[splitTurn].synthesis}</p>
-                          <p className="label" style={{ marginTop: 22 }}>trace</p>
-                          {(turns[splitTurn].trace || []).map((l, i) => <p key={i} className="prose dim">{l}</p>)}
-                        </>
-                      ) : (
-                        <>
-                          <p className="label">pinned context · live diff <span className="n">{reviewFileObj?.name}:{activeHunk?.line}</span></p>
-                          {activeHunk && activeHunk.lines.map(([sign, line], i) => (
-                            <div key={i} className={`diffline ${sign === '+' ? 'add' : sign === '-' ? 'del' : ''}`}>{sign} {line}</div>
-                          ))}
-                          <p className="label" style={{ marginTop: 26 }}>contract & invariant gates <span className="n">epoch {String(activeEpoch.n).padStart(2, '0')}</span></p>
-                          {seedInvariants.map((g) => (
-                            <p key={g.name} className="prose" style={{ margin: '2px 0' }}><span className={`invstate inv-${g.state}`}>{g.state === 'FAIL' && !gateOpen && gateResolved === 'yes' ? 'RUN' : g.state}</span> {g.name} <span className="faint">({g.detail})</span></p>
-                          ))}
-                          <p className="label" style={{ marginTop: 26 }}>spawned workers in this epoch</p>
-                          {agents.slice(0, 4).map((a, i) => (
-                            <p key={a.id} className="prose" style={{ margin: '2px 0' }}><span className="turnnum">{String(i + 1).padStart(2, '0')}</span> {a.name} <span className="faint">· {a.phase || a.state} · {a.progress}%</span></p>
-                          ))}
-                          <p className="label" style={{ marginTop: 26 }}>active turn trace</p>
-                          {(activeTurn.trace || []).map((l, i) => <p key={i} className="prose dim">{l}</p>)}
-                          {(activeTurn.artifacts || []).length > 0 && (
-                            <>
-                              <p className="label" style={{ marginTop: 22 }}>emitted artifacts</p>
-                              {activeTurn.artifacts.map((a) => (
-                                <button key={a} className="artifactlink" data-cursor={`conv-artifact:${a}`} onClick={() => { const f = files.find((x) => x.name === a); if (f) openFile(f) }}>→ {a}</button>
-                              ))}
-                            </>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <>
-                {narrow && convLevel > 0 && (
-                  <button className="drillhead" onClick={() => setConvLevel(convLevel - 1)} aria-label="back">
-                    <span className="drillarrow">‹</span> {convLevel === 1 ? 'active threads' : thread.title.toLowerCase()}
-                  </button>
-                )}
-                <div className="swiss3" data-cascade data-level={convLevel}>
-                  <div data-col="1">
-                    <p className="label">active threads</p>
-                    {threads.map((t) => (
-                      <button key={t.id} className={t.id === threadId ? 'threadblock sel' : 'threadblock'} data-cursor={`conv-thread:${t.id}`} onClick={() => { setThreadId(t.id); setThreads((ts) => ts.map((x) => (x.id === t.id ? { ...x, unread: 0 } : x))); setConvLevel(1) }}>
-                        <span className={t.unread > 0 ? 'threadtitle urgent' : 'threadtitle'}>{t.title}{t.unread > 0 && <sup className="unread"> {t.unread}</sup>}</span>
-                        <span className="threadsub">{t.status}</span>
-                        <span className="threadsub faint">{t.age} · {t.project}</span>
-                      </button>
-                    ))}
-                    <button className="ghostbtn" style={{ marginTop: 14 }} onClick={() => togglePin(thread.id)}>{thread.pinned ? 'unpin thread · p' : 'pin thread · p'}</button>
-                  </div>
-                  <div data-col="2">
-                    <p className="label">turn timeline ({thread.title})</p>
-                    {turns.length === 0 && <p className="huge faint" style={{ marginTop: 18 }}>ask anything.</p>}
-                    {turns.map((tn, i) => (
-                      <button key={i} className={i === selectedTurn ? 'turnrow sel' : 'turnrow'} data-cursor={`conv-turn:${i}`} onClick={() => { setSelectedTurn(i); setConvLevel(2); scrollPayloadIntoView() }} onDoubleClick={() => setZoom(3)}>
-                        <span className="turnhead"><span className="turnnum">{String(i + 1).padStart(2, '0')}</span> <span className={tn.state === 'running' ? (motion.shimmer ? 'shimmer' : 'accent') : ''}>{tn.actor}</span><span className="faint"> · {tn.age}</span></span>
-                        <span className="turnsummary">{tn.summary}</span>
-                        {tn.state === 'running'
-                          ? <span className="progress thin compact" style={{ display: 'block' }}><i style={{ width: `${tn.progress || 0}%` }} /></span>
-                          : <span className="turnmeta">{tn.state === 'queued' ? 'queued' : tn.artifacts?.length ? `${tn.artifacts.length} artifact${tn.artifacts.length > 1 ? 's' : ''}` : ''}</span>}
-                      </button>
-                    ))}
-                  </div>
-                  <div data-col="3" data-payload>
-                    {promptOpen ? (
-                      <>
-                        <p className="label">prompt · {engineSummary} <span className="n">enter send · esc close</span></p>
-                        <textarea ref={promptRef} className="inlineprompt" rows={4} placeholder="ask anything. @ to mention, / for actions" value={draft}
-                          onChange={(e) => setDraft(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
-                        <div style={{ marginTop: 10, display: 'flex', gap: 22, alignItems: 'baseline' }}>
-                          <button className="solid" onClick={send}>send</button>
-                          <button className="ghostbtn" onClick={() => goPivot(PIVOTS.indexOf('settings'))}>engine settings</button>
-                          <span className="dim" style={{ fontWeight: 300 }}>{config.mode} · local: {localStatus.state}</span>
-                        </div>
-                      </>
-                    ) : activeTurn ? (
-                      <>
-                        <p className="label">active turn [{String(selectedTurn + 1).padStart(2, '0')}] · artifacts</p>
-                        <p className="label">prompt intent</p>
-                        <p className="prose">{activeTurn.intent}</p>
-                        <p className="label" style={{ marginTop: 24 }}>synthesis{activeTurn.engine ? ` · ${activeTurn.engine}` : ''}</p>
-                        <p className="prose">{activeTurn.synthesis || '…'}</p>
-                        {activeTurn.fallbackFrom && <p className="prose accent">remote failed ({activeTurn.fallbackFrom}) — answered locally</p>}
-                        {activeTurn.stats?.length > 0 && (
-                          <>
-                            <p className="label" style={{ marginTop: 24 }}>spawned subagents & outputs</p>
-                            <div style={{ display: 'flex', gap: 40, alignItems: 'baseline', flexWrap: 'wrap' }}>
-                              {activeTurn.stats.map((s) => <span key={s.l}><span className="bignum">{s.v}</span><span className="dim"> {s.l}</span></span>)}
-                            </div>
-                          </>
-                        )}
-                        {activeTurn.artifacts?.length > 0 && (
-                          <>
-                            <p className="label" style={{ marginTop: 24 }}>emitted artifacts</p>
-                            {activeTurn.artifacts.map((a) => (
-                              <button key={a} className="artifactlink" data-cursor={`conv-artifact:${a}`} onClick={() => { const f = files.find((x) => x.name === a); if (f) openFile(f); else if (a === 'Prompt Draft') { pushActivity('you proceeded with Prompt Draft'); setRunProgress(8); setRunLabel('teamwork_preview · iteration 6') } }}>→ {a}</button>
-                            ))}
-                          </>
-                        )}
-                      </>
-                    ) : <p className="dim" style={{ fontWeight: 300 }}>press i to start this thread</p>}
-                  </div>
-                </div>
-                </>
-              )}
-            </div>
-          </section>
+                    <ConversationPage
+            active={pivot === 1}
+            zoom={zoom} focusTick={focusTick} narrow={narrow} convLevel={convLevel} setConvLevel={setConvLevel}
+            thread={thread} threadId={threadId} threads={threads} turns={turns}
+            selectedTurn={selectedTurn} setSelectedTurn={setSelectedTurn} activeTurn={activeTurn}
+            promptTurns={promptTurns} decisionTurns={decisionTurns} activeEpoch={activeEpoch} epochCounts={epochCounts}
+            sessionChangeSet={sessionChangeSet} sessionHunks={sessionHunks} facet={facet} facetTurns={facetTurns}
+            splitTurn={splitTurn} promptOpen={promptOpen} engineSummary={engineSummary} draft={draft} setDraft={setDraft}
+            promptRef={promptRef} gateOpen={gateOpen} gateResolved={gateResolved}
+            reviewFileObj={reviewFileObj} activeHunk={activeHunk} agents={agents} config={config}
+            localStatus={localStatus} motion={motion}
+            cmdMode={cmdMode} cmdHits={cmdHits} runCommand={runCommand} mentions={mentions}
+            actions={actions}
+          />
 
           {/* ============ COLLECTION (folders / files / code) ============ */}
-          <section className={pivot === 2 ? "page isactive" : "page"} aria-label="collection">
-            {narrow && colLevel > 0 && (
-              <button className="drillhead" onClick={() => setColLevel(colLevel - 1)} aria-label="back">
-                <span className="drillarrow">‹</span> {colLevel === 1 ? 'folders' : folder}
-              </button>
-            )}
-            <div className="collection" data-cascade data-level={colLevel} key={'c' + focusTick}>
-              <div data-col="1">
-                <p className="label">folders</p>
-                <div className="collist">
-                  {folders.map((f) => <button key={f} className={f === folder ? 'on' : ''} data-cursor={`col-folder:${f}`} onClick={() => { setFolder(f); const first = files.find((x) => x.folder === f); if (first) setFileName(first.name); setColLevel(1) }}>{f}</button>)}
-                </div>
-              </div>
-              <div data-col="2">
-                <p className="label">files</p>
-                <div className="collist">
-                  {files.filter((f) => f.folder === folder).map((f) => (
-                    <button key={f.name} className={f.name === fileName ? 'on' : ''} data-cursor={`col-file:${f.name}`} onClick={() => { setFileName(f.name); setColLevel(2) }}>
-                      {f.name}<div className="meta">{f.lines} lines · {f.lang}</div>
-                    </button>
-                  ))}
-                  {files.filter((f) => f.folder === folder).length === 0 && <p className="faint" style={{ fontWeight: 300 }}>nothing here yet</p>}
-                </div>
-              </div>
-              <div data-col="3">
-                <p className="label">{file.folder} / {file.name}</p>
-                <p className="big" style={{ marginBottom: 16 }}>{file.name}</p>
-                <code className="codeview">{file.body.map((l, i) => <span key={i}><span className="ln">{i + 1}</span>{l}{'\n'}</span>)}</code>
-                <div style={{ marginTop: 22, display: 'flex', gap: 26 }}>
-                  <button className="solid" onClick={() => { setDraft(`explain ${file.name} and suggest the smallest safe refactor`); openThread(threadId); setPromptOpen(true) }}>ask about this file</button>
-                  <button className="ghostbtn" onClick={() => setZoom(0)}>zoom out to map</button>
-                </div>
-              </div>
-            </div>
-          </section>
+                    <CollectionPage
+            active={pivot === 2}
+            narrow={narrow} colLevel={colLevel} setColLevel={setColLevel}
+            folder={folder} setFolder={setFolder} fileName={fileName} setFileName={setFileName}
+            focusTick={focusTick} file={file} threadId={threadId} actions={actions}
+          />
 
           {/* ============ REVIEW — hunk-level triage. never scroll a raw file to review a mutation. ============ */}
-          <section className={pivot === 3 ? "page isactive" : "page"} aria-label="review">
-            {zoom === 2 && reviewFileObj ? (
-              /* Z2 in review · the same ledger discipline: prompts + decisions + hunks, no file scroll */
-              <div>
-                <p className="label">decisions & mutations ledger · {reviewSet.task} <span className="n">Z2 · enter full file (Z3) · esc Z1</span></p>
-                <div className="swiss3" data-cascade>
-                  <div data-col="1">
-                    <p className="label">my prompts</p>
-                    {promptTurns.map((t) => (
-                      <button key={t.i} className="turnrow" data-cursor={`conv-turn:${t.i}`} onClick={() => { setSelectedTurn(t.i); goPivot(PIVOTS.indexOf('conversation')) }}>
-                        <span className="turnhead"><span className="turnnum">{String(t.i + 1).padStart(2, '0')}</span> you</span>
-                        <span className="turnsummary">{t.intent}</span>
-                      </button>
-                    ))}
-                  </div>
-                  <div data-col="2">
-                    <p className="label">decisions</p>
-                    {decisionTurns.map((t) => (
-                      <button key={t.i} className="turnrow" data-cursor={`conv-turn:${t.i}`} onClick={() => { setSelectedTurn(t.i); goPivot(PIVOTS.indexOf('conversation')) }}>
-                        <span className="turnhead"><span className="turnnum">{String(t.i + 1).padStart(2, '0')}</span> {t.actor}</span>
-                        <span className="turnsummary">{t.decision || t.summary}</span>
-                      </button>
-                    ))}
-                  </div>
-                  <div data-col="3">
-                    <p className="label">mutation hunks · {reviewFileObj.name}</p>
-                    {reviewFileObj.hunks.map((h, i) => (
-                      <button key={i} className={i === selectedHunk ? 'hunkrow sel' : 'hunkrow'} data-cursor={`rev-hunk:${i}`} onClick={() => setSelectedHunk(i)} onDoubleClick={() => setZoom(3)}>
-                        <span className="turnhead"><span className="turnnum">{String(i + 1).padStart(2, '0')}</span> {h.range} · {h.fn}</span>
-                        <span className="turnsummary"><span style={{ color: 'var(--add)' }}>+{h.adds}</span> / <span style={{ color: 'var(--del)' }}>−{h.dels}</span> · {h.tag}</span>
-                        <span className={`hunkstate state-${h.state}`}>{h.state}</span>
-                      </button>
-                    ))}
-                    {activeHunk && <p className="prose" style={{ marginTop: 16 }}>{activeHunk.rationale}</p>}
-                  </div>
-                </div>
-              </div>
-            ) : zoom === 3 && reviewFileObj ? (
-              /* Z3 · full file, centered on the hunk's line */
-              <div>
-                <p className="label">{reviewSet.task} / {reviewFileObj.name} · hunk {selectedHunk + 1} at line {activeHunk?.line} <span className="n">esc back</span></p>
-                <p className="big" style={{ marginBottom: 16 }}>{reviewFileObj.name}</p>
-                {(() => {
-                  const src = files.find((f) => f.name === reviewFileObj.name)
-                  if (src) return <code className="codeview">{src.body.map((l, i) => <span key={i}><span className="ln">{i + 1}</span>{l}{'\n'}</span>)}</code>
-                  return activeHunk.lines.map(([sign, line], i) => (
-                    <div key={i} className={`diffline ${sign === '+' ? 'add' : sign === '-' ? 'del' : ''}`}>{sign} {line}</div>
-                  ))
-                })()}
-                <p className="dim" style={{ fontWeight: 300, marginTop: 20 }}>full-file context for hunk {selectedHunk + 1} · {activeHunk?.range} · {activeHunk?.fn}</p>
-              </div>
-            ) : (
-              <>
-              {narrow && revLevel > 0 && (
-                <button className="drillhead" onClick={() => setRevLevel(revLevel - 1)} aria-label="back">
-                  <span className="drillarrow">‹</span> {revLevel === 1 ? 'change sets' : reviewFileObj?.name.toLowerCase()}
-                </button>
-              )}
-              <div className="swiss3" data-cascade data-level={revLevel}>
-                <div data-col="1">
-                  <p className="label">change sets</p>
-                  {changeSets.map((cs) => (
-                    <div key={cs.id}>
-                      <button className={cs.id === reviewSetId ? 'setblock sel' : 'setblock'} data-cursor={`rev-set:${cs.id}`} onClick={() => { setReviewSetId(cs.id); setReviewFile(cs.files[0].name); setSelectedHunk(0) }}>
-                        <span className="settitle">{cs.task}</span>
-                        <span className="setsub">{cs.files.length} files · {cs.files.reduce((n, f) => n + f.hunks.filter((h) => h.state === 'UNREVIEWED').length, 0)} unreviewed</span>
-                      </button>
-                      {cs.id === reviewSetId && cs.files.map((f) => (
-                        <button key={f.name} className={f.name === reviewFile ? 'revfile sel' : 'revfile'} data-cursor={`rev-file:${f.name}`} onClick={() => { setReviewFile(f.name); setSelectedHunk(0); setRevLevel(1) }}>
-                          <span className="revfilename">{f.name}</span>
-                          <span className="setsub"><span style={{ color: 'var(--add)' }}>+{f.adds}</span> / <span style={{ color: 'var(--del)' }}>−{f.dels}</span> · {f.hunks.length} hunk{f.hunks.length > 1 ? 's' : ''}</span>
-                        </button>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-                <div data-col="2">
-                  <p className="label">mutation hunks ({reviewFileObj?.name})</p>
-                  {(reviewFileObj?.hunks || []).map((h, i) => (
-                    <button key={i} className={i === selectedHunk ? 'hunkrow sel' : 'hunkrow'} data-cursor={`rev-hunk:${i}`} onClick={() => { setSelectedHunk(i); setRevLevel(2); scrollPayloadIntoView() }} onDoubleClick={() => setZoom(3)}>
-                      <span className="turnhead"><span className="turnnum">{String(i + 1).padStart(2, '0')}</span> {h.range} · {h.fn}</span>
-                      <span className="turnsummary"><span style={{ color: 'var(--add)' }}>+{h.adds}</span> / <span style={{ color: 'var(--del)' }}>−{h.dels}</span> · {h.tag}</span>
-                      <span className={`hunkstate state-${h.state}`}>{h.state}</span>
-                    </button>
-                  ))}
-                </div>
-                <div data-col="3" data-payload>
-                  {activeHunk && (
-                    <>
-                      <p className="label">hunk diff [{String(selectedHunk + 1).padStart(2, '0')}/{String(reviewFileObj.hunks.length).padStart(2, '0')}] · line {activeHunk.line}</p>
-                      {activeHunk.lines.map(([sign, line], i) => (
-                        <div key={i} className={`diffline ${sign === '+' ? 'add' : sign === '-' ? 'del' : ''}`}>{sign} {line}</div>
-                      ))}
-                      <p className="label" style={{ marginTop: 26 }}>agent rationale ({activeHunk.by})</p>
-                      <p className="prose">{activeHunk.rationale}</p>
-                      {activeHunk.comment && <p className="prose accent">you → {activeHunk.by}: {activeHunk.comment}</p>}
-                      <p className="label" style={{ marginTop: 24 }}>verification status</p>
-                      <p className="prose">{activeHunk.verification}</p>
-                      <p className="prose" style={{ marginTop: 14 }}><span className={`hunkstate state-${activeHunk.state}`}>{activeHunk.state}</span></p>
-                      {instructOpen && (
-                        <>
-                          <p className="label" style={{ marginTop: 24 }}>instruct {activeHunk.by} <span className="n">enter send · esc close</span></p>
-                          <textarea ref={instructRef} className="inlineprompt" rows={3} placeholder="rewrite this hunk without throwing an exception" value={instructDraft}
-                            onChange={(e) => setInstructDraft(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendInstruction() } }} />
-                        </>
-                      )}
-                      <div style={{ display: 'flex', gap: 26, marginTop: 22 }}>
-                        <button className="ghostbtn" onClick={() => setHunkState('STAGED')}>approve · a</button>
-                        <button className="ghostbtn" onClick={() => setHunkState('REJECTED')}>reject · x</button>
-                        <button className="ghostbtn" onClick={() => setInstructOpen(true)}>instruct · c</button>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-              </>
-            )}
-          </section>
+                    <ReviewPage
+            active={pivot === 3}
+            zoom={zoom} reviewSet={reviewSet} reviewFileObj={reviewFileObj} activeHunk={activeHunk}
+            selectedHunk={selectedHunk} setSelectedHunk={setSelectedHunk}
+            promptTurns={promptTurns} decisionTurns={decisionTurns}
+            changeSets={changeSets} reviewSetId={reviewSetId} setReviewSetId={setReviewSetId}
+            reviewFile={reviewFile} setReviewFile={setReviewFile}
+            narrow={narrow} revLevel={revLevel} setRevLevel={setRevLevel}
+            instructOpen={instructOpen} instructDraft={instructDraft} setInstructDraft={setInstructDraft}
+            instructRef={instructRef} actions={actions}
+          />
 
           {/* ============ TERMINAL ============ */}
-          <section className={pivot === 4 ? "page isactive" : "page"} aria-label="terminal">
-            <p className="label">terminal · fragments</p>
-            <div className="term">
-              {termLines.map((l, i) => <div key={i}>{l}</div>)}
-              <div className="promptline"><span className="accent">$</span>
-                <input value={termInput} placeholder="type help" aria-label="terminal input" onChange={(e) => setTermInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') runTerm(termInput) }} />
-              </div>
-            </div>
-          </section>
+                    <TerminalPage
+            active={pivot === 4}
+            termLines={termLines} termInput={termInput} setTermInput={setTermInput} actions={actions}
+          />
 
           {/* ============ AGENTS — same 3-column Swiss grid as the hub, never full-width rows ============ */}
-          <section className={pivot === 5 ? "page isactive" : "page"} aria-label="agents">
-            {narrow && agentsLevel > 0 && (
-              <button className="drillhead" onClick={() => setAgentsLevel(0)} aria-label="back">
-                <span className="drillarrow">‹</span> agents
-              </button>
-            )}
-            <div className="agentsgrid" data-cascade data-level={agentsLevel}>
-              <div data-col="1">
-                <p className="label">running <span className="n">{runningAgents.length}</span></p>
-                {runningAgents.length === 0 && <p className="faint" style={{ fontWeight: 300 }}>nothing running</p>}
-                {agents.filter((a) => a.state === 'running').map((a) => (
-                  <button key={a.id} className="agentblock tiltcard spotcard" {...tiltSpot} data-cursor={`agents-agent:${a.id}`} onClick={() => { setSelectedAgentId(a.id); setAgentsLevel(1); scrollPayloadIntoView() }}>
-                    <span className={`agentname ${motion.shimmer ? 'shimmer' : 'state-running'}`}>{a.name}</span>
-                    <span className="agenttask">{a.task}</span>
-                    <span className="progress thin compact" style={{ display: 'block' }}><i style={{ width: `${a.progress}%` }} /></span>
-                    <span className="agentmeta">running · {a.progress}% · {a.elapsed}</span>
-                  </button>
-                ))}
-              </div>
-              <div data-col="1">
-                <p className="label">queued / complete</p>
-                {agents.filter((a) => a.state !== 'running').map((a) => (
-                  <button key={a.id} className="agentblock tiltcard spotcard" {...tiltSpot} data-cursor={`agents-agent:${a.id}`} onClick={() => { setSelectedAgentId(a.id); setAgentsLevel(1); scrollPayloadIntoView() }}>
-                    <span className={`agentname state-${a.state}`}>{a.name}</span>
-                    <span className="agenttask dim">{a.task}</span>
-                    <span className={`agentmeta state-${a.state}`}>{a.state} · {a.progress}%</span>
-                  </button>
-                ))}
-                <p className="label" style={{ marginTop: 34 }}>fleet burn</p>
-                <span className="bignum">{fmtTokens(fleetSpent)}</span><span className="dim" style={{ fontWeight: 300 }}> tokens · {agents.length} subagents · {runningAgents.length} running · ceiling {config.tokenCeiling || '500k'}</span>
-                <p className="dim" style={{ fontWeight: 300, marginTop: 14 }}>artifacts {artifacts.length} · workflow teamwork_preview</p>
-              </div>
-              <div data-col="2" data-payload>
-                <p className="label">selected · telemetry</p>
-                {telemetryAgent && (
-                  <>
-                    <p className="big" style={{ marginBottom: 4 }}>{telemetryAgent.name}</p>
-                    <p className="dim" style={{ fontWeight: 300, margin: '0 0 18px 0' }}>{telemetryAgent.task} · <span className={`state-${telemetryAgent.state}`}>{telemetryAgent.state}</span></p>
-                    <div style={{ display: 'flex', gap: 40, alignItems: 'baseline', marginBottom: 20 }}>
-                      <span><span className="bignum">{fmtTokens(telemetryAgent.tokens)}</span><span className="dim"> tokens</span></span>
-                      <span><span className="bignum">{telemetryAgent.tools}</span><span className="dim"> tools</span></span>
-                      <span><span className="bignum">{telemetryAgent.progress}%</span></span>
-                    </div>
-                    <p className="label">stdout</p>
-                    <div className="stdout mono">
-                      {telemetryAgent.log.map((l, i) => <div key={i}>{l}</div>)}
-                      {telemetryAgent.state === 'running' && <div className="accent">▌</div>}
-                    </div>
-                    <div style={{ display: 'flex', gap: 26, marginTop: 20 }}>
-                      <button className="ghostbtn" onClick={() => toggleAgent(telemetryAgent.id)}>{telemetryAgent.state === 'running' ? 'pause · p' : 'run · p'}</button>
-                      <button className="ghostbtn" onClick={() => goPivot(PIVOTS.indexOf('review'))}>diff · d</button>
-                      <button className="ghostbtn" onClick={() => killAgent(telemetryAgent.id)}>kill · x</button>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          </section>
+                    <AgentsPage
+            active={pivot === 5}
+            narrow={narrow} agentsLevel={agentsLevel} setAgentsLevel={setAgentsLevel}
+            runningAgents={runningAgents} agents={agents} tiltSpot={tiltSpot} motion={motion}
+            telemetryAgent={telemetryAgent} fleetSpent={fleetSpent} config={config} actions={actions}
+          />
 
           {/* ============ SETTINGS ============ */}
-          <section className={pivot === 6 ? "page isactive" : "page"} aria-label="settings">
-            {/* Zune 4.0 configuration matrix: domains -> parameters -> live preview.
-                same 25/35/40 borderless grid, no toggle pills, no dropdown boxes. */}
-            <div className="swiss3" data-cascade>
-              <div data-col="1">
-                <p className="label">configuration domains</p>
-                {[
-                  ['01 agent pool & routing', `${agents.length} active · ${config.maxParallel ?? 10} max subagents`],
-                  ['02 telemetry tile thresholds', `${accent.value} on gate fail only`],
-                  ['03 sandbox & enclave gates', gates.strictPcr ? 'PCR0 strict · auto-test' : 'PCR0 relaxed'],
-                  ['04 keyboard & semantic zoom', 'vim hjkl · 4-stop Z-axis'],
-                  ['05 typography & swiss grid', `${theme} swiss · ${accent.name} accent`],
-                  ['06 daemons & local endpoints', `bridge ${bridgeStatus} · local ${localStatus.state}`],
-                ].map(([name, sub], i) => (
-                  <button key={name} className={i === setDomain ? 'threadblock sel' : 'threadblock'} data-cursor={`set-domain:${i}`} onClick={() => setSetDomain(i)}>
-                    <span className="threadtitle" style={{ textTransform: 'uppercase', fontSize: 'calc(15px * var(--scale))' }}>{name}</span>
-                    <span className="threadsub">{sub}</span>
-                  </button>
-                ))}
-                <p className="dim" style={{ fontWeight: 300, marginTop: 18 }}>[j/k] domain · [h/l] parameters · [r] reset domain</p>
-              </div>
-              <div data-col="2">
-                {setDomain === 0 && (<>
-                  <p className="label">swarm & model routing <span className="n">{engineSummary}</span></p>
-                  <p className="label">primary orchestrator</p>
-                  <div className="optrow" style={{ marginBottom: 14 }}>
-                    {['auto', 'remote', 'local', 'demo'].map((m) => <button key={m} className={config.mode === m ? 'on' : ''} onClick={() => setCfg({ mode: m })}>{m}</button>)}
-                  </div>
-                  <p className="dim" style={{ fontWeight: 300, lineHeight: 1.55, margin: '0 0 18px 0' }}>
-                    auto tries the native bridge, then your remote provider; on any remote error the on-device LiteRT-LM model answers and helps diagnose the failure. Keys live only in this browser's localStorage.
-                  </p>
-                  <div className="optrow" style={{ marginBottom: 14 }}>
-                    <button className={config.provider === 'anthropic' ? 'on' : ''} onClick={() => setCfg({ provider: 'anthropic' })}>anthropic</button>
-                    <button className={config.provider === 'openai' ? 'on' : ''} onClick={() => setCfg({ provider: 'openai' })}>openai-compatible</button>
-                  </div>
-                  <div className="setgrid">
-                    <label>api key<input className="setinput" type="password" placeholder="sk-…" value={config.apiKey} onChange={(e) => setCfg({ apiKey: e.target.value })} /></label>
-                    {config.provider === 'anthropic'
-                      ? <label>model<input className="setinput" value={config.model} onChange={(e) => setCfg({ model: e.target.value })} /></label>
-                      : <>
-                          <label>model<input className="setinput" value={config.openaiModel} onChange={(e) => setCfg({ openaiModel: e.target.value })} /></label>
-                          <label>base url<input className="setinput" value={config.baseUrl} onChange={(e) => setCfg({ baseUrl: e.target.value })} /></label>
-                        </>}
-                  </div>
-                  <p className="label" style={{ marginTop: 26 }}>concurrency & worker budget</p>
-                  {[['max parallel subagents', 'maxParallel', 10, 1, 200], ['max pty test runners', 'maxPty', 4, 1, 16]].map(([label, k, def, lo, hi]) => (
-                    <div key={k} className="paramrow"><span>{label}</span><span className="optrow">
-                      <button onClick={() => setCfg({ [k]: Math.max(lo, (config[k] ?? def) - 1) })}>−</button>
-                      <b className="paramval">{config[k] ?? def}</b>
-                      <button onClick={() => setCfg({ [k]: Math.min(hi, (config[k] ?? def) + 1) })}>+</button>
-                    </span></div>
-                  ))}
-                  <div className="paramrow"><span>token ceiling per epoch</span><span className="optrow">{['250k', '500k', '2.5M'].map((v) => <button key={v} className={(config.tokenCeiling || '500k') === v ? 'on' : ''} onClick={() => setCfg({ tokenCeiling: v })}>{v}</button>)}</span></div>
-                </>)}
-                {setDomain === 1 && (<>
-                  <p className="label">live tile escalation rules <span className="n">{accent.value}</span></p>
-                  {[['onFail', 'escalate on test assertion fail'], ['onAmbiguity', 'escalate on contract ambiguity'], ['onBigDiff', `escalate on diff > ${tilePolicy.bigDiffLines} lines`]].map(([k, label]) => (
-                    <div key={k} className="paramrow"><span>{label}</span><span className="optrow">
-                      <button className={tilePolicy[k] ? 'on' : ''} onClick={() => setCfg({ tilePolicy: { ...tilePolicy, [k]: true } })}>YES</button>
-                      <button className={!tilePolicy[k] ? 'on' : ''} onClick={() => setCfg({ tilePolicy: { ...tilePolicy, [k]: false } })}>NO</button>
-                    </span></div>
-                  ))}
-                  <div className="paramrow"><span>big-diff threshold (lines)</span><span className="optrow">
-                    <button onClick={() => setCfg({ tilePolicy: { ...tilePolicy, bigDiffLines: Math.max(50, tilePolicy.bigDiffLines - 50) } })}>−</button>
-                    <b className="paramval">{tilePolicy.bigDiffLines}</b>
-                    <button onClick={() => setCfg({ tilePolicy: { ...tilePolicy, bigDiffLines: tilePolicy.bigDiffLines + 50 } })}>+</button>
-                  </span></div>
-                  <div className="paramrow"><span>auto-approve hunks &lt; 20 lines</span><span className="optrow">
-                    <button className={tilePolicy.autoApproveUnder > 0 ? 'on' : ''} onClick={() => setCfg({ tilePolicy: { ...tilePolicy, autoApproveUnder: 20 } })}>YES</button>
-                    <button className={tilePolicy.autoApproveUnder === 0 ? 'on' : ''} onClick={() => setCfg({ tilePolicy: { ...tilePolicy, autoApproveUnder: 0 } })}>NO</button>
-                  </span></div>
-                  <p className="dim" style={{ fontWeight: 300, lineHeight: 1.55 }}>Tiles stay muted during autonomous execution. A tile only earns the solid accent when a YES rule fires — then it binds [y]/[n] right on the hub.</p>
-                </>)}
-                {setDomain === 2 && (<>
-                  <p className="label">sandbox & enclave gates</p>
-                  {[['strictPcr', 'enclave PCR0 attestation · STRICT'], ['haltOnMismatch', 'halt on enclave PCR mismatch'], ['advTests', 'require adversarial test green to merge']].map(([k, label]) => (
-                    <div key={k} className="paramrow"><span>{label}</span><span className="optrow">
-                      <button className={gates[k] ? 'on' : ''} onClick={() => setCfg({ gates: { ...gates, [k]: true } })}>YES</button>
-                      <button className={!gates[k] ? 'on' : ''} onClick={() => setCfg({ gates: { ...gates, [k]: false } })}>NO</button>
-                    </span></div>
-                  ))}
-                  <p className="label" style={{ marginTop: 26 }}>local · litert-lm <span className="n">{localStatus.state}</span></p>
-                  <div className="setgrid">
-                    <label>model url (.litertlm)<input className="setinput" value={config.localModelUrl} onChange={(e) => setCfg({ localModelUrl: e.target.value })} /></label>
-                  </div>
-                  <p className="dim" style={{ fontWeight: 300, margin: '8px 0' }}>{localStatus.detail} · nothing bundled: downloads on first chat, then browser-cached.</p>
-                  <div style={{ display: 'flex', gap: 26, alignItems: 'baseline' }}>
-                    <button className="ghostbtn" onClick={() => ensureLocal(config.localModelUrl).catch(() => {})}>load local model now</button>
-                    <span className="dim" style={{ fontWeight: 300 }}>background preload</span>
-                    <span className="optrow">
-                      <button className={config.bgPreload ? 'on' : ''} onClick={() => setCfg({ bgPreload: true })}>on</button>
-                      <button className={!config.bgPreload ? 'on' : ''} onClick={() => setCfg({ bgPreload: false })}>off</button>
-                    </span>
-                  </div>
-                </>)}
-                {setDomain === 3 && (<>
-                  <p className="label">keyboard & semantic zoom</p>
-                  {coarse ? (
-                    <p style={{ fontWeight: 300, lineHeight: 1.9, margin: 0 }}>
-                      flick ← →&ensp;pan pivots&emsp;tap a cropped pivot word&ensp;jump there<br />
-                      tap a row&ensp;drill in&emsp;tap the ‹ parent header or flick right&ensp;back<br />
-                      pinch&ensp;step the 4-stop semantic zoom&emsp;bottom baseline&ensp;actions for what you tapped
-                    </p>
-                  ) : (
-                    <p style={{ fontWeight: 300, lineHeight: 1.9, margin: 0 }}>
-                      ⌘ + 1–9&ensp;sessions&emsp;[ ] / alt + ← →&ensp;pivots&emsp;tab&ensp;facet in Z3<br />
-                      h j k l&ensp;2D spatial cursor&emsp;f + two letters&ensp;gutter jump badges<br />
-                      ctrl + scroll / enter / esc&ensp;Z0–Z3 semantic zoom stops<br />
-                      z&ensp;epoch jump grid&emsp;v&ensp;pin split in Z3&emsp;: or ctrl + k&ensp;command ribbon (morphs header)<br />
-                      y / n&ensp;resolve a gate from its tile&emsp;? or hold alt&ensp;key hints
-                    </p>
-                  )}
-                  <p className="label" style={{ marginTop: 26 }}>session epoch auto-segmentation</p>
-                  {[['onCommit', 'slice new epoch on git commit'], ['compressZ2', 'compress stdout in Z-Level 2 ledger']].map(([k, label]) => {
-                    const ep = { onCommit: true, compressZ2: true, everyTurns: 15, ...(config.epochs || {}) }
-                    return (
-                      <div key={k} className="paramrow"><span>{label}</span><span className="optrow">
-                        <button className={ep[k] ? 'on' : ''} onClick={() => setCfg({ epochs: { ...ep, [k]: true } })}>YES</button>
-                        <button className={!ep[k] ? 'on' : ''} onClick={() => setCfg({ epochs: { ...ep, [k]: false } })}>NO</button>
-                      </span></div>
-                    )
-                  })}
-                  <div className="paramrow"><span>slice new epoch after N turns</span><span className="optrow">{[10, 15, 25].map((v) => <button key={v} className={((config.epochs || {}).everyTurns || 15) === v ? 'on' : ''} onClick={() => setCfg({ epochs: { onCommit: true, compressZ2: true, ...(config.epochs || {}), everyTurns: v } })}>{v}</button>)}</span></div>
-                </>)}
-                {setDomain === 4 && (<>
-                  <p className="label">typography & swiss grid</p>
-                  <p className="label">accent</p>
-                  <div className="swatches">
-                    {ACCENTS.map((a) => (
-                      <button key={a.name} className={accent.name === a.name ? 'swatch on' : 'swatch'} style={{ background: a.value }} onClick={() => setAccent(a)}>{a.name}</button>
-                    ))}
-                  </div>
-                  <p className="label">theme</p>
-                  <div className="optrow" style={{ marginBottom: 18 }}>
-                    <button className={theme === 'dark' ? 'on' : ''} onClick={() => setTheme('dark')}>black</button>
-                    <button className={theme === 'light' ? 'on' : ''} onClick={() => setTheme('light')}>white</button>
-                  </div>
-                  <p className="label">type scale · high-dpi density</p>
-                  <div className="optrow" style={{ marginBottom: 18 }}>
-                    {[1, 1.25, 1.5].map((d) => <button key={d} className={density === d ? 'on' : ''} onClick={() => setDensity(d)}>{Math.round(d * 100)}%</button>)}
-                  </div>
-                  <p className="label">motion · cards & panels</p>
-                  <p className="dim" style={{ fontWeight: 300, lineHeight: 1.55, margin: '0 0 10px 0' }}>
-                    Metro-translated motion: WP press-tilt, hard square spotlight cell, flat offset glow (no blur), shimmer only on running work. Per-card opt-in; these switches kill whole families.
-                  </p>
-                  {Object.entries({ tilt: 'tilt (press lean)', spotlight: 'spotlight (square cell)', glow: 'glow (offset block)', shimmer: 'text shimmer (running)', cascade: 'panel cascade + fold' }).map(([k, label]) => (
-                    <div key={k} className="paramrow"><span>{label}</span><span className="optrow">
-                      <button className={motion[k] ? 'on' : ''} onClick={() => setCfg({ motion: { ...motion, [k]: true } })}>on</button>
-                      <button className={!motion[k] ? 'on' : ''} onClick={() => setCfg({ motion: { ...motion, [k]: false } })}>off</button>
-                    </span></div>
-                  ))}
-                </>)}
-                {setDomain === 5 && (<>
-                  <p className="label">daemons & local endpoints</p>
-                  <p className="label">native bridge <span className="n">{bridgeStatus}</span></p>
-                  <div className="setgrid">
-                    <label>bridge url (optional sidecar)<input className="setinput" placeholder="http://127.0.0.1:17861" value={config.bridgeUrl} onChange={(e) => setCfg({ bridgeUrl: e.target.value })} /></label>
-                  </div>
-                  <div style={{ marginBottom: 22 }}>
-                    <button className="ghostbtn" onClick={async () => setBridgeStatus((await bridgeHealthy(config.bridgeUrl)) ? 'reachable' : 'unreachable')}>ping bridge</button>
-                    <span className="dim" style={{ fontWeight: 300, marginLeft: 22 }}>per-platform sidecar speaking BRIDGE.md — local claude/codex wire in later with zero UI changes</span>
-                  </div>
-                  <p className="label">endpoints</p>
-                  <p className="prose">:9379 model-serving workers · <span className="accent">active</span></p>
-                  <p className="prose">litert-lm local · {localStatus.state}</p>
-                  <p className="prose">native bridge · {config.bridgeUrl || 'not configured'} · {bridgeStatus}</p>
-                </>)}
-              </div>
-              <div data-col="3" data-payload>
-                <p className="label">live quota & policy telemetry</p>
-                <p className="label">active compute velocity</p>
-                <div style={{ display: 'flex', gap: 44, alignItems: 'baseline' }}>
-                  <span><span className="bignum">{tokVelocity}</span><span className="dim"> tokens / sec</span></span>
-                  <span><span className="bignum">194ms</span><span className="dim"> p99 dispatch</span></span>
-                </div>
-                <p className="label" style={{ marginTop: 26 }}>pool saturation <span className="n">{fleetCounts.running} running / {config.maxParallel ?? 10} cap · {fmtTokens(fleetSpent)} of {config.tokenCeiling || '500k'} tokens</span></p>
-                <div className="progress"><i style={{ width: `${Math.min(100, (agents.length / (config.maxParallel ?? 10)) * 100)}%` }} /></div>
-                <p className="dim" style={{ fontWeight: 300 }}>{fleetCounts.running} running · {fleetCounts.verified} verified · {fleetCounts.blocked} blocked · {fleetCounts.queued} queued</p>
-                <p className="label" style={{ marginTop: 26 }}>tile escalation preview <span className="n">live · derived from the real fleet</span></p>
-                <div className="tilegrid preview">
-                  {['board', 'siem'].map((id) => {
-                    const t = threads.find((x) => x.id === id)
-                    const tile = threadTiles.get(id)
-                    if (!t || !tile) return <p key={id} className="dim" style={{ fontWeight: 300 }}>{id} · no tile (idle)</p>
-                    const level = escalationLevel(tile, effectivePolicy)
-                    return (
-                      <div key={id} className={`tile tile-${level === 'accent' ? 'blocked' : level === 'amber' ? 'amber' : tile.phase}`}><span className="tileface">
-                        <span className="tiletop"><span>{t.scope}</span><span>{level}</span></span>
-                        <span className="tilebig">{tile.big}</span><span className="tilesub">{tile.sub}</span>
-                        <span className="tiletitle">{level === 'accent' ? 'escalated · [y]/[n] bound' : level === 'amber' ? 'gate warns · not holding' : 'nominal · stays muted'}</span>
-                        <span className="tileprog"><i style={{ width: `${tile.progress}%` }} /></span>
-                      </span></div>
-                    )
-                  })}
-                </div>
-                {!(tilePolicy.onFail || tilePolicy.onAmbiguity || tilePolicy.onBigDiff) && gates.haltOnMismatch && <p className="dim" style={{ fontWeight: 300 }}>all escalation rules off — interrupts stay amber. the fleet will not tap your shoulder.</p>}
-                <p className="label" style={{ marginTop: 26 }}>interrupt threshold policy</p>
-                <p className="prose dim">escalate only on: AST contract invariant failure · unresolved merge conflict · sandbox / network egress violation{tilePolicy.onBigDiff ? ` · diff > ${tilePolicy.bigDiffLines} lines` : ''}.</p>
-                <p className="label" style={{ marginTop: 26 }}>storage & index footprint</p>
-                <p className="prose">{folders.length} modules indexed · {allTurnsCount} turns cached · {seedEpochs.length} epochs</p>
-                <p className="prose dim">sessions + engine config in localStorage · model browser-cached after first pull</p>
-                <p className="label" style={{ marginTop: 26 }}>about</p>
-                <p className="prose dim">zune code — the agentic coding desktop rebuilt in pre-Windows-8 desktop Metro. No sidebar. Type is the chrome.</p>
-              </div>
-            </div>
-          </section>
+                    <SettingsPage
+            active={pivot === 6}
+            setDomain={setDomain} setSetDomain={setSetDomain} config={config} setCfg={setCfg}
+            accent={accent} theme={theme} density={density} setAccent={setAccent} setTheme={setTheme} setDensity={setDensity}
+            gates={gates} tilePolicy={tilePolicy} effectivePolicy={effectivePolicy} motion={motion}
+            coarse={coarse} localStatus={localStatus} bridgeStatus={bridgeStatus} engineSummary={engineSummary}
+            agents={agents} fleetCounts={fleetCounts} fleetSpent={fleetSpent} tokVelocity={tokVelocity}
+            threads={threads} threadTiles={threadTiles} allTurnsCount={allTurnsCount} actions={actions}
+          />
         </div>
 
         {/* 3 · semantic zoom map */}
