@@ -4,6 +4,34 @@
 **Method:** source read of `src/` (3,012 LOC), production build + manifest analysis,
 live DOM inspection at desktop and ≤760 px breakpoints, `npm test` (28/28 passing).
 
+## Status
+
+| # | Finding | State |
+|---|---|---|
+| P1 | Monolithic component re-renders all seven pivots | **fixed** — `a708839` |
+| P2 | Per-token re-render + per-token synchronous localStorage write | **fixed** — `a708839` |
+| P3 | ~1.04 MB first-turn payload; both provider SDKs always fetched | **fixed** — `a708839` |
+| U1 | Accent / theme / type scale never persisted | **already fixed upstream** — `config.js` gained `accentName` / `theme` / `density` before this work started; the finding below was stale on re-check |
+| U2 | Composer advertises commands that are not implemented | **fixed** — `a708839` |
+| U3 | Opacity hierarchy fails WCAG AA, worst in light theme | **fixed** — `a708839` |
+| — | **New:** the theme never reached `<html>`, so light theme rendered black-on-dark | **fixed** — `a1b0c59` |
+
+The three UX findings (X1–X3) are open and untouched.
+
+**U1 was stale.** It was written against an earlier tree; by the time the work
+started, `src/llm/config.js` already carried `accentName`, `theme` and `density`
+and `App.jsx` already read them from the persisted config. Re-checked, then left
+alone.
+
+**New finding, fixed in `a1b0c59`.** The U3 tokens are only correct against a
+white page — but the theme attribute sat on `.app`, while `body` paints the
+page background and the inherited text colour out of `--bg`/`--fg`, and `body`
+is outside `.app`. The light theme therefore rendered as a black page carrying
+the light theme's dark ink: unreadable for every element that takes its colour
+from a token. The theme is now mirrored onto `documentElement` (where
+`scripts/shoot-web.mjs` already looked for it) and `.app` paints its own
+background and colour.
+
 ---
 
 ## 1 · Performance
