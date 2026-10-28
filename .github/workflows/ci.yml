@@ -257,10 +257,11 @@ jobs:
           $out = "shells/windows/Zode.Shell/bin/Release/net10.0-windows10.0.26100.0"
           Copy-Item -Recurse -Force dist "$out/web"
           $exe = "$out/Zode.Shell.exe"
-          if (-not (Test-Path $exe)) { throw "the executable is missing: $exe" }
-          & $exe --selftest
-          if ($LASTEXITCODE -ne 0) { throw "the shell self test failed (exit $LASTEXITCODE)" }
-          Write-Host "the shell proved itself"
+          # Zode.Shell.exe is a GUI subsystem app (OutputType=WinExe): Windows does
+          # not wait for it and PowerShell leaves $LASTEXITCODE null, so an inline
+          # `& $exe --selftest` check fails even when the shell passed. The helper
+          # waits for it and reads the real exit code.
+          ./scripts/run-shell-selftest.ps1 -ExePath $exe -Argument '--selftest'
 
       - name: App Actions and manifest are valid
         run: |

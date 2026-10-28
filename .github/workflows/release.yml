@@ -122,9 +122,9 @@ jobs:
           Expand-Archive -Path $zip.FullName -DestinationPath $out
           $exe = Join-Path $out "Zode.Shell.exe"
           if (-not (Test-Path $exe)) { throw "the executable is missing from the zip" }
-          & $exe --selftest
-          if ($LASTEXITCODE -ne 0) { throw "the shell self test failed (exit $LASTEXITCODE)" }
-          Write-Host "the shipped portable build proved itself"
+          # GUI subsystem app: PowerShell never populates $LASTEXITCODE for it, so
+          # the exit code is read through scripts/run-shell-selftest.ps1.
+          ./scripts/run-shell-selftest.ps1 -ExePath $exe -Argument '--selftest'
 
       - name: Collect the artifacts
         shell: pwsh
