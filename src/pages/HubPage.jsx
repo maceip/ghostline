@@ -6,7 +6,7 @@ import { fmtTokens, escalationLevel } from '../derive.js'
 function HubPage({
   active, tiledThreads, threadTiles, effectivePolicy, gateBlocking, gateResolved, idleThreads,
   turnsByThread, thread, threads, runningAgents, sendingRef, runProgress, runLabel, agents, activity,
-  fleetCounts, suitesPass, suitesTotal, allTurnsCount, tokVelocity, fleetSpent, tiltSpot, motion, actions,
+  fleetCounts, suitesPass, suitesTotal, allTurnsCount, tokVelocity, fleetSpent, derivedEpochs, tiltSpot, motion, actions,
 }) {
   return (
     <section className={active ? 'page isactive' : 'page'} aria-label="hub">
@@ -53,9 +53,14 @@ function HubPage({
           </div>
           <p className="label" style={{ marginTop: 30 }}>conversation epochs <span className="n">z jump grid</span></p>
           <div className="rows">
-            <button data-cursor="hub-epoch:board" onClick={() => { actions.openThread('board'); actions.setEpochGrid(true) }}>
-              Board of Directors <span className="unread">3</span><span className="meta"> · now · {(turnsByThread.board || []).length} turns · {seedEpochs.length} epochs</span>
+            <button data-cursor={`hub-epoch:${thread.id}`} onClick={() => { actions.openThread(thread.id); actions.setEpochGrid(true) }}>
+              {thread.title} {thread.id === 'board' && <span className="unread">3</span>}<span className="meta"> · {thread.age} · {(turnsByThread[thread.id] || []).length} turns · {(derivedEpochs || seedEpochs).length} epochs</span>
             </button>
+            {thread.id !== 'board' && (
+              <button data-cursor="hub-epoch:board" onClick={() => { actions.openThread('board'); actions.setEpochGrid(true) }}>
+                Board of Directors <span className="unread">3</span><span className="meta"> · now · {(turnsByThread.board || []).length} turns · {seedEpochs.length} epochs</span>
+              </button>
+            )}
           </div>
         </div>
 

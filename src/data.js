@@ -1,3 +1,5 @@
+import codexTurns from './codexTurns.json' with { type: 'json' }
+
 export const PIVOTS = ['hub', 'conversation', 'collection', 'review', 'terminal', 'agents', 'settings']
 
 export const ACCENTS = [
@@ -63,6 +65,20 @@ export const seedThreads = [
     scope: ':fragments.auth',
     messages: [
       { role: 'agent', name: 'm1_worker_1', text: 'Wiring AuthAndVaultStore into MacosChromeApp.kt. JWT verification path is done; Keychain write-back is next.' },
+    ],
+  },
+  {
+    id: 'codex',
+    title: 'Codex ExecuTorch 200',
+    project: 'executorch-iot',
+    age: '3h',
+    pinned: true,
+    unread: 0,
+    status: '200 turns · 14 epochs',
+    scope: ':executorch.iot',
+    messages: [
+      { role: 'user', name: 'you', text: 'Setup a full development environment for the ExecuTorch hackathon on the IoT track with VENTUNO Q.' },
+      { role: 'agent', name: 'codex_iot', text: '200-turn Codex rollout imported from ~/.codex/sessions across 14 hot-word epochs.' },
     ],
   },
 ]
@@ -152,6 +168,7 @@ export const seedTurns = {
   auth: [
     { actor: 'm1_worker_1', age: '1h', state: 'running', progress: 41, summary: 'Wiring AuthAndVaultStore', intent: 'JWT verification into MacosChromeApp.', synthesis: 'JWT verification path is done; Keychain write-back is next. Wiring AuthAndVaultStore into MacosChromeApp.kt via collectAsState session flow.', stats: [{ v: '48', l: '+ lines' }, { v: '41%', l: 'complete' }], artifacts: [], full: 'Wiring AuthAndVaultStore into MacosChromeApp.kt. JWT verification path is done; Keychain write-back is next.', trace: ['edit MacosChromeApp.kt', 'write AuthAndVaultStore.kt · +48'], stdout: [':ui:compileKotlin → ok'] },
   ],
+  codex: codexTurns,
 }
 
 /* review as hunk triage: change set (task) → files → discrete mutation hunks.

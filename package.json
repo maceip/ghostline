@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5177",
     "build": "vite build",
-    "test": "node --test tests/data.test.mjs tests/router.test.mjs tests/config.test.mjs tests/derive.test.mjs tests/bridge.test.mjs tests/native-contract.test.mjs",
+    "test": "node --test tests/data.test.mjs tests/router.test.mjs tests/config.test.mjs tests/derive.test.mjs tests/extract.test.mjs tests/bridge.test.mjs tests/native-contract.test.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 5177"
   },
   "dependencies": {

@@ -185,3 +185,15 @@ export function treemapSpan(weight, maxWeight) {
   if (r >= 0.34) return 'w2'
   return ''
 }
+
+export {
+  extractTurnSpans,
+  segmentGroundedText,
+  deriveHotWords,
+  turnMatchesHotWord,
+  enrichTurn,
+  deriveEpochs,
+  assignTurnEpochs,
+  cleanDisplayText,
+} from './extract.js'
+

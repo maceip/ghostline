@@ -21,6 +21,7 @@ import {
   fmtTokens, parseCeiling, fleetCounts as deriveFleet, fleetVelocity, epochTurnCounts,
   facetPartition, changeSetForThread, changeSetTotals, tileForThread,
   escalationLevel, applyAutoApprove, applyParallelCap, tickAgents, treemapSpan,
+  deriveEpochs, assignTurnEpochs, deriveHotWords, turnMatchesHotWord, enrichTurn,
 } from './derive.js'
 
 const SESSION_KEY = 'zunecode.session.v1'
@@ -40,11 +41,17 @@ export default function App() {
      Z2 decisions & mutations ledger · Z3 full-bleed focus. font size never shrinks. */
   const [zoom, setZoom] = useState(() => (location.hash === '#map' ? 0 : 1))
   const [savedSession] = useState(loadSession)
-  /* a saved session from an older build must not lose fields added since (tile telemetry, scope) */
-  const [threads, setThreads] = useState(() => (savedSession?.threads || seedThreads).map((t) => {
-    const seed = seedThreads.find((s) => s.id === t.id)
-    return seed ? { ...t, scope: t.scope || seed.scope } : t
-  }))
+  /* savedSession may come from before the 200-turn codex thread was added; merge any new seedThreads/seedTurns */
+  const [threads, setThreads] = useState(() => {
+    const base = (savedSession?.threads || seedThreads).map((t) => {
+      const seed = seedThreads.find((s) => s.id === t.id)
+      return seed ? { ...t, scope: t.scope || seed.scope } : t
+    })
+    for (const st of seedThreads) {
+      if (!base.some((t) => t.id === st.id)) base.push(st)
+    }
+    return base
+  })
   const [threadId, setThreadId] = useState(() => savedSession?.threadId || 'board')
   const [agents, setAgents] = useState(seedAgents)
   const [activity, setActivity] = useState(seedActivity)
@@ -85,7 +92,7 @@ export default function App() {
   const [helpOn, setHelpOn] = useState(false) // …or after ?
   const [cursorId, setCursorId] = useState(null) // spatial keyboard cursor: data-cursor id in the active page
   const [selectedAgentId, setSelectedAgentId] = useState('a1')
-  const [turnsByThread, setTurnsByThread] = useState(() => savedSession?.turnsByThread || seedTurns)
+  const [turnsByThread, setTurnsByThread] = useState(() => ({ ...seedTurns, ...(savedSession?.turnsByThread || {}) }))
   /* sessions are durable: threads + turns survive reload (pi gets the same transcript as history).
      Written on a debounce, not on every state change: a streamed answer changes state
      once per token, and serialising the whole transcript on each one blocks the main
@@ -114,6 +121,7 @@ export default function App() {
   const [instructOpen, setInstructOpen] = useState(false) // c — inline instruction back to the agent
   const [instructDraft, setInstructDraft] = useState('')
   const [facet, setFacet] = useState('all') // Z3 segmented facet bar: all | prompts | decisions | mutations | pty | artifacts
+  const [hotWordFilter, setHotWordFilter] = useState(null) // Z3 hot-word filter key (LangExtract grounded token filter)
   const [epochGrid, setEpochGrid] = useState(false) // z — 2D epoch jump grid
   const [gateResolved, setGateResolved] = useState(null) // null | 'yes' | 'no' — the [y]/[n] arbitration
   const [jumpHint, setJumpHint] = useState(null) // f — two-letter gutter jump badges (string prefix while armed)
@@ -182,7 +190,7 @@ export default function App() {
   useEffect(() => {
     const el = pivotRefs.current[pivot]
     if (el) setPivotShift(el.offsetLeft - (pivotTrackRef.current?.offsetLeft || 0) - 0)
-  }, [pivot, density])
+  }, [pivot, density, zoom])
 
   const goPivot = useCallback((i) => {
     setZoom((z) => (z === 0 ? 1 : z))
@@ -204,7 +212,10 @@ export default function App() {
   useEffect(() => {
     const ts = turnsByThread[threadId] || []
     const ri = ts.findIndex((t) => t.state === 'running')
-    setSelectedTurn(ri >= 0 ? ri : Math.max(0, ts.length - 1))
+    const nextIdx = ri >= 0 ? ri : Math.max(0, ts.length - 1)
+    setSelectedTurn(nextIdx)
+    setCursorId((prev) => (prev && prev.startsWith('conv-turn:') ? `conv-turn:${nextIdx}` : prev))
+    setHotWordFilter(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
   useEffect(() => { if (promptOpen) promptRef.current?.focus() }, [promptOpen])
@@ -242,9 +253,9 @@ export default function App() {
   /* node list is cached per view-key — geometry moves at N=200 must not re-query
      the DOM on every keystroke. Invalidated whenever the rendered set can change. */
   const nodesCacheRef = useRef({ key: '', els: [] })
-  useEffect(() => { nodesCacheRef.current.key = '' }, [pivot, zoom, epochGrid, convLevel, revLevel, colLevel, agentsLevel, facet, setDomain, agents, threads, changeSets, turnsByThread, gateResolved])
+  useEffect(() => { nodesCacheRef.current.key = '' }, [pivot, zoom, epochGrid, convLevel, revLevel, colLevel, agentsLevel, facet, hotWordFilter, setDomain, agents, threads, changeSets, turnsByThread, gateResolved])
   function cursorNodes() {
-    const key = `${pivot}|${zoom}|${epochGrid}|${convLevel}${revLevel}${colLevel}${agentsLevel}|${facet}|${setDomain}`
+    const key = `${pivot}|${zoom}|${epochGrid}|${convLevel}${revLevel}${colLevel}${agentsLevel}|${facet}|${hotWordFilter || ''}|${setDomain}`
     if (nodesCacheRef.current.key === key && nodesCacheRef.current.els.length) return nodesCacheRef.current.els
     const scope = cursorScope(); if (!scope) return []
     /* drilled-away columns are display:none on phones — the cursor must never land in them */
@@ -289,12 +300,43 @@ export default function App() {
   }
   function jumpToEpoch(ep) {
     setEpochGrid(false)
-    if (threadId !== 'board') { setThreadId('board') }
+    setHotWordFilter(null)
     setSelectedTurn(ep.anchor)
     setCursorId(`conv-turn:${ep.anchor}`)
     setPivot(PIVOTS.indexOf('conversation'))
     if (zoom === 0) setZoom(1)
     pushActivity(`epoch jump · E${String(ep.n).padStart(2, '0')} ${ep.name}`)
+  }
+  function onSpanClick(span) {
+    if (!span) return
+    if (span.target?.type === 'hunk') {
+      const cs = changeSets.find((c) => c.files.some((f) => f.name === span.target.file)) || reviewSet
+      if (cs) {
+        setReviewSetId(cs.id)
+        setReviewFile(span.target.file)
+        const fObj = cs.files.find((f) => f.name === span.target.file)
+        if (fObj && span.target.line) {
+          const hi = fObj.hunks.findIndex((h) => Math.abs((h.line || 0) - span.target.line) <= 30)
+          setSelectedHunk(hi >= 0 ? hi : 0)
+        } else {
+          setSelectedHunk(0)
+        }
+        setZoom(1)
+        goPivot(PIVOTS.indexOf('review'))
+        pushActivity(`grounded span · ${span.text} → review`)
+        return
+      }
+    }
+    if (span.target?.type === 'file') {
+      const f = files.find((x) => x.name === span.target.file)
+      if (f) {
+        openFile(f)
+        pushActivity(`grounded span · ${span.text} → collection`)
+        return
+      }
+    }
+    setHotWordFilter((cur) => (cur === span.key ? null : span.key))
+    if (PIVOTS[pivot] === 'conversation' && zoom < 3) setZoom(3)
   }
   /* hunk triage: mutate exactly one hunk's review state */
   function setHunkState(state, comment) {
@@ -361,7 +403,11 @@ export default function App() {
       const id = cursorId.slice('conv-thread:'.length)
       if (id !== threadId) { setThreadId(id); setThreads((ts) => ts.map((x) => (x.id === id ? { ...x, unread: 0 } : x))) }
     }
-    if (cursorId.startsWith('conv-turn:')) setSelectedTurn(Number(cursorId.slice('conv-turn:'.length)))
+    if (cursorId.startsWith('conv-turn:') && zoom === 1) {
+      const idx = Number(cursorId.slice('conv-turn:'.length))
+      const maxIdx = Math.max(0, (turnsByThread[threadId]?.length || 1) - 1)
+      setSelectedTurn(Math.min(idx, maxIdx))
+    }
     if (cursorId.startsWith('rev-set:')) {
       const id = cursorId.slice('rev-set:'.length)
       if (id !== reviewSetId) {
@@ -377,12 +423,21 @@ export default function App() {
     if (cursorId.startsWith('rev-hunk:')) setSelectedHunk(Number(cursorId.slice('rev-hunk:'.length)))
     if (cursorId.startsWith('set-domain:') && /^\d+$/.test(cursorId.slice('set-domain:'.length))) setSetDomain(Number(cursorId.slice('set-domain:'.length)))
   }, [cursorId, pivot, zoom, threads, agents, folder, threadId, reviewSetId, reviewFile, changeSets])
-  /* land the cursor on the first node whenever the pivot changes */
+  /* land the cursor on the active selection (or first node) whenever the pivot or zoom changes */
   useEffect(() => {
     const raf = requestAnimationFrame(() => {
       const scope = zoom === 0 ? document.querySelector('.zoommap') : document.querySelectorAll('.page')[pivot]
-      const first = [...(scope?.querySelectorAll('[data-cursor]') || [])].find((el) => el.getBoundingClientRect().width > 0)
-      setCursorId(first ? first.dataset.cursor : null)
+      if (!scope) return
+      const visible = [...scope.querySelectorAll('[data-cursor]')].filter((el) => el.getBoundingClientRect().width > 0)
+      const preferred = PIVOTS[pivot] === 'conversation' && zoom === 1
+        ? visible.find((el) => el.dataset.cursor === `conv-thread:${threadId}`) || visible.find((el) => el.dataset.cursor === `conv-turn:${selectedTurn}`)
+        : PIVOTS[pivot] === 'conversation' && zoom >= 2
+          ? visible.find((el) => el.dataset.cursor === `conv-turn:${selectedTurn}`)
+          : PIVOTS[pivot] === 'review' && zoom === 1
+            ? visible.find((el) => el.dataset.cursor === `rev-set:${reviewSetId}`)
+            : null
+      const chosen = preferred || visible[0]
+      setCursorId(chosen ? chosen.dataset.cursor : null)
     })
     return () => cancelAnimationFrame(raf)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -408,6 +463,7 @@ export default function App() {
         else if (searchOpen) { setSearchOpen(false); setQuery('') }
         else if (promptOpen) { setPromptOpen(false) }
         else if (instructOpen) { setInstructOpen(false); setInstructDraft('') }
+        else if (hotWordFilter !== null) setHotWordFilter(null)
         else if (splitTurn !== null) setSplitTurn(null)
         else if (zoom === 1 && narrow && drillLevel > 0) setDrillLevels[PIVOTS[pivot]](drillLevel - 1)
         else { setZoom((z) => Math.max(0, z - 1)); if (typing) document.activeElement.blur() }
@@ -650,7 +706,8 @@ export default function App() {
     const history = historyFromTurns(existing)
     const titleFromDraft = existing.length === 0 ? text.slice(0, 44) : thread.title
     setThreads((ts) => ts.map((t) => (t.id === id ? { ...t, title: titleFromDraft, status: 'agent running' } : t)))
-    const userTurn = { actor: 'user', age: 'now', summary: `"${text.slice(0, 52)}${text.length > 52 ? '…' : ''}"`, intent: text, synthesis: text, stats: [], artifacts: [], full: text, trace: [], stdout: [] }
+    const wsCtx = { files, folders, changeSets }
+    const userTurn = enrichTurn({ actor: 'user', kind: 'prompt', age: 'now', intent: text, synthesis: text, stats: [], artifacts: [], full: text, trace: [], stdout: [] }, wsCtx)
     const agentTurn = { actor: 'agent', engine: engineSummary, age: 'running', state: 'running', progress: 2, summary: 'working…', intent: text, synthesis: '', stats: [], artifacts: [], full: '', trace: [], stdout: [] }
     setTurnsByThread((m) => ({ ...m, [id]: [...(m[id] || []), userTurn, agentTurn] }))
     setSelectedTurn(existing.length + 1)
@@ -699,11 +756,13 @@ export default function App() {
       })
       stopTokens()
       const firstLine = result.text.split('\n').find((l) => l.trim()) || 'complete'
-      patchTurn({
+      patchTurn((prev) => enrichTurn({
+        ...prev,
         actor: result.label, engine: result.label, synthesis: result.text, full: result.text,
-        summary: firstLine.slice(0, 72), age: 'now', state: undefined, progress: 100,
+        summary: undefined, kind: undefined, decision: undefined,
+        age: 'now', state: undefined, progress: 100,
         ...(result.fallbackFrom ? { fallbackFrom: result.fallbackFrom } : {}),
-      })
+      }, wsCtx))
       setRunProgress(100)
       setThreads((ts) => ts.map((t) => (t.id === id ? { ...t, status: 'complete' } : t)))
       pushActivity(`${result.label} finished${result.fallbackFrom ? ' (remote failed, answered locally)' : ''}`)
@@ -774,7 +833,16 @@ export default function App() {
   const pivotCounts = { conversation: threads.reduce((n, t) => n + t.unread, 0), agents: runningAgents.length, review: unreviewed }
 
   /* matrix selections, shared by render + baseline */
-  const turns = turnsByThread[threadId] || []
+  const workspaceCtx = useMemo(() => ({ files, folders, changeSets }), [changeSets])
+  const rawTurns = turnsByThread[threadId] || []
+  const derivedEpochs = useMemo(
+    () => deriveEpochs(rawTurns, seedEpochs, config.epochs, workspaceCtx, threadId),
+    [rawTurns, config.epochs, workspaceCtx, threadId],
+  )
+  const turns = useMemo(
+    () => assignTurnEpochs(rawTurns, derivedEpochs, workspaceCtx),
+    [rawTurns, derivedEpochs, workspaceCtx],
+  )
   const activeTurn = turns[Math.min(selectedTurn, Math.max(0, turns.length - 1))] || null
   const reviewSet = changeSets.find((c) => c.id === reviewSetId) || changeSets[0]
   const reviewFileObj = reviewSet?.files.find((f) => f.name === reviewFile) || reviewSet?.files[0] || null
@@ -787,7 +855,7 @@ export default function App() {
   const stripLabel = PIVOTS[pivot] === 'review' && activeHunk
     ? `${reviewFileObj.name} · hunk ${selectedHunk + 1}/${reviewFileObj.hunks.length}`
     : PIVOTS[pivot] === 'conversation' && activeTurn
-      ? `${thread.title} · turn ${String(selectedTurn + 1).padStart(2, '0')}`
+      ? `${thread.title} · turn ${String(Math.min(selectedTurn, Math.max(0, turns.length - 1)) + 1).padStart(2, '0')}`
       : cursorThread ? cursorThread.title
         : cursorAgent ? cursorAgent.name
           : ck && ck.kind === 'domain' ? ['agent pool & routing', 'telemetry tile thresholds', 'sandbox & enclave gates', 'keyboard & semantic zoom', 'typography & swiss grid', 'daemons & local endpoints'][Number(ck.id)] || 'settings'
@@ -854,9 +922,16 @@ export default function App() {
   }
   const tiledThreads = useMemo(() => threads.filter((t) => threadTiles.get(t.id)).slice(0, 8), [threads, threadTiles])
   const idleThreads = useMemo(() => threads.filter((t) => !threadTiles.get(t.id)), [threads, threadTiles])
-  const epochCounts = useMemo(() => epochTurnCounts(turnsByThread.board || []), [turnsByThread])
-  const activeEpoch = seedEpochs.find((e) => e.n === (activeTurn?.epoch || 6)) || seedEpochs[seedEpochs.length - 1]
+  const epochCounts = useMemo(() => epochTurnCounts(turns), [turns])
+  const activeEpoch = derivedEpochs.find((e) => e.n === (activeTurn?.epoch || derivedEpochs[derivedEpochs.length - 1]?.n))
+    || derivedEpochs[derivedEpochs.length - 1]
+    || { n: 1, name: 'SESSION', anchor: 0, summary: '', hotWords: [] }
   const facetTurns = facets[facet] || facets.all
+  const hotWords = useMemo(() => deriveHotWords(facetTurns, workspaceCtx, 10), [facetTurns, workspaceCtx])
+  const visibleFacetTurns = useMemo(
+    () => (hotWordFilter ? facetTurns.filter((t) => turnMatchesHotWord(t, hotWordFilter, workspaceCtx)) : facetTurns),
+    [facetTurns, hotWordFilter, workspaceCtx],
+  )
   /* Z0 treemap: block area is proportional to real weight (turns, files, hunks, workers) */
   const mapBlocks = [
     { badge: 'a', id: 'board', title: 'board of directors', weight: (turnsByThread.board || []).length, sub: `${gateBlocking ? '1 BLOCKED GATE · FAIL :142 · ' : gateOpen ? 'gate warning · ' : ''}${(turnsByThread.board || []).length} turns · ${seedEpochs.length} epochs`, blocked: gateBlocking, go: () => openThread('board') },
@@ -885,7 +960,7 @@ export default function App() {
     setInstructOpen, setBridgeStatus, composerKey, setConvLevel, setRevLevel, setColLevel,
     setFolder, setFileName, setTermInput, setSearchOpen, setQuery, setFacet, setSplitTurn,
     setSetDomain, setCfg, setAccent, setTheme, setDensity, setGateResolved, setTurnsByThread,
-    setAgents, setActivity, setChangeSets, setCursorId,
+    setAgents, setActivity, setChangeSets, setCursorId, setHotWordFilter, onSpanClick,
   }
   const actions = useMemo(() => {
     const out = {}
@@ -1035,6 +1110,7 @@ export default function App() {
             sendingRef={sendingRef} runProgress={runProgress} runLabel={runLabel} agents={agents}
             activity={activity} fleetCounts={fleetCounts} suitesPass={suitesPass} suitesTotal={suitesTotal}
             allTurnsCount={allTurnsCount} tokVelocity={tokVelocity} fleetSpent={fleetSpent}
+            derivedEpochs={derivedEpochs}
             tiltSpot={tiltSpot} motion={motion} actions={actions}
           />
 
@@ -1045,6 +1121,8 @@ export default function App() {
             thread={thread} threadId={threadId} threads={threads} turns={turns}
             selectedTurn={selectedTurn} setSelectedTurn={setSelectedTurn} activeTurn={activeTurn}
             promptTurns={promptTurns} decisionTurns={decisionTurns} activeEpoch={activeEpoch} epochCounts={epochCounts}
+            derivedEpochs={derivedEpochs} hotWords={hotWords} hotWordFilter={hotWordFilter}
+            visibleFacetTurns={visibleFacetTurns} workspaceCtx={workspaceCtx}
             sessionChangeSet={sessionChangeSet} sessionHunks={sessionHunks} facet={facet} facetTurns={facetTurns}
             splitTurn={splitTurn} promptOpen={promptOpen} engineSummary={engineSummary} draft={draft} setDraft={setDraft}
             promptRef={promptRef} gateOpen={gateOpen} gateResolved={gateResolved}
@@ -1118,14 +1196,19 @@ export default function App() {
         {/* z · epoch jump grid: the whole multi-day session as one screen of squares */}
         {epochGrid && (
           <div className="zoommap epochgrid" role="dialog" aria-label="epoch jump grid">
-            <p className="huge">epochs · board of directors</p>
-            <p className="dim" style={{ fontWeight: 300 }}>{(turnsByThread.board || []).length} turns across {seedEpochs.length} epochs · click a square to teleport · esc closes · never scroll two days of history</p>
+            <p className="huge">epochs · {thread.title.toLowerCase()}</p>
+            <p className="dim" style={{ fontWeight: 300 }}>{turns.length} turns across {derivedEpochs.length} epochs · click a square to teleport · esc closes · never scroll two days of history</p>
             <div className="mapgrid epochcells">
-              {seedEpochs.map((ep, i) => (
-                <button key={ep.n} className={`mapblock tiltcard ${ep.n === activeEpoch.n ? 'live' : ''} ${i === seedEpochs.length - 1 ? 'w2' : ''}`} {...tiltSpot} data-cursor={`conv-epoch:${ep.n}`} onClick={() => jumpToEpoch(ep)}>
+              {derivedEpochs.map((ep, i) => (
+                <button key={ep.n} className={`mapblock ${ep.n === activeEpoch.n ? 'live' : ''} ${derivedEpochs.length <= 6 && i === derivedEpochs.length - 1 ? 'w2' : ''}`} data-cursor={`conv-epoch:${ep.n}`} onClick={() => jumpToEpoch(ep)}>
                   <span className="t">[{String(ep.n).padStart(2, '0')}] {ep.name.toLowerCase()}</span>
                   <small>{ep.when} · {epochCounts.get(ep.n) || 0} turns{ep.n === activeEpoch.n ? ' · you are here' : ''}</small>
                   <small className="epochsummary">{ep.summary}</small>
+                  {(ep.hotWords || []).length > 0 && (
+                    <span className="ephotwords">
+                      {ep.hotWords.map((hw) => <span key={hw.key} className="ephw">{hw.label}<sup>{hw.count}</sup></span>)}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
