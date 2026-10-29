@@ -89,9 +89,12 @@ try {
   const revSelectedFile = await page.locator('.page.isactive .revfile.sel .revfilename').textContent()
   assert.equal(revSelectedFile?.trim(), 'TEST_INFRA.md', 'clicking grounded TEST_INFRA.md span must select TEST_INFRA.md in Review')
 
-  // 4. Switch to the 200-turn Codex session ("05 CODEX EXECUTORCH 200") and benchmark UI responsiveness
+  // 4. Switch to the 200-turn Codex session ("Codex ExecuTorch 200") and benchmark UI responsiveness
+  await page.click('.zoomstops button:has-text("Z1")')
+  await page.click('nav.pivotrail button.pivot:has-text("conversation")')
+  await page.waitForSelector('.page.isactive[aria-label="conversation"]')
   const tSwitch0 = performance.now()
-  await page.click('.sessionstrip button.sessiontab:has-text("CODEX EXECUTORCH 200")')
+  await page.click('.page.isactive [data-cursor="conv-thread:codex"]')
   await page.waitForSelector('[data-cursor="conv-turn:199"]')
   const z1SwitchMs = performance.now() - tSwitch0
 

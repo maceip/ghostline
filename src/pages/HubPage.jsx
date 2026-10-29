@@ -2,17 +2,17 @@ import { memo } from 'react'
 import { files, artifacts, seedGate, seedEpochs, PIVOTS } from '../data.js'
 import { fmtTokens, escalationLevel } from '../derive.js'
 
-/* Hub pivot: telemetry tiles, the subagent pipeline, and the mutation stream. */
+/* Hub pivot: telemetry tiles, the subagent pipeline, and the activity stream. */
 function HubPage({
   active, tiledThreads, threadTiles, effectivePolicy, gateBlocking, gateResolved, idleThreads,
-  turnsByThread, thread, threads, runningAgents, sendingRef, runProgress, runLabel, agents, activity,
-  fleetCounts, suitesPass, suitesTotal, allTurnsCount, tokVelocity, fleetSpent, derivedEpochs, tiltSpot, motion, actions,
+  threads, runningAgents, sendingRef, runProgress, runLabel, agents, activity,
+  fleetCounts, suitesPass, suitesTotal, allTurnsCount, tokVelocity, fleetSpent, tiltSpot, motion, actions,
 }) {
   return (
     <section className={active ? 'page isactive' : 'page'} aria-label="hub">
       <div className="hub" data-cascade>
         <div>
-          <p className="label">active workstreams <span className="n">{tiledThreads.length} tiles · cap 8</span></p>
+          <p className="label">workstreams</p>
           {/* polymorphic telemetry tiles: only active / staged / blocked workstreams earn a square.
               the big numeral changes meaning by phase; blocked goes solid accent with inline [y]/[n]. */}
           <div className="tilegrid">
@@ -42,30 +42,20 @@ function HubPage({
             })}
           </div>
           {gateResolved && <p className="dim" style={{ fontWeight: 300 }}>gate resolved · {gateResolved === 'yes' ? 'mock PCR0 in :dev only' : 'strict kept'} — verifier rerunning</p>}
-          <p className="label" style={{ marginTop: 30 }}>idle conversations <span className="n">no tile</span></p>
-          <div className="rows">
-            {idleThreads.map((t) => (
-              <button key={t.id} data-cursor={`hub-thread:${t.id}`} onClick={() => actions.openThread(t.id)}>
-                {t.title}{t.unread > 0 && <span className="unread"> {t.unread}</span>}
-                <span className="meta"> · {t.age} · {t.project}</span>
-              </button>
-            ))}
-          </div>
-          <p className="label" style={{ marginTop: 30 }}>conversation epochs <span className="n">z jump grid</span></p>
-          <div className="rows">
-            <button data-cursor={`hub-epoch:${thread.id}`} onClick={() => { actions.openThread(thread.id); actions.setEpochGrid(true) }}>
-              {thread.title} {thread.id === 'board' && <span className="unread">3</span>}<span className="meta"> · {thread.age} · {(turnsByThread[thread.id] || []).length} turns · {(derivedEpochs || seedEpochs).length} epochs</span>
-            </button>
-            {thread.id !== 'board' && (
-              <button data-cursor="hub-epoch:board" onClick={() => { actions.openThread('board'); actions.setEpochGrid(true) }}>
-                Board of Directors <span className="unread">3</span><span className="meta"> · now · {(turnsByThread.board || []).length} turns · {seedEpochs.length} epochs</span>
-              </button>
-            )}
-          </div>
+          {idleThreads.length > 0 && (
+            <div className="rows" style={{ marginTop: 24 }}>
+              {idleThreads.map((t) => (
+                <button key={t.id} data-cursor={`hub-thread:${t.id}`} onClick={() => actions.openThread(t.id)}>
+                  {t.title}{t.unread > 0 && <span className="unread"> {t.unread}</span>}
+                  <span className="meta"> · {t.age} · {t.project}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div>
-          <p className="label">subagent pipeline <span className="n">now focused · {thread.title.toLowerCase()}</span></p>
+          <p className="label">subagents</p>
           <p className="huge">{runningAgents[0]?.name || 'idle'}</p>
           <p className="big dim" style={{ marginTop: 8 }}>{runningAgents[0]?.task || 'no agent is running'}</p>
           <div className="progress"><i style={{ width: `${sendingRef.current ? runProgress : (runningAgents[0]?.progress ?? 0)}%` }} /></div>
@@ -82,18 +72,11 @@ function HubPage({
         </div>
 
         <div>
-          <p className="label">recent mutation stream</p>
+          <p className="label">activity</p>
           <div className="activity">
             {activity.map((a, i) => <div key={i}><span className="when">{a.when}</span>{a.what}</div>)}
           </div>
-          <p className="label" style={{ marginTop: 34 }}>staged artifacts <span className="n">({artifacts.length})</span></p>
-          <div className="rows">
-            {artifacts.slice(0, 4).map((a) => (
-              <button key={a} data-cursor={`hub-artifact:${a}`} onClick={() => { const f = files.find((x) => x.name === a); if (f) actions.openFile(f); else actions.openThread('board') }}>{a}</button>
-            ))}
-          </div>
-          <p className="label" style={{ marginTop: 34 }}>session metrics <span className="n">active pool</span></p>
-          <div style={{ display: 'flex', gap: 44, alignItems: 'baseline' }}>
+          <div style={{ display: 'flex', gap: 44, alignItems: 'baseline', marginTop: 34 }}>
             <span><span className="bignum">{String(agents.length).padStart(2, '0')}</span><span className="dim"> subagents · {fleetCounts.running} running</span></span>
             <span><span className="bignum">{suitesPass} / {suitesTotal}</span><span className="dim"> suites green{gateBlocking ? ' · gate holding' : ''}</span></span>
           </div>

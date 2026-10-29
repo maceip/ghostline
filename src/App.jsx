@@ -189,7 +189,12 @@ export default function App() {
   const [pivotShift, setPivotShift] = useState(0)
   useEffect(() => {
     const el = pivotRefs.current[pivot]
-    if (el) setPivotShift(el.offsetLeft - (pivotTrackRef.current?.offsetLeft || 0) - 0)
+    const track = pivotTrackRef.current
+    if (!el || !track) return
+    const pad = window.innerWidth <= 1100 ? 24 : 48
+    const maxShift = Math.max(0, track.scrollWidth - (window.innerWidth - pad * 2))
+    const target = Math.max(0, el.offsetLeft - track.offsetLeft - 120)
+    setPivotShift(Math.min(target, maxShift))
   }, [pivot, density, zoom])
 
   const goPivot = useCallback((i) => {
@@ -585,14 +590,20 @@ export default function App() {
       setAgents((as) => {
         let { agents: next, events } = tickAgents(as, 1.6)
         next = applyParallelCap(next, config.maxParallel ?? 10).agents
-        /* ceiling is per-epoch/session burn, not lifetime: seeded history doesn't count against it */
+        /* ceiling is per-epoch/session burn, not lifetime: only pause if an explicit ceiling is set */
         const baseline = seedAgents.reduce((n, a) => n + (a.tokens || 0), 0)
         const spent = next.reduce((n, a) => n + (a.tokens || 0), 0) - baseline
-        const ceiling = parseCeiling(config.tokenCeiling || '500k')
+        const ceiling = parseCeiling(config.tokenCeiling || 'unlimited')
         if (spent >= ceiling && next.some((a) => a.state === 'running')) {
           next = next.map((a) => (a.state === 'running' ? { ...a, state: 'queued', rate: 0, phase: 'token ceiling reached' } : a))
-          if (!ceilingHitRef.current) { ceilingHitRef.current = true; events.push(`token ceiling ${config.tokenCeiling || '500k'} reached · fleet paused (settings 01)`) }
-        } else if (spent < ceiling) ceilingHitRef.current = false
+          if (!ceilingHitRef.current) { ceilingHitRef.current = true; events.push(`token ceiling ${config.tokenCeiling} reached · fleet paused (settings 01)`) }
+        } else {
+          ceilingHitRef.current = false
+          /* keep the active test/mutation worker loop alive if no ceiling is tripped */
+          if (!next.some((a) => a.state === 'running')) {
+            next = next.map((a) => (a.id === 'a1' ? { ...a, state: 'running', progress: 38, pass: 18, rate: 14800, phase: 'testing' } : a))
+          }
+        }
         if (events.length) queueMicrotask(() => events.forEach((e) => pushActivity(e)))
         return next
       })
@@ -1034,30 +1045,22 @@ export default function App() {
 
   return (
     <div className={`app ${motion.cascade ? "" : "m-nocascade "}${motion.shimmer ? "" : "m-noshimmer "}${motion.glow ? "" : "m-noglow "}${motion.tilt ? "" : "m-notilt"}`} style={style} data-theme={theme} onWheel={onWheel} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={(e) => { onTouchDone(e); onTouchEnd(e) }} onTouchCancel={onTouchDone}
-      onMouseOver={(e) => { const n = e.target.closest?.('[data-cursor]'); if (n && n.dataset.cursor !== cursorId) setCursorId(n.dataset.cursor) }}
       onFocusCapture={(e) => { const n = e.target.closest?.('[data-cursor]'); if (n) setCursorId(n.dataset.cursor) }}>
       <div className="topline" data-drag-zone="true" data-zode-drag-zone="true" title="drag to move · double-click to fill"
         onPointerDown={(e) => { if (e.target.closest('button,input,a,[data-zode-drag-ignore]')) return; window.zode?.window?.dragStart?.(e.screenX, e.screenY) }}
         onDoubleClick={(e) => { if (e.target.closest('button,input,a,[data-zode-drag-ignore]')) return; if (window.zode?.window?.toggleFillScreen) window.zode.window.toggleFillScreen().catch(() => {}); else if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else document.documentElement.requestFullscreen?.().catch(() => {}) }}>
         <img className="brandmark" src="/zode-mark.svg" alt="zode mark" />
         <span className="wordmark">zune <b>code</b></span>
-        {/* Tier 1 · horizontal session strip (Cmd+1..9) — replaces vertical browser tabs */}
-        {zoom === 3 && PIVOTS[pivot] === 'conversation'
-          ? <button className="sessiontab back" onClick={() => setZoom(1)}>← hub <span className="faint">[esc]</span></button>
-          : <span className="faint" aria-hidden="true">│</span>}
-        <span className="sessionstrip" role="tablist" aria-label="sessions">
-          {threads.slice(0, 9).map((t, i) => (
-            <button key={t.id} className={t.id === threadId ? 'sessiontab on' : 'sessiontab'} onClick={() => openThread(t.id)} title={`⌘${i + 1}`}>
-              {String(i + 1).padStart(2, '0')} {t.title.toUpperCase().replace(/ UI ENHANCEMENT| VERIFICATION/g, '')} <span className={t.id === seedGate.threadId && gateOpen ? 'sessiontag blocked' : 'sessiontag'}>{sessionTag(t)}</span>
-            </button>
-          ))}
-        </span>
+        {zoom === 3 && PIVOTS[pivot] === 'conversation' && (
+          <button className="sessiontab back" onClick={() => setZoom(1)}>← conversation <span className="faint">[esc]</span></button>
+        )}
         <span className="spacer" />
         {showHints && <span className="kbd">⌘1–9 sessions · [ ] pivots · h j k l move · f jump · z epochs · ctrl+scroll zoom Z0–Z3 · ? hide</span>}
-        <span className="zoomstops" aria-label={`semantic zoom Z${zoom}`}>{[0, 1, 2, 3].map((z) => (
-          <button key={z} className={z === zoom ? 'zstop on' : 'zstop'} onClick={() => setZoom(z)}>{z === zoom ? `■ Z${z}` : `Z${z}`}</button>
-        )).reduce((acc, el, i) => (i ? [...acc, <span key={'d' + i} className="faint">─</span>, el] : [el]), [])}</span>
-        <button className="toplink" onClick={() => setZoom(0)}>map −</button>
+        {(PIVOTS[pivot] === 'conversation' || PIVOTS[pivot] === 'review' || zoom === 0) && (
+          <span className="zoomstops" aria-label={`semantic zoom Z${zoom}`}>{[0, 1, 2, 3].map((z) => (
+            <button key={z} className={z === zoom ? 'zstop on' : 'zstop'} onClick={() => setZoom(z)}>{z === zoom ? `■ Z${z}` : `Z${z}`}</button>
+          )).reduce((acc, el, i) => (i ? [...acc, <span key={'d' + i} className="faint">─</span>, el] : [el]), [])}</span>
+        )}
         <button className="toplink" onClick={newThread}><span className="onlywide">+ new conversation</span><span className="onlynarrow">+ new</span></button>
       </div>
 
@@ -1221,10 +1224,10 @@ export default function App() {
       <div className="fleetstrip" role="img" aria-label={`fleet: ${fleetSegs.map((s) => `${s.n} ${s.k}`).join(', ')}`} title={fleetSegs.map((s) => `${s.n} ${s.k}`).join(' · ')}>
         {fleetSegs.filter((s) => s.n > 0).map((s) => <i key={s.k} style={{ width: `${(s.n / fleetTotal) * 100}%`, background: s.c }} />)}
       </div>
-      {/* contextual baseline: 32px of type, lit only by what the cursor rests on. no bar, no line, no transport. */}
-      <footer className={cursorId ? 'actionstrip lit' : 'actionstrip'}>
-        <span className="striplabel">{jumpHint !== null ? `jump: ${jumpHint}▌` : stripLabel}</span>
-        {stripActions.map(([k, label]) => (
+      {/* contextual baseline: whisper-quiet status line; keybind hints appear only when ? is toggled */}
+      <footer className={showHints || jumpHint !== null ? 'actionstrip lit' : 'actionstrip'}>
+        <span className="striplabel">{jumpHint !== null ? `jump: ${jumpHint}▌` : thread.title}</span>
+        {showHints && stripActions.map(([k, label]) => (
           <button key={k + label} className="stripaction" onClick={() => runStripAction(k)}>{coarse ? label : <><b>[{k}]</b> {label}</>}</button>
         ))}
         <span className="spacer" style={{ flex: 1 }} />
