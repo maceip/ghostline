@@ -358,3 +358,158 @@ export function openAIReasoningItemFromAnthropicBlock(block) {
   }
   return null
 }
+
+// ---- Responses Opaque State Rectifier (ported from opaque_state_rectifier.rs) ----
+
+export const ENCRYPTED_FUNCTION_OUTPUT_REJECTION =
+  'Encrypted function output content could not be decrypted or decoded.'
+export const ENCRYPTED_PART_PLACEHOLDER = '[encrypted content omitted]'
+
+function isForeignResourceRejection(msg) {
+  return typeof msg === 'string' && msg.includes('created under a different') && msg.includes('resource')
+}
+
+function isOpaqueRejectionMessage(msg) {
+  if (typeof msg !== 'string') return false
+  return (
+    (msg.startsWith('The encrypted content') && msg.includes('could not be verified')) ||
+    (msg.includes('was not issued to this caller') &&
+      (msg.includes('encrypted_content') || msg.includes('reasoning'))) ||
+    (msg.includes("Invalid 'input[") && msg.includes('Expected an ID that begins with')) ||
+    (msg.includes('not found') && msg.includes('Items are not persisted when')) ||
+    isForeignResourceRejection(msg)
+  )
+}
+
+function stripMismatchedItemId(item, itemType) {
+  if (!item || typeof item !== 'object' || typeof item.id !== 'string') return false
+  const id = item.id
+  const expectedPrefix =
+    itemType === 'message' ? 'msg_' :
+    itemType === 'function_call' ? 'fc_' :
+    itemType === 'function_call_output' ? 'fco_' :
+    itemType === 'reasoning' ? 'rs_' : null
+  if (expectedPrefix && !id.startsWith(expectedPrefix)) {
+    delete item.id
+    return true
+  }
+  return false
+}
+
+/**
+ * Detect whether an upstream OpenAI Responses error was caused by opaque state (`encrypted_content`,
+ * foreign `id` prefixes like MiniMax's `070ff2_msg_3`, or Azure cross-resource item IDs).
+ */
+export function detectOpaqueStateRejection(errorMessageOrPayload, config = DEFAULT_RECTIFIER_CONFIG) {
+  const cfg = { ...DEFAULT_RECTIFIER_CONFIG, ...config }
+  if (!cfg.enabled) return null
+  if (!errorMessageOrPayload) return null
+
+  const text = typeof errorMessageOrPayload === 'string'
+    ? errorMessageOrPayload
+    : JSON.stringify(errorMessageOrPayload)
+
+  let parsed = typeof errorMessageOrPayload === 'object' ? errorMessageOrPayload : null
+  if (!parsed) {
+    try { parsed = JSON.parse(text) } catch { parsed = null }
+  }
+
+  const messages = [
+    parsed?.error?.message,
+    parsed?.message,
+    typeof parsed?.error === 'string' ? parsed.error : null,
+    parsed?.detail,
+    text,
+  ].filter((m) => typeof m === 'string')
+
+  const isCoded =
+    parsed?.error?.code === 'invalid_encrypted_content' ||
+    (parsed?.code === 'invalid-argument' &&
+      typeof parsed?.error === 'string' &&
+      (parsed.error.startsWith('Could not decode the compaction blob') ||
+        parsed.error.startsWith('Could not decrypt the provided encrypted_content')))
+
+  const isMsgMatch =
+    text.trim() === ENCRYPTED_FUNCTION_OUTPUT_REJECTION ||
+    messages.includes(ENCRYPTED_FUNCTION_OUTPUT_REJECTION) ||
+    messages.some(isOpaqueRejectionMessage)
+
+  if (!isCoded && !isMsgMatch) return null
+
+  return {
+    reasoning: true,
+    compaction: messages.some((m) => m.includes('compaction')),
+    itemIds: messages.some(isForeignResourceRejection),
+  }
+}
+
+/**
+ * Rectify an OpenAI Responses `body.input` array in place by removing un-verifiable `reasoning`
+ * items, replacing `encrypted_content` parts in `function_call_output` / historical `agent_message`
+ * items with `[encrypted content omitted]`, and stripping foreign/cross-resource item IDs while
+ * preserving `call_id` linkage.
+ */
+export function rectifyOpaqueState(body, rejection = { reasoning: true, compaction: false, itemIds: false }) {
+  const result = {
+    applied: false,
+    removedReasoningItems: 0,
+    replacedEncryptedParts: 0,
+    removedForeignIds: 0,
+  }
+  if (!body || typeof body !== 'object' || !Array.isArray(body.input)) {
+    return result
+  }
+
+  const replaceEncryptedInArray = (arr) => {
+    if (!Array.isArray(arr)) return 0
+    let count = 0
+    for (let i = 0; i < arr.length; i++) {
+      const part = arr[i]
+      if (part?.type === 'encrypted_content' && part.encrypted_content) {
+        arr[i] = { type: 'input_text', text: ENCRYPTED_PART_PLACEHOLDER }
+        count += 1
+      }
+    }
+    return count
+  }
+
+  const rectified = []
+  for (let i = 0; i < body.input.length; i++) {
+    const item = body.input[i]
+    if (!item || typeof item !== 'object') {
+      rectified.push(item)
+      continue
+    }
+    const itemType = item.type || ''
+    if (itemType === 'reasoning' && rejection.reasoning) {
+      result.removedReasoningItems += 1
+      continue
+    }
+    const clone = { ...item }
+    if ((itemType === 'function_call_output' || itemType === 'custom_tool_call_output') && rejection.reasoning) {
+      if (Array.isArray(clone.output)) {
+        clone.output = [...clone.output]
+        result.replacedEncryptedParts += replaceEncryptedInArray(clone.output)
+      }
+    }
+    if (itemType === 'agent_message' && rejection.reasoning && i < body.input.length - 1) {
+      if (Array.isArray(clone.content)) {
+        clone.content = [...clone.content]
+        result.replacedEncryptedParts += replaceEncryptedInArray(clone.content)
+      }
+    }
+    if (rejection.itemIds && itemType !== 'item_reference' && 'id' in clone) {
+      delete clone.id
+      result.removedForeignIds += 1
+    } else if (rejection.reasoning && stripMismatchedItemId(clone, itemType)) {
+      result.removedForeignIds += 1
+    }
+    rectified.push(clone)
+  }
+
+  body.input = rectified
+  result.applied =
+    result.removedReasoningItems + result.replacedEncryptedParts + result.removedForeignIds > 0
+  return result
+}
+

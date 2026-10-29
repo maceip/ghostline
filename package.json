@@ -11,7 +11,8 @@
     "./llm/inline-think": "./src/llm/inlineThink.js",
     "./llm/rectifier": "./src/llm/rectifier.js",
     "./llm/cache-injector": "./src/llm/cacheInjector.js",
-    "./llm/model-mapper": "./src/llm/modelMapper.js"
+    "./llm/model-mapper": "./src/llm/modelMapper.js",
+    "./llm/thinking-optimizer": "./src/llm/thinkingOptimizer.js"
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5177",

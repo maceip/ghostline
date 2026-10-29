@@ -24,6 +24,16 @@ import {
   lookupPiModelCapabilities,
   isPiThinkingLevelMap,
   createLLMRouter,
+  detectOpaqueStateRejection,
+  rectifyOpaqueState,
+  ENCRYPTED_FUNCTION_OUTPUT_REJECTION,
+  ENCRYPTED_PART_PLACEHOLDER,
+  usesAdaptiveThinking,
+  adaptiveThinkingIsDefault,
+  thinkingCannotBeDisabled,
+  optimizeThinking,
+  filterPrivateParams,
+  LateArgumentsRepair,
 } from '../src/llm/index.js'
 
 // ============================================================================
@@ -330,3 +340,149 @@ test('ModelMapping & stripOneMSuffix: maps tier aliases, degrades fable -> opus,
   assert.equal(isPiThinkingLevelMap(cap.thinkingLevelMap), true)
   assert.deepEqual(cap.compat, { forceAdaptiveThinking: true })
 })
+
+// ============================================================================
+// 6. Thinking Optimizer, Body Filter, Opaque State Rectifier & Late-Arguments SSE Repair
+// ============================================================================
+test('optimizeThinking: 3-path adaptive / legacy / skip-haiku dispatch and beta deduplication', () => {
+  assert.equal(usesAdaptiveThinking('anthropic/claude-opus-4.8'), true)
+  assert.equal(adaptiveThinkingIsDefault('claude-opus-5.5'), true)
+  assert.equal(adaptiveThinkingIsDefault('claude-opus-4-8'), false)
+  assert.equal(thinkingCannotBeDisabled('claude-fable-5'), true)
+
+  const opusBody = {
+    model: 'anthropic/claude-opus-4.8',
+    max_tokens: 16384,
+    thinking: { type: 'enabled', budget_tokens: 8000 },
+  }
+  const r1 = optimizeThinking(opusBody)
+  assert.equal(r1.applied, true)
+  assert.equal(r1.mode, 'adaptive')
+  assert.deepEqual(opusBody.thinking, { type: 'adaptive' })
+  assert.deepEqual(opusBody.output_config, { effort: 'max' })
+  assert.deepEqual(opusBody.anthropic_beta, ['context-1m-2025-08-07'])
+
+  const sonnet45Body = {
+    model: 'claude-sonnet-4-5',
+    max_tokens: 8192,
+    thinking: { type: 'disabled' },
+  }
+  const r2 = optimizeThinking(sonnet45Body)
+  assert.equal(r2.applied, true)
+  assert.equal(r2.mode, 'legacy')
+  assert.deepEqual(sonnet45Body.thinking, { type: 'enabled', budget_tokens: 8191 })
+  assert.deepEqual(sonnet45Body.anthropic_beta, ['interleaved-thinking-2025-05-14'])
+
+  const haikuBody = { model: 'claude-haiku-4-5', max_tokens: 4096 }
+  const r3 = optimizeThinking(haikuBody)
+  assert.equal(r3.applied, false)
+  assert.equal(r3.mode, 'skip_haiku')
+  assert.equal(haikuBody.thinking, undefined)
+})
+
+test('filterPrivateParams: recursively removes _-prefixed keys while preserving JSON Schema properties and whitelist', () => {
+  const input = {
+    model: 'claude-sonnet-4-5',
+    _internal_id: 'abc',
+    _metadata: { keep: true },
+    messages: [{ role: 'user', content: 'hi', _session_token: 'secret' }],
+    tools: [
+      {
+        name: 'lookup',
+        input_schema: {
+          type: 'object',
+          properties: {
+            _id: { type: 'string', _internal_note: 'remove' },
+            _meta: { type: 'object' },
+          },
+          _private_schema_note: 'remove',
+        },
+      },
+    ],
+  }
+  const out = filterPrivateParams(input, ['_metadata'])
+  assert.equal(out._internal_id, undefined)
+  assert.deepEqual(out._metadata, { keep: true })
+  assert.equal(out.messages[0]._session_token, undefined)
+  const schema = out.tools[0].input_schema
+  assert.ok(schema.properties._id, 'JSON Schema property _id must be preserved')
+  assert.ok(schema.properties._meta, 'JSON Schema property _meta must be preserved')
+  assert.equal(schema.properties._id._internal_note, undefined)
+  assert.equal(schema._private_schema_note, undefined)
+})
+
+test('detectOpaqueStateRejection & rectifyOpaqueState: cleans cross-provider encrypted_content and foreign IDs', () => {
+  const err1 = JSON.stringify({
+    error: { type: 'invalid_request_error', code: 'invalid_encrypted_content', message: 'Encrypted content is invalid.' },
+  })
+  const rej1 = detectOpaqueStateRejection(err1)
+  assert.ok(rej1?.reasoning)
+
+  const errAzure = JSON.stringify({
+    error: { message: 'The requested item was created under a different Azure OpenAI resource.' },
+  })
+  const rejAzure = detectOpaqueStateRejection(errAzure)
+  assert.ok(rejAzure?.reasoning && rejAzure?.itemIds)
+
+  assert.ok(detectOpaqueStateRejection(ENCRYPTED_FUNCTION_OUTPUT_REJECTION)?.reasoning)
+
+  const body = {
+    input: [
+      { type: 'message', id: 'msg_01a1', role: 'user', content: [{ type: 'input_text', text: 'hi' }] },
+      { type: 'reasoning', id: '070ff2_rs_1', summary: [], encrypted_content: 'gAAAA' },
+      { type: 'function_call', id: '070ff2_fc_2', call_id: 'call_9', name: 'exec', arguments: '{}' },
+      {
+        type: 'function_call_output',
+        id: 'fco_01a1',
+        call_id: 'call_9',
+        output: [
+          { type: 'input_text', text: 'ok' },
+          { type: 'encrypted_content', encrypted_content: 'enc_opaque' },
+        ],
+      },
+    ],
+  }
+  const res = rectifyOpaqueState(body, rej1)
+  assert.equal(res.applied, true)
+  assert.equal(res.removedReasoningItems, 1)
+  assert.equal(res.replacedEncryptedParts, 1)
+  assert.equal(res.removedForeignIds, 1)
+  assert.equal(body.input.length, 3)
+  assert.equal(body.input[1].id, undefined, 'foreign MiniMax id 070ff2_fc_2 stripped')
+  assert.equal(body.input[1].call_id, 'call_9', 'call_id preserved')
+  assert.deepEqual(body.input[2].output[1], { type: 'input_text', text: ENCRYPTED_PART_PLACEHOLDER })
+})
+
+test('LateArgumentsRepair: holds empty function_call end events and backfills late delta arguments', () => {
+  const sse = (ev) => `event: ${ev.type}\ndata: ${JSON.stringify(ev)}`
+  const callItem = (args) => ({ type: 'function_call', id: 'x_fc_0', call_id: 'call_1', name: 'exec', arguments: args })
+
+  const repair = new LateArgumentsRepair()
+  const rawEvents = [
+    { type: 'response.output_item.added', output_index: 0, item: callItem('') },
+    { type: 'response.function_call_arguments.done', output_index: 0, item_id: 'x_fc_0', name: 'exec', arguments: '' },
+    { type: 'response.output_item.done', output_index: 0, item: callItem('') },
+    { type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'x_fc_0', delta: '{"cmd":"ls"}' },
+    { type: 'response.completed', response: { output: [callItem('{"cmd":"ls"}')] } },
+  ]
+
+  const outBlocks = rawEvents.flatMap((ev) => repair.push(sse(ev))).concat(repair.flush())
+  const parsed = outBlocks.map((b) => {
+    const dataLine = b.split('\n').find((l) => l.startsWith('data: '))
+    return JSON.parse(dataLine.slice(6))
+  })
+
+  assert.deepEqual(
+    parsed.map((e) => e.type),
+    [
+      'response.output_item.added',
+      'response.function_call_arguments.delta',
+      'response.function_call_arguments.done',
+      'response.output_item.done',
+      'response.completed',
+    ]
+  )
+  assert.equal(parsed[2].arguments, '{"cmd":"ls"}')
+  assert.equal(parsed[3].item.arguments, '{"cmd":"ls"}')
+})
+

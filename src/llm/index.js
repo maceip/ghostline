@@ -31,6 +31,8 @@ export {
   MIN_MAX_TOKENS_FOR_BUDGET,
   DEFAULT_RECTIFIER_CONFIG,
   OPENAI_REASONING_ITEM_PREFIX,
+  ENCRYPTED_FUNCTION_OUTPUT_REJECTION,
+  ENCRYPTED_PART_PLACEHOLDER,
   shouldRectifyThinkingSignature,
   rectifyAnthropicRequest,
   rectifyPiMessages,
@@ -42,7 +44,19 @@ export {
   decodeOpenAIReasoningItem,
   anthropicBlockFromOpenAIReasoningItem,
   openAIReasoningItemFromAnthropicBlock,
+  detectOpaqueStateRejection,
+  rectifyOpaqueState,
 } from './rectifier.js'
+
+export {
+  normalizeModelName,
+  usesAdaptiveThinking,
+  adaptiveThinkingIsDefault,
+  thinkingCannotBeDisabled,
+  optimizeThinking,
+  filterPrivateParams,
+  LateArgumentsRepair,
+} from './thinkingOptimizer.js'
 
 export {
   DEFAULT_OPTIMIZER_CONFIG,

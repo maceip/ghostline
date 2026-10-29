@@ -22,9 +22,12 @@ import {
   rectifyPiMessages,
   rectifyAnthropicRequest,
   rectifyThinkingBudget,
+  detectOpaqueStateRejection,
+  rectifyOpaqueState,
 } from './rectifier.js'
 import { ModelMapping, lookupPiModelCapabilities, stripOneMSuffix } from './modelMapper.js'
 import { injectCacheBreakpoints } from './cacheInjector.js'
+import { optimizeThinking, filterPrivateParams } from './thinkingOptimizer.js'
 
 let piPromise = null
 export function loadPi() {
@@ -134,9 +137,9 @@ export function localModel() {
  * so Anthropic requests get automatic 4-breakpoint prompt cache injection and optional
  * thinking signature / budget rectification.
  */
-export async function remoteStreamFn(config, { rectifySignature = false, rectifyBudget = false } = {}) {
+export async function remoteStreamFn(config, { rectifySignature = false, rectifyBudget = false, rectifyOpaque = null } = {}) {
   const baseStreamFn = await loadPiProvider(config.provider)
-  const optimizerCfg = { enabled: true, cacheInjection: true, ...(config.optimizer || {}) }
+  const optimizerCfg = { enabled: true, thinkingOptimizer: false, cacheInjection: true, ...(config.optimizer || {}) }
   return (model, context, options = {}) => {
     const prevOnPayload = options.onPayload
     return baseStreamFn(model, context, {
@@ -147,11 +150,19 @@ export async function remoteStreamFn(config, { rectifySignature = false, rectify
           const r = await prevOnPayload(next, m)
           if (r !== undefined) next = r
         }
-        if (next && typeof next === 'object' && m?.api === 'anthropic-messages') {
-          if (rectifySignature) rectifyAnthropicRequest(next)
-          if (rectifyBudget) rectifyThinkingBudget(next)
-          if (optimizerCfg.enabled && optimizerCfg.cacheInjection) {
-            injectCacheBreakpoints(next, optimizerCfg)
+        if (next && typeof next === 'object') {
+          next = filterPrivateParams(next)
+          if (m?.api === 'anthropic-messages') {
+            if (optimizerCfg.enabled && optimizerCfg.thinkingOptimizer) {
+              optimizeThinking(next, optimizerCfg)
+            }
+            if (rectifySignature) rectifyAnthropicRequest(next)
+            if (rectifyBudget) rectifyThinkingBudget(next)
+            if (optimizerCfg.enabled && optimizerCfg.cacheInjection) {
+              injectCacheBreakpoints(next, optimizerCfg)
+            }
+          } else if (rectifyOpaque) {
+            rectifyOpaqueState(next, rectifyOpaque)
           }
         }
         return next
