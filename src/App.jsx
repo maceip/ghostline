@@ -6,10 +6,11 @@ import {
 } from './data.js'
 import { loadConfig, saveConfig } from './llm/config.js'
 import { runTurn, historyFromTurns } from './llm/router.js'
+import { defaultCircuitRegistry } from './llm/circuitBreaker.js'
 import { buildRunners, maybePreloadLocal } from './llm/engines.js'
 import { onLocalStatus, getLocalStatus } from './llm/litert.js'
 import { useTiltSpotlight } from './motion.jsx'
-import { warmPi } from './llm/pi.js'
+import { warmPi, resolveConfiguredModelId } from './llm/pi.js'
 import HubPage from './pages/HubPage.jsx'
 import ConversationPage from './pages/ConversationPage.jsx'
 import CollectionPage from './pages/CollectionPage.jsx'
@@ -66,13 +67,19 @@ export default function App() {
   const tiltSpot = useTiltSpotlight({ tilt: motion.tilt, spotlight: motion.spotlight })
   const [localStatus, setLocalStatus] = useState(getLocalStatus)
   const [bridgeStatus, setBridgeStatus] = useState('not checked')
+  const [circuitStats, setCircuitStats] = useState(() => defaultCircuitRegistry.snapshot())
   useEffect(() => onLocalStatus(setLocalStatus), [])
+  useEffect(() => defaultCircuitRegistry.onChange(setCircuitStats), [])
   useEffect(() => { saveConfig(config) }, [config])
   const setCfg = useCallback((patch) => setConfig((c) => ({ ...c, ...patch })), [])
+  const resetCircuits = useCallback((key) => {
+    defaultCircuitRegistry.reset(key)
+    setCircuitStats(defaultCircuitRegistry.snapshot())
+  }, [])
   const engineSummary = config.mode === 'demo' ? 'demo · simulated'
     : config.mode === 'local' ? 'litert-lm · local'
     : config.bridgeUrl ? 'native bridge'
-    : config.apiKey ? (config.provider === 'openai' ? config.openaiModel : config.model)
+    : config.apiKey ? resolveConfiguredModelId(config)
     : 'litert-lm · local (no key set)'
   const [runProgress, setRunProgress] = useState(41)
   const [runLabel, setRunLabel] = useState('m1_worker_1 · implementing fragments.auth in :ui')
@@ -358,7 +365,17 @@ export default function App() {
     const t = cursorKind(); if (!t) return false
     const here = PIVOTS[pivot]
     if (here === 'settings' && key === 'r') {
-      if (setDomain === 1) setCfg({ tilePolicy: { onFail: true, onAmbiguity: true, onBigDiff: true, bigDiffLines: 250, autoApproveUnder: 0 } })
+      if (setDomain === 0) {
+        setCfg({
+          thinkingLevel: 'off',
+          circuitBreaker: { enabled: true, failureThreshold: 4, successThreshold: 2, timeoutSeconds: 60 },
+          rectifier: { enabled: true, requestThinkingSignature: true, requestThinkingBudget: true, inlineThink: true },
+          optimizer: { enabled: true, cacheInjection: true },
+          modelMapping: { haikuModel: '', sonnetModel: '', opusModel: '', fableModel: '', subagentModel: '', defaultModel: '' },
+        })
+        resetCircuits()
+      }
+      else if (setDomain === 1) setCfg({ tilePolicy: { onFail: true, onAmbiguity: true, onBigDiff: true, bigDiffLines: 250, autoApproveUnder: 0 } })
       else if (setDomain === 2) setCfg({ gates: { strictPcr: true, haltOnMismatch: true, advTests: true } })
       else if (setDomain === 4) setCfg({ accentName: 'magenta', theme: 'dark', density: 1, motion: { tilt: true, spotlight: true, glow: true, shimmer: true, cascade: true } })
       pushActivity('settings domain reset to defaults')
@@ -760,7 +777,9 @@ export default function App() {
         hooks: {
           sessionId: id,
           onEngine: (name) => patchTurn({ engine: name }),
+          onCircuit: (snap) => setCircuitStats(snap),
           onToken: (soFar) => { tokenText = soFar; if (!tokenTimer) tokenTimer = setTimeout(flushTokens, 50) },
+          onThinking: (thought) => patchTurn({ thinking: thought }),
           onTrace: (line) => patchTurn((t) => ({ trace: [...(t.trace || []), line] })),
           onStatus: (line) => patchTurn((t) => ({ trace: [...(t.trace || []), line] })),
         },
@@ -971,7 +990,7 @@ export default function App() {
     setInstructOpen, setBridgeStatus, composerKey, setConvLevel, setRevLevel, setColLevel,
     setFolder, setFileName, setTermInput, setSearchOpen, setQuery, setFacet, setSplitTurn,
     setSetDomain, setCfg, setAccent, setTheme, setDensity, setGateResolved, setTurnsByThread,
-    setAgents, setActivity, setChangeSets, setCursorId, setHotWordFilter, onSpanClick,
+    setAgents, setActivity, setChangeSets, setCursorId, setHotWordFilter, onSpanClick, resetCircuits,
   }
   const actions = useMemo(() => {
     const out = {}
@@ -1176,7 +1195,7 @@ export default function App() {
             setDomain={setDomain} setSetDomain={setSetDomain} config={config} setCfg={setCfg}
             accent={accent} theme={theme} density={density} setAccent={setAccent} setTheme={setTheme} setDensity={setDensity}
             gates={gates} tilePolicy={tilePolicy} effectivePolicy={effectivePolicy} motion={motion}
-            coarse={coarse} localStatus={localStatus} bridgeStatus={bridgeStatus} engineSummary={engineSummary}
+            coarse={coarse} localStatus={localStatus} bridgeStatus={bridgeStatus} circuitStats={circuitStats} engineSummary={engineSummary}
             agents={agents} fleetCounts={fleetCounts} fleetSpent={fleetSpent} tokVelocity={tokVelocity}
             threads={threads} threadTiles={threadTiles} allTurnsCount={allTurnsCount} actions={actions}
           />

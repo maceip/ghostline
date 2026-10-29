@@ -144,6 +144,34 @@ try {
   const filteredTurns = await page.locator('.z3grid .streamturn').count()
   assert.equal(filteredTurns, 51, `expected 51 turns matching ExecuTorch hot-word filter, got ${filteredTurns}`)
 
+  // 5. Verify CC Switch Settings controls in Settings Domain 01 (thinkingLevel, circuitBreaker, rectifier, optimizer, modelMapping)
+  await page.click('.zoomstops button:has-text("Z1")')
+  await page.click('nav.pivotrail button.pivot:has-text("settings")')
+  await page.waitForSelector('.page.isactive[aria-label="settings"]')
+
+  // Click thinkingLevel 'high' and verify persistence in localStorage
+  await page.click('.page.isactive .paramrow:has-text("thinking level") button:has-text("high")')
+  const storedAfterHigh = await page.evaluate(() => JSON.parse(localStorage.getItem('zunecode.config.v1')))
+  assert.equal(storedAfterHigh.thinkingLevel, 'high', 'thinkingLevel must persist to localStorage')
+
+  // Toggle circuit breaker off and back on, and verify persistence
+  await page.click('.page.isactive .paramrow:has-text("circuit breaker") button:has-text("off")')
+  const storedAfterCbOff = await page.evaluate(() => JSON.parse(localStorage.getItem('zunecode.config.v1')))
+  assert.equal(storedAfterCbOff.circuitBreaker.enabled, false, 'circuitBreaker.enabled=false must persist')
+  await page.click('.page.isactive .paramrow:has-text("circuit breaker") button:has-text("on")')
+
+  // Toggle rectifier off and back on
+  await page.click('.page.isactive .paramrow:has-text("thinking signature & budget rectifier") button:has-text("off")')
+  const storedAfterRectOff = await page.evaluate(() => JSON.parse(localStorage.getItem('zunecode.config.v1')))
+  assert.equal(storedAfterRectOff.rectifier.enabled, false, 'rectifier.enabled=false must persist')
+  await page.click('.page.isactive .paramrow:has-text("thinking signature & budget rectifier") button:has-text("on")')
+
+  // Toggle prompt cache 4-breakpoint injector off and back on
+  await page.click('.page.isactive .paramrow:has-text("prompt cache 4-breakpoint injector") button:has-text("off")')
+  const storedAfterOptOff = await page.evaluate(() => JSON.parse(localStorage.getItem('zunecode.config.v1')))
+  assert.equal(storedAfterOptOff.optimizer.cacheInjection, false, 'optimizer.cacheInjection=false must persist')
+  await page.click('.page.isactive .paramrow:has-text("prompt cache 4-breakpoint injector") button:has-text("on")')
+
   assert.equal(consoleErrors.length, 0, `unexpected page errors: ${consoleErrors.join('; ')}`)
 
   console.log(JSON.stringify({

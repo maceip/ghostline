@@ -3,14 +3,21 @@ import { ACCENTS, folders, seedEpochs } from '../data.js'
 import { escalationLevel, fmtTokens } from '../derive.js'
 import { ensureLocal } from '../llm/litert.js'
 import { bridgeHealthy } from '../llm/bridge.js'
+import { PI_THINKING_LEVELS } from '../llm/modelMapper.js'
 
 /* Settings pivot: Zune 4.0 configuration matrix — domains -> parameters -> live preview.
    Same 25/35/40 borderless grid, no toggle pills, no dropdown boxes. */
 function SettingsPage({
   active, setDomain, setSetDomain, config, setCfg, accent, theme, density, setAccent, setTheme, setDensity,
-  gates, tilePolicy, effectivePolicy, motion, coarse, localStatus, bridgeStatus, engineSummary,
+  gates, tilePolicy, effectivePolicy, motion, coarse, localStatus, bridgeStatus, circuitStats, engineSummary,
   agents, fleetCounts, fleetSpent, tokVelocity, threads, threadTiles, allTurnsCount, actions,
 }) {
+  const cbCfg = { enabled: true, failureThreshold: 4, successThreshold: 2, timeoutSeconds: 60, ...(config.circuitBreaker || {}) }
+  const rectCfg = { enabled: true, requestThinkingSignature: true, requestThinkingBudget: true, inlineThink: true, ...(config.rectifier || {}) }
+  const optCfg = { enabled: true, cacheInjection: true, ...(config.optimizer || {}) }
+  const mapCfg = { haikuModel: '', sonnetModel: '', opusModel: '', fableModel: '', subagentModel: '', defaultModel: '', ...(config.modelMapping || {}) }
+  const remoteCb = circuitStats?.remote || { state: 'closed', consecutiveFailures: 0 }
+  const bridgeCb = circuitStats?.bridge || { state: 'closed', consecutiveFailures: 0 }
   return (
     <section className={active ? 'page isactive' : 'page'} aria-label="settings">
       <div className="swiss3" data-cascade>
@@ -53,7 +60,27 @@ function SettingsPage({
                     <label>model<input className="setinput" value={config.openaiModel} onChange={(e) => setCfg({ openaiModel: e.target.value })} /></label>
                     <label>base url<input className="setinput" value={config.baseUrl} onChange={(e) => setCfg({ baseUrl: e.target.value })} /></label>
                   </>}
+              <label>subagent alias (optional)<input className="setinput" placeholder="e.g. claude-haiku-4-5" value={mapCfg.subagentModel} onChange={(e) => setCfg({ modelMapping: { ...mapCfg, subagentModel: e.target.value } })} /></label>
             </div>
+            <p className="label" style={{ marginTop: 22 }}>thinking level & cc-switch pipeline</p>
+            <div className="paramrow"><span>thinking level</span><span className="optrow">
+              {PI_THINKING_LEVELS.map((lvl) => (
+                <button key={lvl} className={(config.thinkingLevel || 'off') === lvl ? 'on' : ''} onClick={() => setCfg({ thinkingLevel: lvl })}>{lvl}</button>
+              ))}
+            </span></div>
+            <div className="paramrow"><span>circuit breaker ({remoteCb.state.toUpperCase()})</span><span className="optrow">
+              <button className={cbCfg.enabled ? 'on' : ''} onClick={() => setCfg({ circuitBreaker: { ...cbCfg, enabled: true } })}>on</button>
+              <button className={!cbCfg.enabled ? 'on' : ''} onClick={() => setCfg({ circuitBreaker: { ...cbCfg, enabled: false } })}>off</button>
+              {remoteCb.state !== 'closed' || bridgeCb.state !== 'closed' ? <button className="ghostbtn" onClick={() => actions.resetCircuits()}>reset</button> : null}
+            </span></div>
+            <div className="paramrow"><span>thinking signature &amp; budget rectifier</span><span className="optrow">
+              <button className={rectCfg.enabled ? 'on' : ''} onClick={() => setCfg({ rectifier: { ...rectCfg, enabled: true } })}>on</button>
+              <button className={!rectCfg.enabled ? 'on' : ''} onClick={() => setCfg({ rectifier: { ...rectCfg, enabled: false } })}>off</button>
+            </span></div>
+            <div className="paramrow"><span>prompt cache 4-breakpoint injector</span><span className="optrow">
+              <button className={optCfg.cacheInjection ? 'on' : ''} onClick={() => setCfg({ optimizer: { ...optCfg, enabled: true, cacheInjection: true } })}>on</button>
+              <button className={!optCfg.cacheInjection ? 'on' : ''} onClick={() => setCfg({ optimizer: { ...optCfg, cacheInjection: false } })}>off</button>
+            </span></div>
             <p className="label" style={{ marginTop: 26 }}>concurrency & worker budget</p>
             {[['max parallel subagents', 'maxParallel', 10, 1, 200], ['max pty test runners', 'maxPty', 4, 1, 16]].map(([label, k, def, lo, hi]) => (
               <div key={k} className="paramrow"><span>{label}</span><span className="optrow">
@@ -172,10 +199,11 @@ function SettingsPage({
               <button className="ghostbtn" onClick={async () => actions.setBridgeStatus((await bridgeHealthy(config.bridgeUrl)) ? 'reachable' : 'unreachable')}>ping bridge</button>
               <span className="dim" style={{ fontWeight: 300, marginLeft: 22 }}>per-platform sidecar speaking BRIDGE.md — local claude/codex wire in later with zero UI changes</span>
             </div>
-            <p className="label">endpoints</p>
+            <p className="label">endpoints &amp; circuit health</p>
             <p className="prose">:9379 model-serving workers · <span className="accent">active</span></p>
+            <p className="prose">remote provider · circuit <b>{remoteCb.state}</b>{remoteCb.consecutiveFailures > 0 ? ` (${remoteCb.consecutiveFailures} fails)` : ''}</p>
             <p className="prose">litert-lm local · {localStatus.state}</p>
-            <p className="prose">native bridge · {config.bridgeUrl || 'not configured'} · {bridgeStatus}</p>
+            <p className="prose">native bridge · {config.bridgeUrl || 'not configured'} · {bridgeStatus} · circuit <b>{bridgeCb.state}</b></p>
           </>)}
         </div>
         <div data-col="3" data-payload>

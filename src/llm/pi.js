@@ -4,7 +4,27 @@
 // Remote providers use pi-ai's own Anthropic / OpenAI-completions stream functions;
 // LiteRT-LM is adapted into the same loop as a custom pi StreamFn, so local and
 // remote share tools, history shaping, and event handling.
+//
+// Integrated with CC Switch modules:
+// - `InlineThinkSplitter` + `splitLeadingThinkBlock` (`./inlineThink.js`): splits leading `<think>` / `<thinking>`
+//   blocks from local and OpenAI-compatible streams into structured reasoning traces.
+// - `shouldRectifyThinkingSignature` + `rectifyPiMessages` + `shouldRectifyThinkingBudget` (`./rectifier.js`):
+//   automatically rectifies cross-provider thinking signature / budget errors and retries transparently.
+// - `ModelMapping` + `lookupPiModelCapabilities` + `stripOneMSuffix` (`./modelMapper.js`): resolves model
+//   aliases (`haiku`, `sonnet`, `opus`, `fable`, `subagent`), capabilities, and `thinkingLevelMap`.
+// - `injectCacheBreakpoints` (`./cacheInjector.js`): wraps Anthropic payload construction with 4-BP ephemeral caching.
+
 import { localStream } from './litert.js'
+import { InlineThinkSplitter, splitLeadingThinkBlock } from './inlineThink.js'
+import {
+  shouldRectifyThinkingSignature,
+  shouldRectifyThinkingBudget,
+  rectifyPiMessages,
+  rectifyAnthropicRequest,
+  rectifyThinkingBudget,
+} from './rectifier.js'
+import { ModelMapping, lookupPiModelCapabilities, stripOneMSuffix } from './modelMapper.js'
+import { injectCacheBreakpoints } from './cacheInjector.js'
 
 let piPromise = null
 export function loadPi() {
@@ -57,23 +77,51 @@ export function warmPi(config) {
 
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
 
-export function remoteModel(config) {
+export function resolveConfiguredModelId(config, role = null) {
+  const raw = config.provider === 'openai' ? config.openaiModel : config.model
+  const mapper = new ModelMapping(config.modelMapping || {})
+  const mapped = mapper.hasMapping() ? mapper.mapModel(raw, role) : raw
+  return stripOneMSuffix(mapped || raw || '')
+}
+
+export function remoteModel(config, role = null) {
+  const modelId = resolveConfiguredModelId(config, role)
+  const cap = lookupPiModelCapabilities(modelId)
+
   if (config.provider === 'openai') {
     return {
-      id: config.openaiModel, name: config.openaiModel, api: 'openai-completions', provider: 'openai',
-      baseUrl: config.baseUrl || 'https://api.openai.com/v1', reasoning: false, input: ['text'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096,
+      id: modelId,
+      name: cap?.name || modelId,
+      api: 'openai-completions',
+      provider: 'openai',
+      baseUrl: config.baseUrl || 'https://api.openai.com/v1',
+      reasoning: cap?.reasoning ?? false,
+      input: cap?.input || ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: cap?.contextWindow || 128000,
+      maxTokens: cap?.maxTokens || 4096,
+      ...(cap?.thinkingLevelMap ? { thinkingLevelMap: cap.thinkingLevelMap } : {}),
+      ...(cap?.compat ? { compat: cap.compat } : {}),
     }
   }
   return {
-    id: config.model, name: config.model, api: 'anthropic-messages', provider: 'anthropic',
-    baseUrl: 'https://api.anthropic.com', reasoning: false, input: ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 200000, maxTokens: 4096,
+    id: modelId,
+    name: cap?.name || modelId,
+    api: 'anthropic-messages',
+    provider: 'anthropic',
+    baseUrl: 'https://api.anthropic.com',
+    reasoning: cap?.reasoning ?? false,
+    input: cap?.input || ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: cap?.contextWindow || 200000,
+    maxTokens: cap?.maxTokens || 4096,
     headers: { 'anthropic-dangerous-direct-browser-access': 'true' },
+    ...(cap?.thinkingLevelMap ? { thinkingLevelMap: cap.thinkingLevelMap } : {}),
+    ...(cap?.compat ? { compat: cap.compat } : {}),
   }
 }
 
-export function localModel(config) {
+export function localModel() {
   return {
     id: 'litert-lm', name: 'LiteRT-LM (local)', api: 'litert-lm', provider: 'litert-lm',
     baseUrl: '', reasoning: false, input: ['text'],
@@ -81,13 +129,41 @@ export function localModel(config) {
   }
 }
 
-export async function remoteStreamFn(config) {
-  return loadPiProvider(config.provider)
+/**
+ * Wrap any underlying Pi `streamFn` with CC Switch's `onPayload` optimizer & rectifier hook
+ * so Anthropic requests get automatic 4-breakpoint prompt cache injection and optional
+ * thinking signature / budget rectification.
+ */
+export async function remoteStreamFn(config, { rectifySignature = false, rectifyBudget = false } = {}) {
+  const baseStreamFn = await loadPiProvider(config.provider)
+  const optimizerCfg = { enabled: true, cacheInjection: true, ...(config.optimizer || {}) }
+  return (model, context, options = {}) => {
+    const prevOnPayload = options.onPayload
+    return baseStreamFn(model, context, {
+      ...options,
+      onPayload: async (payload, m) => {
+        let next = payload
+        if (prevOnPayload) {
+          const r = await prevOnPayload(next, m)
+          if (r !== undefined) next = r
+        }
+        if (next && typeof next === 'object' && m?.api === 'anthropic-messages') {
+          if (rectifySignature) rectifyAnthropicRequest(next)
+          if (rectifyBudget) rectifyThinkingBudget(next)
+          if (optimizerCfg.enabled && optimizerCfg.cacheInjection) {
+            injectCacheBreakpoints(next, optimizerCfg)
+          }
+        }
+        return next
+      },
+    })
+  }
 }
 
-/** LiteRT-LM as a pi StreamFn. Text only: small local models don't get tools in v1. */
+/** LiteRT-LM as a pi StreamFn with CC Switch's streaming `InlineThinkSplitter`. */
 export async function litertStreamFn(config) {
   const pi = await loadPi()
+  const useInlineThink = config.rectifier?.inlineThink !== false
   return (model, context) => {
     const stream = pi.createAssistantMessageEventStream()
     const msg = {
@@ -105,14 +181,45 @@ export async function litertStreamFn(config) {
           if (m.role === 'toolResult') return [{ role: 'user', content: `[tool ${m.toolName} result]\n${m.content.filter((p) => p.type === 'text').map((p) => p.text).join('')}` }]
           return []
         })
+        const splitter = useInlineThink ? new InlineThinkSplitter() : null
         let acc = ''
+        let thinkingAcc = ''
         for await (const delta of localStream(config.localModelUrl, context.systemPrompt || '', messages)) {
-          acc += delta
-          msg.content = [{ type: 'text', text: acc }]
-          stream.push({ type: 'text_delta', contentIndex: 0, delta, partial: msg })
+          if (splitter) {
+            const { thinking, text } = splitter.push(delta)
+            if (thinking) {
+              thinkingAcc += thinking
+              msg.thinking = thinkingAcc
+            }
+            if (text) {
+              acc += text
+              msg.content = [
+                ...(thinkingAcc ? [{ type: 'thinking', thinking: thinkingAcc }] : []),
+                { type: 'text', text: acc },
+              ]
+              stream.push({ type: 'text_delta', contentIndex: 0, delta: text, partial: msg })
+            }
+          } else {
+            acc += delta
+            msg.content = [{ type: 'text', text: acc }]
+            stream.push({ type: 'text_delta', contentIndex: 0, delta, partial: msg })
+          }
         }
-        msg.usage.output = Math.ceil(acc.length / 4); msg.usage.totalTokens = msg.usage.output
-        stream.push({ type: 'text_end', contentIndex: 0, content: acc, partial: msg })
+        if (splitter) {
+          const tail = splitter.flush()
+          if (tail.thinking) thinkingAcc += tail.thinking
+          if (tail.text) {
+            acc += tail.text
+            stream.push({ type: 'text_delta', contentIndex: 0, delta: tail.text, partial: msg })
+          }
+          msg.content = [
+            ...(thinkingAcc ? [{ type: 'thinking', thinking: thinkingAcc }] : []),
+            { type: 'text', text: acc || thinkingAcc },
+          ]
+        }
+        msg.usage.output = Math.ceil((acc.length + thinkingAcc.length) / 4)
+        msg.usage.totalTokens = msg.usage.output
+        stream.push({ type: 'text_end', contentIndex: 0, content: acc || thinkingAcc, partial: msg })
         stream.push({ type: 'done', reason: 'stop', message: msg })
       } catch (e) {
         msg.stopReason = 'error'; msg.errorMessage = String(e?.message || e)
@@ -134,26 +241,46 @@ export function toAgentTools(specs) {
 }
 
 const textOf = (message) => (message?.content || []).filter((p) => p.type === 'text').map((p) => p.text).join('')
+const thinkingOf = (message) => (message?.content || []).filter((p) => p.type === 'thinking').map((p) => p.thinking || '').join('')
 
-/** Run one user prompt through a pi Agent with the given streamFn. Returns final text; throws on provider error or timeout. */
-export async function runPiTurn({ streamFn, model, apiKey, system, history, prompt, tools, sessionId, onToken, onTrace, timeoutMs }) {
-  const pi = await loadPi()
-  const messages = history.map((m) => (m.role === 'user'
-    ? { role: 'user', content: m.content, timestamp: Date.now() }
-    : {
-        role: 'assistant', content: [{ type: 'text', text: m.content }], api: model.api, provider: model.provider, model: model.id,
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: zeroCost }, stopReason: 'stop', timestamp: Date.now(),
-      }))
+async function executeSinglePiAttempt({
+  pi, streamFn, model, apiKey, system, messages, prompt, tools, sessionId,
+  thinkingLevel = 'off', inlineThink = true, onToken, onThinking, onTrace, timeoutMs,
+}) {
   const agent = new pi.Agent({
-    initialState: { systemPrompt: system, model, tools: tools || [], messages, thinkingLevel: 'off' },
+    initialState: { systemPrompt: system, model, tools: tools || [], messages, thinkingLevel },
     streamFn,
     getApiKey: async () => apiKey || undefined,
     sessionId,
   })
+  let lastEmittedThinking = ''
   const unsub = agent.subscribe((ev) => {
-    if (ev.type === 'message_update') { const t = textOf(ev.message); if (t) onToken?.(t) }
-    else if (ev.type === 'tool_execution_start') onTrace?.(`tool ${ev.toolName}(${Object.entries(ev.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')})`)
-    else if (ev.type === 'tool_execution_end') onTrace?.(`tool ${ev.toolName} ${ev.isError ? '→ error' : '→ ok'}`)
+    if (ev.type === 'message_update') {
+      const rawText = textOf(ev.message)
+      const structuredThink = thinkingOf(ev.message)
+      if (structuredThink && structuredThink !== lastEmittedThinking) {
+        lastEmittedThinking = structuredThink
+        onThinking?.(structuredThink)
+      }
+      if (rawText) {
+        if (inlineThink) {
+          const split = splitLeadingThinkBlock(rawText)
+          if (split) {
+            if (split.thinking && split.thinking !== lastEmittedThinking) {
+              lastEmittedThinking = split.thinking
+              onThinking?.(split.thinking)
+            }
+            if (split.text) onToken?.(split.text)
+            return
+          }
+        }
+        onToken?.(rawText)
+      }
+    } else if (ev.type === 'tool_execution_start') {
+      onTrace?.(`tool ${ev.toolName}(${Object.entries(ev.args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ')})`)
+    } else if (ev.type === 'tool_execution_end') {
+      onTrace?.(`tool ${ev.toolName} ${ev.isError ? '→ error' : '→ ok'}`)
+    }
   })
   let timer = null
   let timedOut = false
@@ -163,9 +290,74 @@ export async function runPiTurn({ streamFn, model, apiKey, system, history, prom
     await agent.waitForIdle()
   } catch (e) {
     if (!timedOut) throw e
-  } finally { if (timer) clearTimeout(timer); unsub() }
+  } finally {
+    if (timer) clearTimeout(timer)
+    unsub()
+  }
   if (timedOut) throw new Error(`remote timed out after ${Math.round(timeoutMs / 1000)}s`)
   if (agent.state.errorMessage) throw new Error(agent.state.errorMessage)
   const last = [...agent.state.messages].reverse().find((m) => m.role === 'assistant')
-  return textOf(last)
+  const finalRaw = textOf(last)
+  if (inlineThink) {
+    const split = splitLeadingThinkBlock(finalRaw)
+    if (split) {
+      if (split.thinking && split.thinking !== lastEmittedThinking) {
+        onThinking?.(split.thinking)
+        onTrace?.(`thought · ${split.thinking.replace(/\s+/g, ' ').slice(0, 140)}`)
+      }
+      return split.text || finalRaw
+    }
+  }
+  const structuredThink = thinkingOf(last)
+  if (structuredThink) {
+    onThinking?.(structuredThink)
+    onTrace?.(`thought · ${structuredThink.replace(/\s+/g, ' ').slice(0, 140)}`)
+  }
+  return finalRaw
+}
+
+/**
+ * Run one user prompt through a pi Agent with the given streamFn.
+ * Automatically rectifies and retries once if the upstream API fails with a
+ * thinking signature or thinking budget error (`cc-switch` rectifier pipeline).
+ */
+export async function runPiTurn({
+  streamFn, model, apiKey, system, history, prompt, tools, sessionId,
+  thinkingLevel = 'off', rectifierConfig, onToken, onThinking, onTrace, timeoutMs,
+}) {
+  const pi = await loadPi()
+  const baseMessages = history.map((m) => (m.role === 'user'
+    ? { role: 'user', content: m.content, timestamp: Date.now() }
+    : {
+        role: 'assistant',
+        content: Array.isArray(m.content) ? m.content : [{ type: 'text', text: m.content }],
+        api: model.api, provider: model.provider, model: model.id,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: zeroCost },
+        stopReason: 'stop', timestamp: Date.now(),
+      }))
+
+  const inlineThink = rectifierConfig?.inlineThink !== false
+
+  try {
+    return await executeSinglePiAttempt({
+      pi, streamFn, model, apiKey, system, messages: baseMessages, prompt, tools, sessionId,
+      thinkingLevel, inlineThink, onToken, onThinking, onTrace, timeoutMs,
+    })
+  } catch (err) {
+    const msg = String(err?.message || err)
+    const sigTrigger = shouldRectifyThinkingSignature(msg, rectifierConfig)
+    const budgetTrigger = shouldRectifyThinkingBudget(msg, rectifierConfig)
+    if (!sigTrigger && !budgetTrigger) throw err
+
+    const { messages: cleanedMessages } = sigTrigger
+      ? rectifyPiMessages(baseMessages)
+      : { messages: baseMessages }
+    const nextThinkingLevel = sigTrigger ? 'off' : thinkingLevel
+    onTrace?.(`rectifier · ${sigTrigger ? 'stripped invalid thinking signatures' : 'adjusted thinking budget'} → retrying turn`)
+
+    return await executeSinglePiAttempt({
+      pi, streamFn, model, apiKey, system, messages: cleanedMessages, prompt, tools, sessionId,
+      thinkingLevel: nextThinkingLevel, inlineThink, onToken, onThinking, onTrace, timeoutMs,
+    })
+  }
 }

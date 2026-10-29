@@ -1,30 +1,33 @@
-// Browser runners for router.js. Each: async ({system, history, prompt, diagnoseError}, hooks) -> {text, label}
-// hooks: {onToken(textSoFar), onTrace(line), onStatus(line)}
+// Browser runners for router.js. Each: async ({system, history, prompt, diagnoseError, role}, hooks) -> {text, label}
+// hooks: {onToken(textSoFar), onThinking(thoughtSoFar), onTrace(line), onStatus(line)}
 import { diagnosisPrompt } from './router.js'
 import { makeWorkspaceTools } from './tools.js'
-import { runPiTurn, remoteStreamFn, litertStreamFn, remoteModel, localModel, toAgentTools } from './pi.js'
-import { ensureLocal } from './litert.js'
+import { runPiTurn, remoteStreamFn, litertStreamFn, remoteModel, localModel, toAgentTools, resolveConfiguredModelId } from './pi.js'
+import { ensureLocal, localStream } from './litert.js'
 import { bridgeTurn } from './bridge.js'
-import { localStream } from './litert.js'
 
 export function buildRunners(config, workspace, demoText) {
   const tools = toAgentTools(makeWorkspaceTools(workspace))
 
-  const piTurn = async (which, { system, history, prompt, diagnoseError }, hooks) => {
+  const piTurn = async (which, { system, history, prompt, diagnoseError, role }, hooks) => {
     const isLocal = which === 'local'
+    const resolvedModelId = isLocal ? 'litert-lm' : resolveConfiguredModelId(config, role)
     if (isLocal) { hooks.onStatus?.('loading local model (first run downloads it)…'); await ensureLocal(config.localModelUrl) }
-    else hooks.onStatus?.(`calling ${config.provider === 'openai' ? config.openaiModel : config.model}…`)
+    else hooks.onStatus?.(`calling ${resolvedModelId}…`)
     const streamFn = isLocal ? await litertStreamFn(config) : await remoteStreamFn(config)
     const turnPromise = runPiTurn({
       streamFn,
-      model: isLocal ? localModel(config) : remoteModel(config),
+      model: isLocal ? localModel(config) : remoteModel(config, role),
       apiKey: config.apiKey,
       system,
       history,
       prompt: diagnoseError ? diagnosisPrompt(prompt, diagnoseError) : prompt,
       tools: isLocal ? [] : tools, // small local models: no tools in v1 (reliability); remote gets the workspace tools
       sessionId: hooks.sessionId,
+      thinkingLevel: isLocal ? 'off' : (config.thinkingLevel || 'off'),
+      rectifierConfig: config.rectifier,
       onToken: hooks.onToken,
+      onThinking: hooks.onThinking,
       onTrace: hooks.onTrace,
       timeoutMs: isLocal ? undefined : config.remoteTimeoutMs,
     })
@@ -36,7 +39,7 @@ export function buildRunners(config, workspace, demoText) {
           turnPromise,
           new Promise((_, rej) => setTimeout(() => rej(new Error(`remote timed out after ${Math.round(config.remoteTimeoutMs / 1000)}s`)), config.remoteTimeoutMs)),
         ])
-    return { text, label: isLocal ? 'litert-lm · local' : (config.provider === 'openai' ? config.openaiModel : config.model) }
+    return { text, label: isLocal ? 'litert-lm · local' : resolvedModelId }
   }
 
   return {

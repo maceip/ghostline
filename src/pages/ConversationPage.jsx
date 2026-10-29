@@ -392,6 +392,12 @@ function ConversationPage({
                       <p className="prose" style={{ borderLeft: '2px solid var(--accent)', paddingLeft: 12 }}><GroundedText text={cleanDisplayText(activeTurn.decision)} workspace={workspaceCtx} activeHotWord={hotWordFilter} onSpanClick={actions.onSpanClick} /></p>
                     </>
                   )}
+                  {activeTurn.thinking && (
+                    <>
+                      <p className="label" style={{ marginTop: 20 }}>reasoning trace</p>
+                      <p className="prose dim" style={{ borderLeft: '1px solid var(--faint)', paddingLeft: 12 }}><GroundedText text={cleanDisplayText(activeTurn.thinking)} workspace={workspaceCtx} activeHotWord={hotWordFilter} onSpanClick={actions.onSpanClick} /></p>
+                    </>
+                  )}
                   <p className="label" style={{ marginTop: 24 }}>synthesis{activeTurn.engine ? ` · ${activeTurn.engine}` : ''}</p>
                   <p className="prose"><GroundedText text={activeTurn.synthesis || '…'} workspace={workspaceCtx} activeHotWord={hotWordFilter} onSpanClick={actions.onSpanClick} /></p>
                   {activeTurn.fallbackFrom && <p className="prose accent">remote failed ({activeTurn.fallbackFrom}) — answered locally</p>}
