@@ -5,7 +5,8 @@ import {
   fmtTokens, parseCeiling, fleetCounts, fleetVelocity, epochTurnCounts,
   facetPartition, changeSetForThread, changeSetTotals, tileForThread,
   escalationLevel, applyAutoApprove, applyParallelCap, tickAgents, treemapSpan,
-  deriveSessionSignature, matchSessionOrienteering,
+  deriveSessionSignature, matchSessionOrienteering, deriveSessionConcepts,
+  deriveEpochs, assignTurnEpochs,
 } from '../src/derive.js'
 
 const POLICY = { onFail: true, onAmbiguity: true, onBigDiff: true, bigDiffLines: 250, autoApproveUnder: 0 }
@@ -127,4 +128,20 @@ test('deriveSessionSignature & matchSessionOrienteering: human-voice indexing, s
   // Does NOT match robot-only prose that is absent from human prompts/landmarks/decisions
   const mRobotFiller = matchSessionOrienteering(sig, 'sibling tab presenting R1')
   assert.equal(mRobotFiller.matched, false, 'robot filler prose must be muted in Z0 orienteering index')
+})
+
+test('deriveSessionConcepts: distills 200-turn Codex session into ranked concepts, chronological heat strips, and 3 historical eras', () => {
+  const wsCtx = { files, folders: [], changeSets: seedChangeSets }
+  const rawTurns = seedTurns.codex
+  const epochs = deriveEpochs(rawTurns, seedEpochs, { onCommit: true, everyTurns: 15 }, wsCtx, 'codex')
+  const turns = assignTurnEpochs(rawTurns, epochs, wsCtx)
+  const conceptData = deriveSessionConcepts(turns, epochs, wsCtx)
+
+  assert.ok(conceptData.concepts.length >= 8, `expected >= 8 extracted concepts on 200-turn session, got ${conceptData.concepts.length}`)
+  assert.equal(conceptData.eras.length, 3, 'expected 3 chronological eras (early, middle, late)')
+  assert.ok(conceptData.rawLineEstimate > 80000, `expected > 80k raw line estimate for 200-turn session, got ${conceptData.rawLineEstimate}`)
+
+  const execConcept = conceptData.concepts.find((c) => c.label.toLowerCase().includes('executorch'))
+  assert.ok(execConcept, 'expected ExecuTorch among top concepts')
+  assert.equal(execConcept.epochHeat.length, epochs.length, 'each concept must have an epochHeat bucket for every epoch')
 })

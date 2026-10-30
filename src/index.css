@@ -346,95 +346,61 @@ code.codeview .ln { display:inline-block; width:38px; color:var(--fg-4); opacity
 .wbhunkhead { display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:.86em; }
 .wbhunkactions { display:flex; gap:16px; margin-top:6px; }
 .wbcomposer { margin-top:16px; padding-top:8px; border-top:1px solid color-mix(in srgb, var(--fg) 14%, transparent); }
-/* Z0 Sky-Level Mosaic: Square Live Telemetry Tiles + Paired Tile Descriptions */
-.z0toppulse { font-size:.76em; font-weight:300; letter-spacing:.08em; color:var(--fg-2); white-space:nowrap; }
-.z0toppulse b { font-weight:600; color:var(--accent); }
-.zoommap.z0skymap { padding:6px 48px 12px 48px; }
-.z0bar { display:flex; justify-content:space-between; align-items:baseline; gap:24px; flex-wrap:wrap; padding-bottom:6px; border-bottom:1px solid color-mix(in srgb, var(--fg) 16%, transparent); margin-bottom:8px; }
-.z0filterbar { display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; }
-.z0matchstatus { font-size:.72em; font-weight:600; letter-spacing:.08em; color:var(--accent); text-transform:uppercase; }
-.z0searchbox { display:flex; gap:12px; align-items:baseline; flex:1; min-width:300px; max-width:560px; }
-.z0searchinput { flex:1; background:transparent; color:var(--fg); border:0; border-bottom:2px solid var(--accent); font:inherit; font-size:.94em; font-weight:300; padding:2px 0; outline:none; caret-color:var(--accent); }
-.z0searchinput::placeholder { color:var(--fg-4); opacity:1; }
-.z0clear { padding:2px 0; font-size:.74em; flex:none; }
-.z0body { display:grid; grid-template-columns:minmax(0, 2.7fr) minmax(300px, 1fr); gap:28px; align-items:start; }
-.z0sessionscol { min-width:0; }
-.z0swimlane { margin-top:7px; padding-top:6px; border-top:1px solid color-mix(in srgb, var(--fg) 14%, transparent); }
-.z0swimlane:first-child { margin-top:0; padding-top:0; border-top:0; }
-.z0swimlane.searchdim { display:none; }
-.z0lanehead { display:flex; justify-content:space-between; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:4px; }
-.z0landmarks { display:flex; gap:12px; flex-wrap:wrap; }
-.z0landmarkpill { font-size:.66em; font-weight:600; letter-spacing:.08em; color:var(--accent); text-transform:uppercase; }
-.z0grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); grid-auto-rows:auto; gap:8px 20px; margin-top:3px; }
-.z0tile { display:grid !important; grid-template-columns:136px minmax(0, 1fr); gap:14px; background:transparent !important; padding:0 !important; min-height:98px; align-items:stretch; justify-content:stretch; cursor:pointer; text-align:left; color:var(--fg) !important; }
-.z0tile.hero2x2 { grid-column:span 2; grid-template-columns:164px minmax(0, 1fr); }
-.z0tile.z0-hit { outline:2px solid var(--accent); outline-offset:3px; opacity:1 !important; }
-.z0tile.z0-neighbor { opacity:.48 !important; }
-/* Square Live Telemetry Tile Face */
-.z0square { display:flex; flex-direction:column; padding:7px 9px 6px 9px; background:var(--bg2); border-top:2px solid color-mix(in srgb, var(--fg) 26%, transparent); min-height:98px; overflow:hidden; position:relative; }
-.z0square.tile-running, .z0square.tile-testing, .z0square.tile-mutating, .z0square.tile-exploring { border-top-color:var(--accent); }
-.z0square.tile-ready { border-top-color:var(--add); background:color-mix(in srgb, var(--fg) 6%, var(--bg2)); }
-.z0square.tile-merged, .z0square.tile-verified, .z0square.tile-indexed { border-top-color:color-mix(in srgb, var(--fg) 32%, transparent); }
-.z0square.tile-blocked { background:var(--accent); color:#fff; border-top-color:#fff; }
-.z0square.tile-blocked .tiletop, .z0square.tile-blocked .tilesub, .z0square.tile-blocked .tiletail { color:#fff; opacity:.95; }
-.z0square.tile-blocked .tileprog { background:rgba(255,255,255,.28); }
-.z0square.tile-blocked .tileprog i { background:#fff; }
-.z0square .tiletop { font-size:.58em; letter-spacing:.12em; }
-.z0square .tilebig { font-size:calc(23px * var(--scale)); font-weight:300; line-height:1.05; margin-top:auto; padding-top:4px; white-space:nowrap; }
-.z0tile.hero2x2 .z0square .tilebig { font-size:calc(27px * var(--scale)); }
-.z0square .tilesub { font-size:.68em; line-height:1.22; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.z0square .tiletail { font-size:.64em; line-height:1.2; opacity:.85; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.z0square .tileprog { margin-top:5px; height:2px; }
-.z0square .strugglebar { margin:4px 0 0 0; height:3px; }
-/* Paired Typographic Tile Description */
-.z0desc { display:flex; flex-direction:column; min-width:0; padding:2px 0; justify-content:flex-start; }
-.z0desctop { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; margin-bottom:2px; }
-.z0desc .t { font-size:1.05em !important; font-weight:600 !important; line-height:1.15; color:var(--fg-1) !important; margin-right:auto; }
-.z0tile:hover .z0desc .t { color:var(--accent-hover) !important; }
-.z0landmark { font-size:.64em; font-weight:600; letter-spacing:.07em; color:var(--fg-3); text-transform:uppercase; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:220px; }
-.z0age { font-size:.64em; font-weight:700; letter-spacing:.1em; color:var(--accent); text-transform:uppercase; flex:none; }
-.z0matchbadge { display:inline-block; align-self:flex-start; background:var(--accent); color:#fff; font-size:.6em; font-weight:700; letter-spacing:.12em; padding:1px 6px; margin-bottom:3px; }
-.z0neighborbadge { display:inline-block; align-self:flex-start; color:var(--fg-3); font-size:.6em; font-weight:700; letter-spacing:.12em; margin-bottom:3px; }
-.z0humanquote { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; font-size:.86em; font-weight:300; line-height:1.28; color:var(--fg-1); margin:1px 0 3px 0; }
-.z0followup { display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; font-size:.76em; font-weight:300; line-height:1.22; color:var(--accent); margin:0 0 3px 0; }
-.z0liveworkers { display:flex; gap:10px; flex-wrap:wrap; margin:2px 0 3px 0; }
-.z0workerchip { font-size:.68em; font-weight:600; letter-spacing:.04em; }
-.z0gatebar { display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; background:color-mix(in srgb, var(--accent) 16%, var(--bg2)); border-left:3px solid var(--accent); padding:3px 8px; margin:2px 0 4px 0; font-size:.74em; }
-.z0gateq { color:var(--fg-1); font-weight:400; }
-.z0gatebar button { color:var(--accent); font-weight:700; text-transform:uppercase; font-size:.92em; }
-.z0gatebar button:hover { text-decoration:underline; }
-.blastpills { display:flex; gap:7px; align-items:baseline; flex-wrap:wrap; margin-top:auto; padding-top:3px; }
-.blastpill { font-size:.66em; font-weight:700; letter-spacing:.06em; color:var(--fg-2); text-transform:lowercase; }
-.z0filepill { font-size:.66em; font-weight:300; color:var(--fg-3); }
-.blastdelta { font-size:.66em; font-weight:600; letter-spacing:.04em; color:var(--fg-2); }
-.z0turnmeta { font-size:.64em; font-weight:600; letter-spacing:.08em; color:var(--fg-3); text-transform:uppercase; margin-left:auto; }
-/* Right Column: Live Fleet Workers Mosaic + Workspace Rooms */
-.z0fleetcol { min-width:0; border-left:1px solid color-mix(in srgb, var(--fg) 14%, transparent); padding-left:20px; }
-.z0agentlist { display:flex; flex-direction:column; gap:7px; }
-.z0agentunit { display:grid; grid-template-columns:82px minmax(0, 1fr); gap:10px; align-items:stretch; cursor:pointer; }
-.z0agentsq { display:flex; flex-direction:column; padding:5px 7px; background:var(--bg2); border-top:2px solid color-mix(in srgb, var(--fg) 24%, transparent); min-height:66px; }
-.z0agentsq.tile-running { border-top-color:var(--accent); }
-.z0agentsq.tile-ready { border-top-color:var(--add); }
-.z0agentsq.tile-blocked { background:var(--accent); color:#fff; border-top-color:#fff; }
-.z0agentsq.tile-blocked .tiletop, .z0agentsq.tile-blocked .z0agentsub { color:#fff; }
-.z0agentsq .tiletop { font-size:.52em; letter-spacing:.1em; }
-.z0agentbig { font-size:1.15em; font-weight:300; line-height:1.05; margin-top:auto; }
-.z0agentsub { font-size:.6em; color:var(--fg-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.z0agentsq .tileprog { margin-top:3px; height:2px; }
-.z0agentdesc { display:flex; flex-direction:column; min-width:0; justify-content:center; }
-.z0agenthead { display:flex; justify-content:space-between; align-items:baseline; gap:6px; }
-.z0agentname { font-size:.86em; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.z0agentact { font-size:.62em; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--fg-3); flex:none; }
-.z0agentact:hover { color:var(--accent); }
-.z0agenttask { font-size:.72em; font-weight:300; color:var(--fg-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.z0agenttail { font-size:.68em; font-weight:300; color:var(--accent); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.z0agentmeta { font-size:.6em; letter-spacing:.06em; text-transform:uppercase; color:var(--fg-3); margin-top:1px; }
-.z0roomsgrid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px; }
-.z0roomtile { display:flex; flex-direction:column; background:var(--bg2); border-top:2px solid color-mix(in srgb, var(--fg) 22%, transparent); padding:6px 9px; text-align:left; min-height:58px; }
-.z0roomtile:hover { border-top-color:var(--accent); }
-.z0roomtile .tiletop { font-size:.55em; }
-.z0roomtitle { font-size:.88em; font-weight:600; color:var(--fg-1); margin-top:auto; }
-.z0roomtile small { font-size:.62em; color:var(--fg-3); text-transform:uppercase; letter-spacing:.06em; }
+/* Column 2 In-Place Semantic Zoom (Z3 Full Stream <-> Z2 1-Line Ledger <-> Z1 Epoch Chapters <-> Z0 Concepts Throughout History) */
+.col2zoombox { margin-bottom:10px; padding-bottom:8px; border-bottom:1px solid color-mix(in srgb, var(--fg) 18%, transparent); }
+.col2zoomstops { display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; }
+.col2zbtn { font-size:.76em; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--fg-3); padding:2px 0; }
+.col2zbtn:hover { color:var(--fg-1); opacity:1; }
+.col2zbtn.on { color:var(--accent); opacity:1; }
+.col2zoommeta { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; font-size:.76em; font-weight:300; color:var(--fg-2); margin-top:4px; }
+/* Z0 inside Column 2: Concepts & Decisions Throughout History */
+.z0eragrid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px; margin:8px 0 14px 0; }
+.z0eracard { display:flex; flex-direction:column; background:var(--bg2); border-top:2px solid var(--accent); padding:8px 10px; text-align:left; min-height:92px; }
+.z0eracard:hover { background:color-mix(in srgb, var(--accent) 10%, var(--bg2)); opacity:1; }
+.z0eratop { display:flex; justify-content:space-between; align-items:baseline; gap:6px; font-size:.62em; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--fg-3); margin-bottom:4px; }
+.z0eraprompt { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; font-size:.82em; font-weight:300; line-height:1.25; color:var(--fg-1); margin-bottom:3px; }
+.z0eradecision { display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; font-size:.74em; font-weight:300; color:var(--accent); margin-bottom:4px; }
+.z0eraconcepts { display:flex; gap:6px; flex-wrap:wrap; margin-top:auto; padding-top:4px; }
+.z0erachip { font-size:.62em; font-weight:600; letter-spacing:.06em; color:var(--fg-2); text-transform:uppercase; }
+.z0erachip sup { color:var(--accent); margin-left:1px; font-weight:700; }
+.z0conceptlist { display:flex; flex-direction:column; gap:10px; }
+.z0conceptrow { padding:8px 10px; background:var(--bg2); border-left:3px solid color-mix(in srgb, var(--fg) 26%, transparent); }
+.z0conceptrow.on { border-left-color:var(--accent); outline:1px solid var(--accent); }
+.z0concepthead { display:flex; justify-content:space-between; align-items:baseline; gap:10px; flex-wrap:wrap; }
+.z0concepttitle { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+.z0conceptname { font-size:1.18em; font-weight:300; color:var(--fg-1); line-height:1.1; }
+.z0concepttitle:hover .z0conceptname { color:var(--accent-hover); }
+.z0conceptcount { font-size:.72em; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); }
+.z0conceptfriction { font-size:.68em; font-weight:700; letter-spacing:.08em; color:var(--del); text-transform:uppercase; }
+.z0conceptjumps { display:flex; gap:8px; align-items:baseline; }
+.z0jumpbtn { font-size:.68em; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--fg-3); }
+.z0jumpbtn:hover { color:var(--accent); opacity:1; }
+.z0jumpbtn.fail { color:var(--del); }
+.conceptheat { display:flex; gap:2px; height:6px; width:100%; margin:6px 0 5px 0; }
+.heatcell { flex:1; height:100%; background:color-mix(in srgb, var(--fg) 10%, transparent); padding:0; }
+.heatcell.heat-prompt { background:#1ba1e2; }
+.heatcell.heat-mutation { background:var(--accent); }
+.heatcell.heat-decision { background:#f09609; }
+.heatcell.heat-fail { background:var(--del); }
+.heatcell.heat-ok { background:var(--add); }
+.z0conceptquote { font-size:.82em; font-weight:300; color:var(--fg-2); line-height:1.3; }
+/* Z1 inside Column 2: Chronological Epoch Chapters */
+.z1chapter { padding:10px 12px; margin-bottom:10px; background:var(--bg2); border-left:3px solid color-mix(in srgb, var(--fg) 22%, transparent); }
+.z1chapter.on { border-left-color:var(--accent); }
+.z1chaphead { display:flex; justify-content:space-between; align-items:baseline; gap:10px; }
+.z1chaptitle { font-size:1.05em; font-weight:300; color:var(--fg-1); }
+.z1chapsummary { font-size:.86em; font-weight:300; color:var(--fg-2); margin:4px 0 6px 0; line-height:1.35; }
+.z1chapprompts, .z1chapdecisions { display:flex; flex-direction:column; gap:3px; margin:4px 0; }
+.z1promptrow, .z1decrow { font-size:.84em; font-weight:300; color:var(--fg-1); line-height:1.3; text-align:left; }
+.z1promptrow:hover, .z1decrow:hover { color:var(--accent-hover); }
+.z1chapfoot { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; margin-top:6px; padding-top:4px; border-top:1px solid color-mix(in srgb, var(--fg) 10%, transparent); }
+/* Z2 inside Column 2: 1-Line Turn, Decision & Mutation Ledger */
+.z2ledgerrow { padding:5px 0 !important; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.z2kind { display:inline-block; font-size:.64em; font-weight:700; letter-spacing:.1em; padding:1px 5px; margin-right:7px; text-transform:uppercase; }
+.z2-you { background:#1ba1e2; color:#000; }
+.z2-decision { background:#f09609; color:#000; }
+.z2-mutation { background:var(--accent); color:#fff; }
+.z2-step { background:color-mix(in srgb, var(--fg) 14%, transparent); color:var(--fg-2); }
 .strugglebar { display:flex; gap:2px; height:4px; width:100%; margin:6px 0 4px 0; background:color-mix(in srgb, var(--fg) 10%, transparent); }
 .strugglebar .sseg { flex:1; height:100%; display:block; }
 .sseg.seg-prompt { background:#1ba1e2; }

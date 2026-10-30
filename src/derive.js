@@ -177,7 +177,16 @@ export function tickAgents(agents, dtSec, rand = Math.random) {
   return { agents: out, events }
 }
 
-import { cleanDisplayText } from './extract.js'
+import {
+  extractTurnSpans,
+  segmentGroundedText,
+  deriveHotWords,
+  turnMatchesHotWord,
+  enrichTurn,
+  deriveEpochs,
+  assignTurnEpochs,
+  cleanDisplayText,
+} from './extract.js'
 
 /** proportional Z0 weight -> grid span class (1, w2, w2 h2) by relative size */
 export function treemapSpan(weight, maxWeight) {
@@ -404,6 +413,120 @@ export function matchSessionOrienteering(sig, rawQuery) {
   return { matched: false, matchedBy: null, snippet: null }
 }
 
+/**
+ * Derives the Z0 "Concepts Throughout History" view for Column 2 of the 3-Column Workbench.
+ * Distills a massive session (e.g. 200 turns / ~100k lines of CLI & tool history) into:
+ *  - Ranked technical concepts with chronological presence heat-bars across all epochs
+ *  - Defining human prompt / architectural decision per concept
+ *  - Three chronological eras (Early Kickoff -> Mid-Session Friction -> Late Verification)
+ */
+export function deriveSessionConcepts(turns = [], epochs = [], workspaceCtx = {}) {
+  const safeEpochs = epochs.length > 0 ? epochs : [{ n: 1, name: 'SESSION', anchor: 0, summary: '' }]
+  const rawHot = deriveHotWords(turns, workspaceCtx, 12)
+  const failRegex = /\b(FAIL|REJECTED|EXC_BAD_ACCESS|SIGSEGV|401|collision|fail-open|corrupt|error)\b/i
+
+  const concepts = rawHot.map((hw) => {
+    const matchingTurns = []
+    let frictionCount = 0
+    for (let i = 0; i < turns.length; i++) {
+      const t = { ...turns[i], i: turns[i].i ?? i }
+      if (turnMatchesHotWord(t, hw.key, workspaceCtx)) {
+        matchingTurns.push(t)
+        const hay = `${t.summary || ''} ${(t.stdout || []).join(' ')} ${(t.trace || []).join(' ')}`
+        if (failRegex.test(hay)) frictionCount++
+      }
+    }
+
+    const epochHeat = safeEpochs.map((ep) => {
+      const inEp = matchingTurns.filter((t) => (t.epoch || 1) === ep.n)
+      if (inEp.length === 0) return { epoch: ep.n, name: ep.name, count: 0, kind: 'empty', firstTurnIndex: ep.anchor || 0 }
+      const hasFail = inEp.some((t) => failRegex.test(`${t.summary || ''} ${(t.stdout || []).join(' ')} ${(t.trace || []).join(' ')}`))
+      const hasMutation = inEp.some((t) => t.kind === 'mutation')
+      const hasDecision = inEp.some((t) => t.kind === 'decision' || Boolean(t.decision))
+      const hasPrompt = inEp.some((t) => t.actor === 'user' || t.kind === 'prompt')
+      const kind = hasFail ? 'fail' : hasMutation ? 'mutation' : hasDecision ? 'decision' : hasPrompt ? 'prompt' : 'ok'
+      return {
+        epoch: ep.n,
+        name: ep.name,
+        count: inEp.length,
+        kind,
+        firstTurnIndex: inEp[0].i ?? 0,
+      }
+    })
+
+    const decisionHit = matchingTurns.find((t) => t.decision || t.kind === 'decision')
+    const promptHit = matchingTurns.find((t) => t.actor === 'user' || t.kind === 'prompt')
+    const anchorTurn = decisionHit || promptHit || matchingTurns[0]
+    const anchorQuote = anchorTurn
+      ? cleanDisplayText(anchorTurn.decision || anchorTurn.intent || anchorTurn.summary || anchorTurn.full || '').slice(0, 118)
+      : ''
+
+    const firstTurnIdx = matchingTurns[0]?.i ?? 0
+    const lastTurnIdx = matchingTurns[matchingTurns.length - 1]?.i ?? firstTurnIdx
+    const struggleTurn = matchingTurns.find((t) => failRegex.test(`${t.summary || ''} ${(t.stdout || []).join(' ')} ${(t.trace || []).join(' ')}`))
+
+    return {
+      key: hw.key,
+      label: hw.label,
+      cls: hw.cls,
+      count: matchingTurns.length || hw.count,
+      firstTurnIndex: firstTurnIdx,
+      lastTurnIndex: lastTurnIdx,
+      struggleTurnIndex: struggleTurn ? struggleTurn.i : null,
+      frictionCount,
+      epochHeat,
+      anchorQuote,
+      anchorKind: decisionHit ? 'decision' : promptHit ? 'prompt' : 'context',
+    }
+  })
+
+  // Group epochs into 3 chronological eras across history
+  const epCount = safeEpochs.length
+  const cut1 = Math.max(1, Math.ceil(epCount / 3))
+  const cut2 = Math.max(cut1 + 1, Math.ceil((epCount * 2) / 3))
+  const eraDefs = [
+    { id: 'early', title: '01 · KICKOFF & ARCHITECTURE', slice: safeEpochs.slice(0, cut1) },
+    { id: 'middle', title: '02 · IMPLEMENTATION & FRICTION', slice: safeEpochs.slice(cut1, cut2) },
+    { id: 'late', title: '03 · VERIFICATION & LANDING', slice: safeEpochs.slice(cut2) },
+  ].filter((e) => e.slice.length > 0)
+
+  const eras = eraDefs.map((ed) => {
+    const epNums = new Set(ed.slice.map((e) => e.n))
+    const eraTurns = turns
+      .map((t, i) => ({ ...t, i: t.i ?? i }))
+      .filter((t) => epNums.has(t.epoch || 1))
+    const eraPrompts = eraTurns.filter((t) => t.actor === 'user' || t.kind === 'prompt')
+    const eraDecisions = eraTurns.filter((t) => t.kind === 'decision' || Boolean(t.decision))
+    const eraHot = deriveHotWords(eraTurns, workspaceCtx, 5)
+    return {
+      id: ed.id,
+      title: ed.title,
+      epochRange: `E${String(ed.slice[0].n).padStart(2, '0')}–E${String(ed.slice[ed.slice.length - 1].n).padStart(2, '0')}`,
+      anchorTurnIndex: ed.slice[0].anchor ?? eraTurns[0]?.i ?? 0,
+      turnsCount: eraTurns.length,
+      promptsCount: eraPrompts.length,
+      decisionsCount: eraDecisions.length,
+      headlinePrompt: eraPrompts[0] ? cleanDisplayText(eraPrompts[0].intent || eraPrompts[0].summary || eraPrompts[0].full || '').slice(0, 96) : ed.slice[0].summary,
+      headlineDecision: eraDecisions[0] ? cleanDisplayText(eraDecisions[0].decision || eraDecisions[0].summary || '').slice(0, 96) : null,
+      concepts: eraHot,
+    }
+  })
+
+  // Estimate raw CLI & tool log lines represented by this session
+  const verbatimLines = turns.reduce((sum, t) => {
+    const proseLines = String(t.full || t.synthesis || '').split('\n').length
+    const traceLines = (t.trace || []).length * 18
+    const stdoutLines = (t.stdout || []).length * 32
+    return sum + proseLines + traceLines + stdoutLines + 420
+  }, 0)
+
+  return {
+    concepts,
+    eras,
+    rawLineEstimate: verbatimLines,
+  }
+}
+
 export {
   extractTurnSpans,
   segmentGroundedText,
@@ -413,5 +536,5 @@ export {
   deriveEpochs,
   assignTurnEpochs,
   cleanDisplayText,
-} from './extract.js'
+}
 
