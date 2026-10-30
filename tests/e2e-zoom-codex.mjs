@@ -172,6 +172,52 @@ try {
   assert.equal(storedAfterOptOff.optimizer.cacheInjection, false, 'optimizer.cacheInjection=false must persist')
   await page.click('.page.isactive .paramrow:has-text("prompt cache 4-breakpoint injector") button:has-text("on")')
 
+  // 6. E2E Verification of Z0 Sky-Level Episodic & Fleet Map -> Z3 Persistent 3-Column Zune Workbench
+  await page.click('nav.pivotrail button.pivot:has-text("conversation")')
+  await page.click('.zoomstops button:has-text("Z0")')
+  await page.waitForSelector('.zoommap.z0skymap')
+
+  const z0TilesCount = await page.locator('.z0skymap .z0tile').count()
+  assert.equal(z0TilesCount, 9, `expected 9 episodic session tiles across 60d in Z0 sky map, got ${z0TilesCount}`)
+
+  // Orienteer by typing a human prompt fragment from 2 months ago ("randomly log me out")
+  await page.fill('[data-testid="z0-orienteer-input"]', 'randomly log me out')
+  await page.waitForSelector('[data-testid="z0-match-badge-refresh-race"]')
+  const matchBadgeText = await page.locator('[data-testid="z0-match-badge-refresh-race"]').textContent()
+  assert.ok(matchBadgeText.includes('MATCHED YOUR PROMPT'), `expected MATCHED YOUR PROMPT badge, got ${matchBadgeText}`)
+
+  // Verify temporal neighbor in the same 6-8w swimlane stays visible (.z0-neighbor) while unrelated tiles dim (.searchdim)
+  const zigNeighborClass = await page.locator('[data-testid="z0-tile-zig-linker"]').getAttribute('class')
+  assert.ok(zigNeighborClass.includes('z0-neighbor'), `expected temporal neighbor .z0-neighbor on zig-linker, got ${zigNeighborClass}`)
+
+  // Clear Z0 query and click the 2-month-old session tile ("OAuth Token Refresh Multi-Tab Race") to dive straight into Z3 3-Column Workbench
+  await page.click('[data-testid="z0-orienteer-clear"]')
+  await page.click('[data-testid="z0-tile-refresh-race"]')
+
+  // Assert we landed directly in Z3 Persistent 3-Column Workbench (.z3grid.workbench3)
+  await page.waitForSelector('[data-testid="z3-workbench-grid"].workbench3')
+  const wbColsCount = await page.locator('[data-testid="z3-workbench-grid"] > [data-wb-col]').count()
+  assert.equal(wbColsCount, 3, `expected 3 persistent columns in Z3 workbench, got ${wbColsCount}`)
+
+  // Verify Col 1 shows session files & human prompts, Col 2 shows conversation stream + composer, Col 3 shows RefreshGraceWindow.kt diff
+  const diffHeaderBefore = await page.locator('[data-testid="z3-diff-header"]').textContent()
+  assert.ok(diffHeaderBefore.includes('RefreshGraceWindow.kt'), `expected RefreshGraceWindow.kt in Col 3 diff, got ${diffHeaderBefore}`)
+
+  // Click AuthAndVaultStore.kt in Col 1 and verify Col 3 switches to AuthAndVaultStore.kt without leaving the 3-column workbench
+  await page.click('[data-testid="wb-file-AuthAndVaultStore.kt"]')
+  const diffHeaderAfter = await page.locator('[data-testid="z3-diff-header"]').textContent()
+  assert.ok(diffHeaderAfter.includes('AuthAndVaultStore.kt'), `expected AuthAndVaultStore.kt in Col 3 after clicking Col 1 file, got ${diffHeaderAfter}`)
+
+  // Test inline semantic fold ("Z1 my prompts & decisions only") inside Col 2 while keeping all 3 columns on screen
+  await page.click('[data-testid="z3-fold-human-decisions"]')
+  const humanDecisionTurns = await page.locator('.z3grid .streamturn').count()
+  assert.equal(humanDecisionTurns, 4, `expected 4 human prompts + decision turns when robot filler is muted in refresh-race, got ${humanDecisionTurns}`)
+  await page.click('[data-testid="z3-fold-z2-older"]')
+
+  // Click the ↑ Z0 sky map button in Z3 to zoom back up to Z0
+  await page.click('[data-testid="z3-to-z0-btn"]')
+  await page.waitForSelector('.zoommap.z0skymap')
+
   assert.equal(consoleErrors.length, 0, `unexpected page errors: ${consoleErrors.join('; ')}`)
 
   console.log(JSON.stringify({

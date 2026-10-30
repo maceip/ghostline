@@ -16,6 +16,8 @@ export const seedThreads = [
     title: 'Board of Directors',
     project: 'fragments',
     age: 'now',
+    timeWindow: 'NOW · THIS WEEK',
+    landmark: 'tag: v2.4.0-rc1 · enclave freeze',
     pinned: true,
     unread: 3,
     status: '1 subagent running',
@@ -28,10 +30,43 @@ export const seedThreads = [
     ],
   },
   {
+    id: 'auth',
+    title: 'RSA-2048 JWT + Keychain Vault',
+    project: 'fragments.auth',
+    age: '1h',
+    timeWindow: 'NOW · THIS WEEK',
+    landmark: 'branch: feat/keychain-store',
+    pinned: false,
+    unread: 1,
+    status: 'm1_worker_1 writing',
+    scope: ':fragments.auth',
+    messages: [
+      { role: 'agent', name: 'm1_worker_1', text: 'Wiring AuthAndVaultStore into MacosChromeApp.kt. JWT verification path is done; Keychain write-back is next.' },
+    ],
+  },
+  {
+    id: 'codex',
+    title: 'Codex ExecuTorch 200',
+    project: 'executorch-iot',
+    age: '3h',
+    timeWindow: 'NOW · THIS WEEK',
+    landmark: 'hackathon · VENTUNO Q track',
+    pinned: true,
+    unread: 0,
+    status: '200 turns · 14 epochs',
+    scope: ':executorch.iot',
+    messages: [
+      { role: 'user', name: 'you', text: 'Setup a full development environment for the ExecuTorch hackathon on the IoT track with VENTUNO Q.' },
+      { role: 'agent', name: 'codex_iot', text: '200-turn Codex rollout imported from ~/.codex/sessions across 14 hot-word epochs.' },
+    ],
+  },
+  {
     id: 'siem',
     title: 'SIEM Workbench UI Enhancement',
     project: 'fragments',
     age: '2d',
+    timeWindow: 'NOW · THIS WEEK',
+    landmark: 'PR #442 · inline threat rows',
     pinned: true,
     unread: 0,
     status: 'review ready · 4 files',
@@ -46,39 +81,79 @@ export const seedThreads = [
     title: 'Real World E2E Demo Verification',
     project: 'fragments',
     age: '6d',
+    timeWindow: 'NOW · THIS WEEK',
+    landmark: 'tag: v2.3.9 · 29 suites green',
     pinned: false,
     unread: 0,
     status: 'complete · 29 suites green',
+    scope: ':docs',
     messages: [
       { role: 'user', name: 'you', text: 'Run the full demo verification against a clean checkout.' },
       { role: 'agent', name: 'muse', text: 'Complete. 29 suites green, 0 failures. TEST_READY.md published with the tier breakdown and rerun commands.' },
     ],
   },
   {
-    id: 'auth',
-    title: 'RSA-2048 JWT + Keychain Vault',
-    project: 'fragments.auth',
-    age: '1h',
+    id: 'litert-quant',
+    title: 'LiteRT-LM int4 KV-Cache Attention Sinks',
+    project: 'executorch-iot',
+    age: '3w',
+    timeWindow: '3–4 WEEKS AGO · OCT SPRINT & STRIPE CUTOVER',
+    landmark: 'tag: v2.3.0 · QNN int4 drop',
     pinned: false,
-    unread: 1,
-    status: 'm1_worker_1 writing',
-    scope: ':fragments.auth',
+    unread: 0,
+    status: 'merged · 3w ago',
+    scope: ':executorch.iot',
     messages: [
-      { role: 'agent', name: 'm1_worker_1', text: 'Wiring AuthAndVaultStore into MacosChromeApp.kt. JWT verification path is done; Keychain write-back is next.' },
+      { role: 'user', name: 'you', text: 'int4 KV-cache quantization breaks tool-call JSON syntax after 4k tokens — stop re-quantizing the first 4 attention sink tokens.' },
+      { role: 'agent', name: 'qnn_worker', text: 'Pinned tokens 0..3 in fp16 in KvCacheQuantizer.ts. JSON tool-call validity at 16k context restored from 61% to 99.8%.' },
     ],
   },
   {
-    id: 'codex',
-    title: 'Codex ExecuTorch 200',
-    project: 'executorch-iot',
-    age: '3h',
-    pinned: true,
+    id: 'stripe-webhook',
+    title: 'Stripe Webhook Idempotency Collision',
+    project: 'payments-stripe',
+    age: '1mo',
+    timeWindow: '3–4 WEEKS AGO · OCT SPRINT & STRIPE CUTOVER',
+    landmark: 'PR #418 · Stripe webhook cutover',
+    pinned: false,
     unread: 0,
-    status: '200 turns · 14 epochs',
-    scope: ':executorch.iot',
+    status: 'merged · 1mo ago',
+    scope: ':payments.stripe',
     messages: [
-      { role: 'user', name: 'you', text: 'Setup a full development environment for the ExecuTorch hackathon on the IoT track with VENTUNO Q.' },
-      { role: 'agent', name: 'codex_iot', text: '200-turn Codex rollout imported from ~/.codex/sessions across 14 hot-word epochs.' },
+      { role: 'user', name: 'you', text: 'duplicate invoice.paid webhooks are double-crediting the ledger when Stripe retries on 504 — stop trusting the client timestamp.' },
+      { role: 'agent', name: 'billing_worker', text: 'Switched StripeWebhookVerifier.kt to derive the idempotency lock from (event.id + livemode) before opening the DB transaction.' },
+    ],
+  },
+  {
+    id: 'zig-linker',
+    title: 'macOS 26 arm64e Pointer Auth Crash',
+    project: 'nucleus-macos26',
+    age: '6w',
+    timeWindow: '6–8 WEEKS AGO · SEPT AUTH & MACOS 26 SDK',
+    landmark: 'tag: v2.2.0 · arm64e bridge',
+    pinned: false,
+    unread: 0,
+    status: 'merged · 6w ago',
+    scope: ':nucleus-macos26',
+    messages: [
+      { role: 'user', name: 'you', text: 'JNI dylib crashes with EXC_BAD_ACCESS (PAC fail) the instant Zode.app loads libnucleus on macOS 26.' },
+      { role: 'agent', name: 'native_worker', text: 'Signed the C callback pointer with ptrauth_sign_unauthenticated in NativeBridgeShim.kt and updated Gradle linker flags.' },
+    ],
+  },
+  {
+    id: 'refresh-race',
+    title: 'OAuth Token Refresh Multi-Tab Race',
+    project: 'fragments.auth',
+    age: '2mo',
+    timeWindow: '6–8 WEEKS AGO · SEPT AUTH & MACOS 26 SDK',
+    landmark: 'tag: v2.1.0 · initial Keychain drop',
+    pinned: false,
+    unread: 0,
+    status: 'merged · 2mo ago',
+    scope: ':fragments.auth',
+    messages: [
+      { role: 'user', name: 'you', text: 'why does token refresh randomly log me out when two windows wake from sleep at the same time?' },
+      { role: 'agent', name: 'auth_worker', text: 'Added a 30-second idempotent grace window in RefreshGraceWindow.kt so the losing tab receives the newly rotated Keychain token instead of revoking the session.' },
     ],
   },
 ]
@@ -96,14 +171,18 @@ export const seedAgents = [
   { id: 'a6', threadId: 'board', name: 'm1_verifier_1', task: 'invariant check · enclave gates', phase: 'invariant check', state: 'blocked', progress: 66, tokens: 19300, rate: 0, pass: 2, total: 3, tail: 'gate raised · awaiting arbitration', tools: 9, elapsed: '6m', log: ['AST check no_unauthenticated_fallback → PASS', 'dpop_ath_bound → 12/12 assertions', 'dev_sandbox_boot → FAIL :142 throws without mock PCR0', 'gate raised · awaiting human arbitration'] },
 ]
 
-export const folders = ['fragments.auth', 'ui', 'model-serving', 'nucleus-macos26', 'docs']
+export const folders = ['fragments.auth', 'ui', 'model-serving', 'nucleus-macos26', 'payments.stripe', 'executorch.iot', 'docs']
 
 export const files = [
   { name: 'AuthAndVaultStore.kt', folder: 'fragments.auth', lines: 212, lang: 'kotlin', body: ['package fragments.auth', '', 'class AuthAndVaultStore(', '    private val vault: VaultService,', '    private val jwt: JwtVerifier,', ') {', '    fun signIn(token: String): Session {', '        val claims = jwt.verify(token) // RSA-2048', '        vault.store("session", token)', '        return Session(claims.sub, claims.exp)', '    }', '}'] },
   { name: 'VaultService.kt', folder: 'fragments.auth', lines: 96, lang: 'kotlin', body: ['package fragments.auth', '', 'interface VaultService {', '    fun store(key: String, value: String)', '    fun read(key: String): String?', '    fun clear(key: String)', '}'] },
+  { name: 'RefreshGraceWindow.kt', folder: 'fragments.auth', lines: 118, lang: 'kotlin', body: ['package fragments.auth', '', 'class RefreshGraceWindow(private val vault: VaultService) {', '    fun rotateIdempotent(prevToken: String, nowMs: Long): String {', '        val cached = vault.read("grace:$prevToken")', '        if (cached != null) return cached // 30s multi-tab grace window', '        val next = mintRefreshToken()', '        vault.store("grace:$prevToken", next)', '        return next', '    }', '}'] },
   { name: 'MacosChromeApp.kt', folder: 'ui', lines: 480, lang: 'kotlin', body: ['package fragments.ui', '', '@Composable', 'fun MacosChromeApp(store: AuthAndVaultStore) {', '    val session by store.session.collectAsState()', '    if (session == null) SignIn() else Shell()', '}'] },
   { name: 'ModelAndKeyControlCenter.kt', folder: 'ui', lines: 164, lang: 'kotlin', body: ['package fragments.ui', '', '@Composable', 'fun ModelAndKeyControlCenter(workers: List<Worker>) {', '    workers.forEach { WorkerRow(it) } // live :9379', '}'] },
   { name: 'worker.ts', folder: 'model-serving', lines: 88, lang: 'ts', body: ['export async function serve(port = 9379) {', '  const app = createWorker()', '  app.get("/health", () => ({ ok: true }))', '  return app.listen(port)', '}'] },
+  { name: 'NativeBridgeShim.kt', folder: 'nucleus-macos26', lines: 144, lang: 'kotlin', body: ['package nucleus.macos26', '', 'object NativeBridgeShim {', '    fun registerSignedCallback(fnPtr: Long): Int {', '        // arm64e ptrauth_sign_unauthenticated strip + re-sign', '        return nativeBindTrampoline(fnPtr and 0x00007FFFFFFFFFFFL)', '    }', '}'] },
+  { name: 'StripeWebhookVerifier.kt', folder: 'payments.stripe', lines: 176, lang: 'kotlin', body: ['package payments.stripe', '', 'class StripeWebhookVerifier(private val vault: VaultService) {', '    fun verifyAndLock(eventId: String, livemode: Boolean): Boolean {', '        val key = "stripe:idemp:$eventId:$livemode"', '        if (vault.read(key) != null) return false', '        vault.store(key, "locked")', '        return true', '    }', '}'] },
+  { name: 'KvCacheQuantizer.ts', folder: 'executorch.iot', lines: 132, lang: 'ts', body: ['export function quantizeKvBlock(tokens: Float32Array, tokenIdx: number) {', '  if (tokenIdx < 4) return tokens // keep attention sinks 0..3 in fp16', '  return packInt4Symmetric(tokens)', '}'] },
   { name: 'TEST_INFRA.md', folder: 'docs', lines: 140, lang: 'md', body: ['# test infrastructure', '', 'tier 1  unit          jvmTest', 'tier 2  compose ui    runComposeUiTest', 'tier 3  integration   :model-serving', 'tier 4  e2e demo      clean checkout'] },
   { name: 'TEST_READY.md', folder: 'docs', lines: 42, lang: 'md', body: ['# test ready', '', '29 suites · 0 failures', './gradlew :nucleus-macos26:jvmTest'] },
   { name: 'jwt-keychain-notes.md', folder: 'docs', lines: 28, lang: 'md', body: ['# jwt + keychain survey', '', 'RS256 only · no HS fallback', '3 JwtVerifier call sites', 'finding · VaultKeyring.kt:142 getLegacy() fail-open', 'verdict · strict DPoP + PCR0, throw on miss'] },
@@ -169,6 +248,32 @@ export const seedTurns = {
     { actor: 'm1_worker_1', age: '1h', state: 'running', progress: 41, summary: 'Wiring AuthAndVaultStore', intent: 'JWT verification into MacosChromeApp.', synthesis: 'JWT verification path is done; Keychain write-back is next. Wiring AuthAndVaultStore into MacosChromeApp.kt via collectAsState session flow.', stats: [{ v: '48', l: '+ lines' }, { v: '41%', l: 'complete' }], artifacts: [], full: 'Wiring AuthAndVaultStore into MacosChromeApp.kt. JWT verification path is done; Keychain write-back is next.', trace: ['edit MacosChromeApp.kt', 'write AuthAndVaultStore.kt · +48'], stdout: [':ui:compileKotlin → ok'] },
   ],
   codex: codexTurns,
+  'litert-quant': [
+    { actor: 'user', epoch: 1, kind: 'prompt', age: '3w', summary: '"int4 KV-cache quantization breaks tool-call JSON…"', intent: 'int4 KV-cache quantization breaks tool-call JSON syntax after 4k tokens — stop re-quantizing the first 4 attention sink tokens.', synthesis: 'Diagnose KV-cache int4 degradation on long tool-call turns and preserve attention sink tokens in fp16.', stats: [{ v: '4k', l: 'context cliff' }], artifacts: [], full: 'int4 KV-cache quantization breaks tool-call JSON syntax after 4k tokens — stop re-quantizing the first 4 attention sink tokens.', trace: ['profiled KvCacheQuantizer.ts at 4096 tokens'], stdout: [] },
+    { actor: 'qnn_worker', epoch: 1, kind: 'pty', age: '3w', summary: 'FAIL · symmetric int4 clips sink activations at 4,096 tok', intent: 'Reproduce JSON tool-call corruption on VENTUNO Q.', synthesis: 'Confirmed: tokens 0..3 carry 18x outlier activation magnitudes; symmetric int4 clipping corrupts the grammar state at 4,096 tokens.', stats: [{ v: '61%', l: 'json valid pre-fix' }], artifacts: [], full: 'Reproduced on VENTUNO Q: symmetric int4 clipping on tokens 0..3 destroys attention sink precision, causing malformed JSON tool calls after 4,096 tokens.', trace: ['bench KvCacheQuantizer.ts → FAIL at 4096 tok'], stdout: ['eval tool-call-json @ 4k → 39/100 FAIL (unterminated brace)'] },
+    { actor: 'user', epoch: 2, kind: 'prompt', age: '3w', summary: '"pin tokens 0..3 in fp16 and benchmark prefill…"', intent: 'pin tokens 0..3 in fp16 and benchmark prefill latency on VENTUNO Q.', synthesis: 'Keep the first 4 attention sink tokens unquantized in fp16 while packing tokens 4..N in int4.', stats: [{ v: '04', l: 'fp16 sink tokens' }], artifacts: [], full: 'pin tokens 0..3 in fp16 and benchmark prefill latency on VENTUNO Q.', trace: ['dispatched qnn_worker · KvCacheQuantizer.ts'], stdout: [] },
+    { actor: 'qnn_worker', epoch: 2, kind: 'decision', decision: 'Pin tokens 0..3 in fp16 (attention sinks) and symmetric-pack tokens >= 4 in int4', age: '3w', summary: 'Attention sinks 0..3 pinned in fp16 · 99.8% JSON valid', intent: 'Bypass int4 quantizer for token indices < 4 in KvCacheQuantizer.ts.', synthesis: 'Patched KvCacheQuantizer.ts to keep tokens 0..3 in fp16. Tool-call JSON validity jumped from 61% to 99.8% at 16k tokens with zero prefill regression.', stats: [{ v: '99.8%', l: 'json valid' }, { v: '01', l: 'file patched' }], artifacts: ['KvCacheQuantizer.ts'], full: 'Patched KvCacheQuantizer.ts: tokens 0..3 stay in fp16 as attention sinks; tokens >= 4 use symmetric int4 packing. Verified 99.8% tool-call JSON validity at 16k context.', trace: ['edit KvCacheQuantizer.ts · +19 / −4'], stdout: ['eval tool-call-json @ 16k → 499/500 PASS (99.8%)'] },
+  ],
+  'stripe-webhook': [
+    { actor: 'user', epoch: 1, kind: 'prompt', age: '1mo', summary: '"duplicate invoice.paid webhooks are double-crediting…"', intent: 'duplicate invoice.paid webhooks are double-crediting the ledger when Stripe retries on 504 — stop trusting the client timestamp.', synthesis: 'Eliminate double-credit race on retried Stripe invoice.paid webhooks.', stats: [{ v: '504', l: 'retry race' }], artifacts: [], full: 'duplicate invoice.paid webhooks are double-crediting the ledger when Stripe retries on 504 — stop trusting the client timestamp.', trace: ['inspected StripeWebhookVerifier.kt'], stdout: [] },
+    { actor: 'billing_worker', epoch: 1, kind: 'pty', age: '1mo', summary: 'FAIL · payload timestamp drifts across 504 retries', intent: 'Check why the existing idempotency hash missed retried deliveries.', synthesis: 'The old verifier hashed the HTTP delivery timestamp header, which changes on every Stripe retry attempt.', stats: [{ v: '02', l: 'duplicate credits' }], artifacts: [], full: 'Found the bug: StripeWebhookVerifier hashed the request header timestamp instead of the immutable event.id, so every 504 retry bypassed the lock.', trace: ['test StripeRetrySimulationTest → FAIL (double credit)'], stdout: ['StripeRetrySimulationTest → FAIL: ledger credited 2x on evt_3P9x'] },
+    { actor: 'user', epoch: 2, kind: 'prompt', age: '1mo', summary: '"derive the idempotency key from event.id + livemode…"', intent: 'never trust the client timestamp — derive the idempotency key from event.id + livemode in VaultService.', synthesis: 'Lock on stripe:idemp:${event.id}:${livemode} inside VaultService before opening the ledger transaction.', stats: [{ v: '02', l: 'files scoped' }], artifacts: [], full: 'never trust the client timestamp — derive the idempotency key from event.id + livemode in VaultService.', trace: ['routed to billing_worker'], stdout: [] },
+    { actor: 'billing_worker', epoch: 2, kind: 'mutation', decision: 'Idempotency key locked on (event.id + livemode) in VaultService prior to ledger mutation', age: '1mo', summary: 'Patched StripeWebhookVerifier.kt (+28 / −9) · 0 duplicates', intent: 'Write atomic idempotency key check in StripeWebhookVerifier.kt.', synthesis: 'StripeWebhookVerifier.kt now locks on stripe:idemp:$eventId:$livemode in VaultService. Retried 504 deliveries short-circuit cleanly with HTTP 200.', stats: [{ v: '28', l: '+ lines' }, { v: '100%', l: 'idempotent' }], artifacts: ['StripeWebhookVerifier.kt', 'VaultService.kt'], full: 'Updated StripeWebhookVerifier.kt and VaultService.kt to persist stripe:idemp:$eventId:$livemode before touching the ledger. 500 concurrent retry simulations pass with 0 duplicate credits.', trace: ['edit StripeWebhookVerifier.kt · +28 / −9', 'test StripeRetrySimulationTest → PASS'], stdout: ['./gradlew :payments.stripe:test → 44 passed, 0 failed'] },
+  ],
+  'zig-linker': [
+    { actor: 'user', epoch: 1, kind: 'prompt', age: '6w', summary: '"JNI dylib crashes with EXC_BAD_ACCESS (PAC fail)…"', intent: 'JNI dylib crashes with EXC_BAD_ACCESS (PAC fail) the instant Zode.app loads libnucleus on macOS 26.', synthesis: 'Fix arm64e pointer authentication crash when loading the native bridge dylib on macOS 26.', stats: [{ v: 'arm64e', l: 'arch' }], artifacts: [], full: 'JNI dylib crashes with EXC_BAD_ACCESS (PAC fail) the instant Zode.app loads libnucleus on macOS 26.', trace: ['captured lldb backtrace on arm64e'], stdout: [] },
+    { actor: 'native_worker', epoch: 1, kind: 'pty', age: '6w', summary: 'FAIL · high bits of JNI fnPtr trip arm64e PAC trap', intent: 'Inspect pointer authentication bits on the JNI callback trampoline.', synthesis: 'macOS 26 arm64e signs C function pointers with PAC bits in [63:47]; JNI passes raw 64-bit longs that fault on blraa.', stats: [{ v: 'SIGSEGV', l: 'PAC trap' }], artifacts: [], full: 'lldb confirms EXC_BAD_ACCESS (code=257, PAC authentication failure) at NativeBridgeShim.registerSignedCallback when invoking the C callback pointer.', trace: ['lldb Zode.app → EXC_BAD_ACCESS at registerSignedCallback'], stdout: ['frame #0: libnucleus.dylib`nativeBindTrampoline + 16 [PAC fail]'] },
+    { actor: 'user', epoch: 2, kind: 'prompt', age: '6w', summary: '"strip pointer-auth ABI mismatch on the C callback…"', intent: 'strip pointer-auth ABI mismatch on the C callback trampoline and sign with hardened runtime.', synthesis: 'Mask the upper PAC signature bits in NativeBridgeShim.kt before handing the trampoline address to JNI.', stats: [{ v: '01', l: 'shim file' }], artifacts: [], full: 'strip pointer-auth ABI mismatch on the C callback trampoline and sign with hardened runtime.', trace: ['dispatched native_worker'], stdout: [] },
+    { actor: 'native_worker', epoch: 2, kind: 'mutation', decision: 'Mask 47-bit canonical address in NativeBridgeShim.kt and re-sign trampoline on arm64e', age: '6w', summary: 'Patched NativeBridgeShim.kt (+24 / −6) · Zode.app boots clean', intent: 'Normalize function pointer bits in NativeBridgeShim.kt.', synthesis: 'NativeBridgeShim.kt now strips non-canonical high bits (0x00007FFFFFFFFFFFL) before binding the JNI trampoline. Verified cold boot on macOS 26 arm64e.', stats: [{ v: '24', l: '+ lines' }, { v: '0', l: 'crashes' }], artifacts: ['NativeBridgeShim.kt'], full: 'Patched NativeBridgeShim.kt to mask the 47-bit canonical address and re-sign inside the C bridge. Zode.app launches cleanly under hardened runtime.', trace: ['edit NativeBridgeShim.kt · +24 / −6', 'codesign --verify Zode.app → ok'], stdout: ['./gradlew :nucleus-macos26:jvmTest → 29 suites, 0 failures'] },
+  ],
+  'refresh-race': [
+    { actor: 'user', epoch: 1, kind: 'prompt', age: '2mo', summary: '"why does token refresh randomly log me out…"', intent: 'why does token refresh randomly log me out when two windows wake from sleep at the same time?', synthesis: 'Investigate multi-window OAuth refresh token rotation race after macOS sleep/wake.', stats: [{ v: '02', l: 'racing tabs' }], artifacts: [], full: 'why does token refresh randomly log me out when two windows wake from sleep at the same time?', trace: ['reproduced multi-tab wake race in fragments.auth'], stdout: [] },
+    { actor: 'auth_worker', epoch: 1, kind: 'pty', age: '2mo', summary: 'FAIL · losing tab sends revoked refresh token → 401 logout', intent: 'Trace concurrent refresh calls across two awake windows.', synthesis: 'Tab A rotates the refresh token in Keychain and invalidates token R1; 12ms later Tab B sends R1, gets 401 InvalidGrant, and wipes the Keychain session.', stats: [{ v: '401', l: 'false logout' }], artifacts: [], full: 'Traced the race: both tabs read refresh token R1 on wake. Tab A wins and rotates R1 -> R2. Tab B arrives 12ms later with R1, triggers reuse detection, and clears the user session.', trace: ['test MultiTabWakeRefreshTest → FAIL (session cleared)'], stdout: ['MultiTabWakeRefreshTest → FAIL: expected active session, got null after 12ms race'] },
+    { actor: 'auth_worker', epoch: 1, kind: 'mutation', age: '2mo', summary: 'Attempt 1 · file lock around HTTP refresh (REJECTED)', intent: 'Try wrapping signIn/refresh in a cross-process file lock.', synthesis: 'Added a file mutex around network refresh, but blocking I/O froze the Compose UI main thread for 900ms on wake.', stats: [{ v: '900ms', l: 'UI freeze' }], artifacts: [], full: 'Tried a cross-process mutex around the HTTP refresh call, but holding a lock across network I/O stalls the UI thread when offline.', trace: ['edit AuthAndVaultStore.kt · mutex lock', 'test UiResponsivenessTest → FAIL (900ms stall)'], stdout: ['UiResponsivenessTest → FAIL: main thread blocked 912ms > 16ms budget'] },
+    { actor: 'user', epoch: 2, kind: 'prompt', age: '2mo', summary: '"stop putting a mutex around network I/O — give a 30s grace…"', intent: 'stop putting a mutex around network I/O — give the rotated refresh token a 30s idempotent grace window in AuthAndVaultStore.', synthesis: 'Revert the blocking mutex and implement a lock-free 30s idempotent grace window in RefreshGraceWindow.kt.', stats: [{ v: '30s', l: 'grace window' }], artifacts: [], full: 'stop putting a mutex around network I/O — give the rotated refresh token a 30s idempotent grace window in AuthAndVaultStore.', trace: ['reverted mutex attempt', 'scoped RefreshGraceWindow.kt'], stdout: [] },
+    { actor: 'user', epoch: 2, kind: 'prompt', age: '2mo', summary: '"revert the Redis lock experiment and keep it in Keychain…"', intent: 'revert the Redis lock experiment and keep the grace window strictly in Keychain state.', synthesis: 'Keep `grace:$prevToken -> $nextToken` strictly in local Keychain via VaultService with a 30-second TTL.', stats: [{ v: '0', l: 'external deps' }], artifacts: [], full: 'revert the Redis lock experiment and keep the grace window strictly in Keychain state.', trace: ['enforced local VaultService storage'], stdout: [] },
+    { actor: 'auth_worker', epoch: 2, kind: 'decision', decision: '30-second idempotent grace window in Keychain (`grace:$prevToken`) instead of blocking network mutexes', age: '2mo', summary: 'Decision · 30s Keychain grace window in RefreshGraceWindow.kt', intent: 'Serve the newly minted token to any sibling tab presenting the just-rotated token within 30s.', synthesis: 'RefreshGraceWindow.kt caches `grace:$prevToken -> $nextToken` in VaultService for 30s. Concurrent wake tabs converge on the same rotated session without locking.', stats: [{ v: '30s', l: 'idempotent window' }, { v: '02', l: 'files patched' }], artifacts: ['RefreshGraceWindow.kt', 'AuthAndVaultStore.kt'], full: 'Implemented RefreshGraceWindow.kt: when R1 rotates to R2, `grace:R1 -> R2` is stored in Keychain for 30 seconds. Any sibling tab presenting R1 within 30s receives R2 idempotently.', trace: ['write RefreshGraceWindow.kt · +34 / −7', 'edit AuthAndVaultStore.kt · +18 / −5'], stdout: ['./gradlew :fragments.auth:test → 38 passed, 0 failed (MultiTabWakeRefreshTest GREEN)'] },
+  ],
 }
 
 /* review as hunk triage: change set (task) → files → discrete mutation hunks.
@@ -213,6 +318,56 @@ export const seedChangeSets = [
       { name: 'OverlaySpec.kt', adds: 22, dels: 0, hunks: [{ range: 'lines 1–22', fn: 'new file', adds: 22, dels: 0, tag: 'ui spec', state: 'STAGED', line: 1, by: 'muse', rationale: 'Geometry constants for the ghost overlay, lifted out of the workbench so the wireframe test can assert them.', verification: 'screenshot tests updated', lines: [['+', 'object OverlaySpec {'], ['+', '    val gutter = 32.dp'], ['+', '    val rowBaseline = 48.dp'], ['+', '}']] }] },
       { name: 'WorkbenchScreenshotTest.kt', adds: 31, dels: 9, hunks: [{ range: 'lines 12–40', fn: 'goldens', adds: 31, dels: 9, tag: 'tests', state: 'UNREVIEWED', line: 12, by: 'muse', rationale: 'Regenerated goldens for the inline rows; deleted the chip-layout captures.', verification: 'goldens → 6 updated', lines: [['-', '@Test fun chipRow() = capture("chip-row")'], ['+', '@Test fun inlineRow() = capture("inline-row")'], ['+', '@Test fun overlayOpen() = capture("overlay-open")']] }] },
       { name: 'MacosChromeApp.kt', adds: 12, dels: 3, hunks: [{ range: 'lines 60–66', fn: 'MacosChromeApp()', adds: 12, dels: 3, tag: 'wiring', state: 'UNREVIEWED', line: 60, by: 'm1_worker_1', rationale: 'Session now collected as state so sign-in/out re-renders the shell without a restart; vault unlock is a launched effect on session change.', verification: ':ui:compileKotlin → ok', lines: [[' ', 'fun MacosChromeApp(store: AuthAndVaultStore) {'], ['-', '    val session = store.legacySession()'], ['+', '    val session by store.session.collectAsState()'], ['+', '    LaunchedEffect(session) { vaultUnlocked(session) }'], [' ', '    if (session == null) SignIn() else Shell()'], [' ', '}']] }] },
+    ],
+  },
+  {
+    id: 'cs-litert', task: 'LiteRT-LM int4 KV-Cache Attention Sinks',
+    files: [
+      {
+        name: 'KvCacheQuantizer.ts', adds: 19, dels: 4,
+        hunks: [
+          { range: 'lines 14–36', fn: 'quantizeKvBlock()', adds: 19, dels: 4, tag: 'kv-cache', state: 'STAGED', line: 14, by: 'qnn_worker', rationale: 'Preserves tokens 0..3 in fp16 as attention sinks so symmetric int4 clipping does not corrupt long-context tool-call JSON grammar.', verification: 'eval tool-call-json @ 16k → 99.8%', lines: [[' ', 'export function quantizeKvBlock(tokens: Float32Array, tokenIdx: number) {'], ['-', '  return packInt4Symmetric(tokens)'], ['+', '  if (tokenIdx < 4) return tokens // keep attention sinks 0..3 in fp16'], ['+', '  return packInt4Symmetric(tokens)'], [' ', '}']] },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cs-stripe', task: 'Stripe Webhook Idempotency Collision',
+    files: [
+      {
+        name: 'StripeWebhookVerifier.kt', adds: 28, dels: 9,
+        hunks: [
+          { range: 'lines 42–78', fn: 'verifyAndLock()', adds: 28, dels: 9, tag: 'idempotency', state: 'STAGED', line: 42, by: 'billing_worker', rationale: 'Derives the idempotency lock key from immutable (event.id + livemode) in VaultService instead of the mutable HTTP retry timestamp.', verification: 'StripeRetrySimulationTest → 44 passed', lines: [['-', 'val key = "stripe:ts:${header.timestamp}"'], ['+', 'val key = "stripe:idemp:$eventId:$livemode"'], ['+', 'if (vault.read(key) != null) return false'], ['+', 'vault.store(key, "locked")']] },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cs-zig', task: 'macOS 26 arm64e Pointer Auth Crash',
+    files: [
+      {
+        name: 'NativeBridgeShim.kt', adds: 24, dels: 6,
+        hunks: [
+          { range: 'lines 29–58', fn: 'registerSignedCallback()', adds: 24, dels: 6, tag: 'arm64e pac', state: 'STAGED', line: 29, by: 'native_worker', rationale: 'Masks non-canonical PAC bits [63:47] before binding the C callback pointer across JNI on macOS 26.', verification: ':nucleus-macos26:jvmTest → 29 suites green', lines: [['-', 'return nativeBindTrampoline(fnPtr)'], ['+', '// arm64e ptrauth_sign_unauthenticated strip + re-sign'], ['+', 'return nativeBindTrampoline(fnPtr and 0x00007FFFFFFFFFFFL)']] },
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cs-refresh', task: 'OAuth Token Refresh Multi-Tab Race',
+    files: [
+      {
+        name: 'RefreshGraceWindow.kt', adds: 34, dels: 7,
+        hunks: [
+          { range: 'lines 12–49', fn: 'rotateIdempotent()', adds: 34, dels: 7, tag: 'concurrency', state: 'STAGED', line: 12, by: 'auth_worker', rationale: 'Caches the rotated token under grace:$prevToken for 30s in Keychain so a second tab waking simultaneously receives the new token instead of triggering 401 logout.', verification: 'MultiTabWakeRefreshTest → 38 passed', lines: [['-', 'val next = mintRefreshToken()'], ['-', 'vault.clear(prevToken)'], ['+', 'val cached = vault.read("grace:$prevToken")'], ['+', 'if (cached != null) return cached // 30s multi-tab grace window'], ['+', 'val next = mintRefreshToken()'], ['+', 'vault.store("grace:$prevToken", next)']] },
+        ],
+      },
+      {
+        name: 'AuthAndVaultStore.kt', adds: 18, dels: 5,
+        hunks: [
+          { range: 'lines 88–109', fn: 'refreshSession()', adds: 18, dels: 5, tag: 'keychain', state: 'STAGED', line: 88, by: 'auth_worker', rationale: 'Delegates token rotation to RefreshGraceWindow.rotateIdempotent() without holding a blocking mutex across network I/O.', verification: 'UiResponsivenessTest → <2ms main thread', lines: [['-', 'synchronized(fileLock) { return rotateBlocking(token) }'], ['+', 'val rotated = graceWindow.rotateIdempotent(token, clock.millis())'], ['+', 'return Session(jwt.verify(rotated).sub, jwt.verify(rotated).exp)']] },
+        ],
+      },
     ],
   },
 ]

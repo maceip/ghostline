@@ -72,21 +72,30 @@ function ConversationPage({
   selectedTurn, setSelectedTurn, activeTurn, promptTurns, decisionTurns, activeEpoch, epochCounts,
   derivedEpochs, hotWords, hotWordFilter, visibleFacetTurns, workspaceCtx,
   sessionChangeSet, sessionHunks, facet, facetTurns, splitTurn, promptOpen, engineSummary, draft, setDraft,
-  promptRef, gateOpen, gateResolved, reviewFileObj, activeHunk, agents, config, localStatus, motion,
-  cmdMode, cmdHits, runCommand, mentions, actions,
+  promptRef, gateOpen, gateResolved, reviewFileObj, activeHunk, selectedHunk = 0, setSelectedHunk,
+  agents, config, localStatus, motion,
+  cmdMode, cmdHits, runCommand, mentions,
+  sessionSignatures = [], activeSignature = null,
+  z3InlineFold = 'z2-older', setZ3InlineFold,
+  actions,
 }) {
   const epochs = derivedEpochs || seedEpochs
   const streamTurns = visibleFacetTurns || facetTurns
-  const compressOlder = (config?.epochs?.compressZ2 ?? true) && !hotWordFilter
-  const hasWorkspaceDiff = threadId === 'board' || threadId === 'siem' || threadId === 'auth'
+  const compressOlder = (config?.epochs?.compressZ2 ?? true) && !hotWordFilter && z3InlineFold !== 'expanded'
+  const hasWorkspaceDiff = Boolean(sessionChangeSet?.files?.length && sessionChangeSet.task?.toLowerCase().includes(thread?.title?.split(' ')[0]?.toLowerCase() || '')) || threadId === 'board' || threadId === 'siem' || threadId === 'auth'
   const ptyTraceTurns = turns.filter((t) => (t.stdout || []).length > 0 || (t.trace || []).length > 0)
+  const wbFileObj = sessionChangeSet?.files?.find((f) => f.name === reviewFileObj?.name) || sessionChangeSet?.files?.[0] || reviewFileObj
+  const wbHunk = wbFileObj?.hunks?.[Math.min(selectedHunk, Math.max(0, (wbFileObj?.hunks?.length || 1) - 1))] || activeHunk
 
   // In Z3, keep the active epoch at the top of the viewport so the user never lands
   // buried under 190 older turns; earlier epochs sit cleanly below in a compact Z2 ledger.
-  const activeStreamTurns = compressOlder && epochs.length > 1
+  const baseActiveTurns = compressOlder && epochs.length > 1
     ? streamTurns.filter((t) => !t.epoch || t.epoch === activeEpoch.n || t.i === selectedTurn || t.i === splitTurn)
     : streamTurns
-  const olderCompressedTurns = compressOlder && epochs.length > 1
+  const activeStreamTurns = !hotWordFilter && z3InlineFold === 'human-decisions'
+    ? streamTurns.filter((t) => t.actor === 'user' || t.kind === 'prompt' || t.kind === 'decision' || Boolean(t.decision) || t.i === selectedTurn)
+    : baseActiveTurns
+  const olderCompressedTurns = compressOlder && epochs.length > 1 && z3InlineFold !== 'human-decisions'
     ? streamTurns.filter((t) => t.epoch && t.epoch !== activeEpoch.n && t.i !== selectedTurn && t.i !== splitTurn)
     : []
 
@@ -151,10 +160,25 @@ function ConversationPage({
             </div>
           </div>
         ) : zoom === 3 && activeTurn ? (
-          /* Z3 · full-bleed session: 60% structured stream / 40% pinned context.
-             Single-line non-wrapping epoch & hot-word strips keep the top chrome quiet. */
+          /* Z3 · Persistent 3-Column Zune Workbench:
+             Col 1: Scope, Files Touched & Your Human Prompts (never scrolls off)
+             Col 2: Robot Conversation with inline Z1/Z2/Z3 turn folding & always-ready composer
+             Col 3: Live Session Diff & Grounded Inspector (never pans away while typing) */
           <div>
             <div className="epochstrip" aria-label="epochs">
+              <button
+                className="z3skymapbtn"
+                data-testid="z3-to-z0-btn"
+                onClick={() => actions.setZoom(0)}
+                title="Zoom up to Z0 60-day Episodic & Fleet Sky Map (Esc / Ctrl+-)"
+              >
+                ↑ Z0 sky map (60d)
+              </button>
+              {activeSignature?.landmark && (
+                <span className="z3landmark" data-testid="z3-active-landmark">
+                  ⚑ {activeSignature.landmark} · {activeSignature.age}
+                </span>
+              )}
               <span className="label" style={{ margin: 0 }}>epochs [z]:</span>
               {epochs.map((ep) => (
                 <button key={ep.n} className={ep.n === activeEpoch.n ? 'epochchip on' : 'epochchip'} data-cursor={`conv-epoch:${ep.n}`} onClick={() => actions.jumpToEpoch(ep)}>
@@ -167,7 +191,10 @@ function ConversationPage({
                   className="ghostbtn"
                   style={{ flex: 'none' }}
                   data-cursor="conv-epoch-compress:toggle"
-                  onClick={() => actions.setCfg({ epochs: { onCommit: true, everyTurns: 15, ...(config?.epochs || {}), compressZ2: !(config?.epochs?.compressZ2 ?? true) } })}
+                  onClick={() => {
+                    if (setZ3InlineFold) setZ3InlineFold('z2-older')
+                    actions.setCfg({ epochs: { onCommit: true, everyTurns: 15, ...(config?.epochs || {}), compressZ2: !(config?.epochs?.compressZ2 ?? true) } })
+                  }}
                 >
                   {(config?.epochs?.compressZ2 ?? true) ? 'older: Z2 ledger' : 'older: expanded'}
                 </button>
@@ -194,14 +221,129 @@ function ConversationPage({
                 )}
               </div>
             )}
-            <div className={splitTurn !== null ? 'z3grid split' : 'z3grid'}>
-              <div>
-                <p className="label">
+            <div className={splitTurn !== null ? 'z3grid split' : 'z3grid workbench3'} data-testid="z3-workbench-grid">
+              {splitTurn === null && (
+                <div className="wbcol1" data-wb-col="1" aria-label="session scope, files and human prompts">
+                  <p className="label">
+                    session scope <span className="n">{thread.project} · {thread.age}</span>
+                  </p>
+                  {activeSignature && (
+                    <div className="wbsigbox">
+                      <div className="blastpills" style={{ marginBottom: 6 }}>
+                        {activeSignature.blastFolders.map((bf) => (
+                          <span key={bf} className="blastpill">[{bf}]</span>
+                        ))}
+                      </div>
+                      <span className="strugglebar" style={{ marginBottom: 8 }}>
+                        {activeSignature.struggleSeries.map((seg, si) => (
+                          <i key={si} className={`sseg seg-${seg.kind}`} title={`Turn ${seg.turn}: ${seg.label}`} />
+                        ))}
+                      </span>
+                    </div>
+                  )}
+
+                  {hasWorkspaceDiff && sessionChangeSet?.files?.length > 0 && (
+                    <div style={{ marginTop: 14 }}>
+                      <p className="label">
+                        files in session <span className="n">{sessionChangeSet.files.length}</span>
+                      </p>
+                      {sessionChangeSet.files.map((f) => {
+                        const isSel = wbFileObj?.name === f.name
+                        return (
+                          <button
+                            key={f.name}
+                            className={isSel ? 'wbrow sel' : 'wbrow'}
+                            data-testid={`wb-file-${f.name}`}
+                            onClick={() => {
+                              actions.setReviewSetId(sessionChangeSet.id)
+                              actions.setReviewFile(f.name)
+                              if (setSelectedHunk) setSelectedHunk(0)
+                            }}
+                          >
+                            <span className="wbrowtitle">{f.name}</span>
+                            <span className="wbrowmeta">
+                              <span style={{ color: 'var(--add)' }}>+{f.adds}</span>
+                              {' / '}
+                              <span style={{ color: 'var(--del)' }}>−{f.dels}</span>
+                              {' · '}
+                              {f.hunks.length} hunk{f.hunks.length === 1 ? '' : 's'}
+                            </span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+
+                  <div style={{ marginTop: 18 }}>
+                    <p className="label">
+                      your human prompts <span className="n">{promptTurns.length}</span>
+                    </p>
+                    {promptTurns.slice(0, 12).map((pt) => (
+                      <button
+                        key={pt.i}
+                        className={pt.i === selectedTurn ? 'wbrow sel' : 'wbrow'}
+                        data-testid={`wb-prompt-${pt.i}`}
+                        onClick={() => {
+                          setSelectedTurn(pt.i)
+                          if (pt.epoch) {
+                            const ep = epochs.find((e) => e.n === pt.epoch)
+                            if (ep) actions.jumpToEpoch(ep)
+                          }
+                        }}
+                      >
+                        <span className="wbrowtitle">
+                          <span className="turnnum">{String(pt.i + 1).padStart(2, '0')}</span>
+                          “{cleanDisplayText(pt.intent || pt.full || pt.summary).slice(0, 68)}”
+                        </span>
+                        <span className="wbrowmeta">E{String(pt.epoch || 1).padStart(2, '0')} · {pt.age}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div style={{ marginTop: 20 }}>
+                    <p className="label">
+                      episodic sessions <span className="n">60d</span>
+                    </p>
+                    {sessionSignatures.map((sig) => (
+                      <button
+                        key={sig.id}
+                        className={sig.id === threadId ? 'wbrow sel' : 'wbrow'}
+                        data-testid={`wb-session-${sig.id}`}
+                        onClick={() => actions.openThreadToWorkbench(sig.id)}
+                      >
+                        <span className="wbrowtitle">{sig.title}</span>
+                        <span className="wbrowmeta">⚑ {sig.landmark} · {sig.age}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="wbcol2" data-wb-col="2">
+                <div className="foldbar" role="toolbar" aria-label="inline semantic turn folding">
+                  <span className="label" style={{ margin: 0 }}>inline fold:</span>
+                  {[
+                    ['z2-older', 'Z3 active + Z2 older'],
+                    ['human-decisions', 'Z1 my prompts & decisions only'],
+                    ['expanded', 'all turns expanded'],
+                  ].map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      className={z3InlineFold === mode ? 'epochchip on' : 'epochchip'}
+                      data-testid={`z3-fold-${mode}`}
+                      onClick={() => setZ3InlineFold && setZ3InlineFold(mode)}
+                    >
+                      {z3InlineFold === mode ? '■ ' : ''}{label}
+                    </button>
+                  ))}
+                </div>
+                <p className="label" style={{ marginTop: 8 }}>
                   {hotWordFilter
                     ? `filtered by hot word · "${hotWordFilter}" (${streamTurns.length}/${facetTurns.length} turns)`
-                    : facet === 'all'
-                      ? `active stream · epoch ${String(activeEpoch.n).padStart(2, '0')} (${activeEpoch.name.toLowerCase()})`
-                      : `facet · ${facet}`} <span className="n">{thread.title}</span>
+                    : z3InlineFold === 'human-decisions'
+                      ? `human voice & decisions only · robot filler muted (${activeStreamTurns.length}/${turns.length} turns)`
+                      : facet === 'all'
+                        ? `active stream · epoch ${String(activeEpoch.n).padStart(2, '0')} (${activeEpoch.name.toLowerCase()})`
+                        : `facet · ${facet}`} <span className="n">{thread.title}</span>
                 </p>
                 {activeStreamTurns.map((t, fi) => {
                   const epObj = epochs.find((e) => e.n === t.epoch) || {}
@@ -232,17 +374,31 @@ function ConversationPage({
                       : <p className="prose dim">resolved · {gateResolved === 'yes' ? seedGate.yes : seedGate.no} — verifier rerunning</p>}
                   </div>
                 )}
-                {promptOpen ? (
-                  <>
-                    <p className="label" style={{ marginTop: 26 }}>prompt · {engineSummary} <span className="n">enter send · esc close</span></p>
-                    <textarea ref={promptRef} className="inlineprompt" rows={3} placeholder="instruct swarm, / for commands, ! for raw shell" value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
-                      onKeyDown={(e) => actions.composerKey(e)} />
-                    <ComposerHints cmdMode={cmdMode} cmdHits={cmdHits} runCommand={runCommand} mentions={mentions} />
-                  </>
-                ) : (
-                  <button className="promptcue" onClick={() => actions.setPromptOpen(true)}>&gt; _ <span className="faint">[i] instruct swarm or type raw shell command into pty…</span></button>
-                )}
+                <div className="wbcomposer">
+                  <p className="label" style={{ marginTop: 18 }}>
+                    talk to robot · {engineSummary} <span className="n">enter send · / commands · @ file</span>
+                  </p>
+                  <textarea
+                    ref={promptRef}
+                    className="inlineprompt"
+                    data-testid="z3-composer-input"
+                    rows={2}
+                    placeholder={`reply in ${thread.title} while inspecting ${wbFileObj?.name || 'context'} on the right…`}
+                    value={draft}
+                    onFocus={() => actions.setPromptOpen(true)}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => actions.composerKey(e)}
+                  />
+                  <ComposerHints cmdMode={cmdMode} cmdHits={cmdHits} runCommand={runCommand} mentions={mentions} />
+                  <div style={{ marginTop: 8, display: 'flex', gap: 18, alignItems: 'baseline' }}>
+                    <button className="solid" data-testid="z3-composer-send" onClick={() => actions.send()}>send prompt</button>
+                    {!promptOpen && (
+                      <button className="promptcue" style={{ padding: 0 }} onClick={() => actions.setPromptOpen(true)}>
+                        &gt; _ <span className="faint">[i] focus composer</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
 
                 {olderCompressedTurns.length > 0 && (
                   <div style={{ marginTop: 28 }}>
@@ -267,7 +423,7 @@ function ConversationPage({
                   </div>
                 )}
               </div>
-              <div>
+              <div className="wbcol3" data-wb-col="3">
                 {splitTurn !== null && turns[splitTurn] ? (
                   <>
                     <p className="label">pinned · turn {String(splitTurn + 1).padStart(2, '0')} <span className="n">v unpin · 50/50 split</span></p>
@@ -276,25 +432,78 @@ function ConversationPage({
                     <p className="label" style={{ marginTop: 22 }}>trace</p>
                     {(turns[splitTurn].trace || []).map((l, i) => <p key={i} className="prose dim">{l}</p>)}
                   </>
-                ) : hasWorkspaceDiff ? (
+                ) : hasWorkspaceDiff && wbFileObj ? (
                   <>
-                    <p className="label">pinned context · live diff <span className="n">{reviewFileObj?.name}:{activeHunk?.line}</span></p>
-                    {activeHunk && activeHunk.lines.map(([sign, line], i) => (
-                      <div key={i} className={`diffline ${sign === '+' ? 'add' : sign === '-' ? 'del' : ''}`}>{sign} {line}</div>
+                    <p className="label">
+                      pinned context · live diff <span className="n" data-testid="z3-diff-header">{wbFileObj.name}:{wbHunk?.line}</span>
+                    </p>
+                    {sessionChangeSet?.files?.length > 1 && (
+                      <div className="wbfiletabs">
+                        {sessionChangeSet.files.map((f) => (
+                          <button
+                            key={f.name}
+                            className={f.name === wbFileObj.name ? 'epochchip on' : 'epochchip'}
+                            onClick={() => {
+                              actions.setReviewSetId(sessionChangeSet.id)
+                              actions.setReviewFile(f.name)
+                              if (setSelectedHunk) setSelectedHunk(0)
+                            }}
+                          >
+                            {f.name === wbFileObj.name ? '■ ' : ''}{f.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {wbFileObj.hunks.map((hk, hi) => (
+                      <div key={hi} className="wbhunkcard" data-testid={`z3-hunk-${hi}`}>
+                        <div className="wbhunkhead">
+                          <span><b>{hk.fn}</b> · <span className="faint">{hk.range}</span></span>
+                          <span className={`hunkstate state-${hk.state}`} style={{ display: 'inline', margin: 0 }}>{hk.state}</span>
+                        </div>
+                        <p className="faint" style={{ fontSize: '.82em', margin: '3px 0 8px 0' }}>{hk.rationale}</p>
+                        {hk.lines.map(([sign, line], li) => (
+                          <div key={li} className={`diffline ${sign === '+' ? 'add' : sign === '-' ? 'del' : ''}`}>{sign} {line}</div>
+                        ))}
+                        <div className="wbhunkactions">
+                          <button
+                            className="ghostbtn"
+                            data-testid={`z3-approve-hunk-${hi}`}
+                            onClick={() => {
+                              actions.setReviewSetId(sessionChangeSet.id)
+                              actions.setReviewFile(wbFileObj.name)
+                              if (setSelectedHunk) setSelectedHunk(hi)
+                              setTimeout(() => actions.setHunkState('STAGED'), 0)
+                            }}
+                          >
+                            [a] stage hunk
+                          </button>
+                          <button
+                            className="ghostbtn"
+                            onClick={() => {
+                              actions.setReviewSetId(sessionChangeSet.id)
+                              actions.setReviewFile(wbFileObj.name)
+                              if (setSelectedHunk) setSelectedHunk(hi)
+                              actions.goPivot(PIVOTS.indexOf('review'))
+                            }}
+                          >
+                            ↗ full review
+                          </button>
+                        </div>
+                      </div>
                     ))}
-                    <p className="label" style={{ marginTop: 26 }}>contract & invariant gates <span className="n">epoch {String(activeEpoch.n).padStart(2, '0')}</span></p>
-                    {seedInvariants.map((g) => (
-                      <p key={g.name} className="prose" style={{ margin: '2px 0' }}><span className={`invstate inv-${g.state}`}>{g.state === 'FAIL' && !gateOpen && gateResolved === 'yes' ? 'RUN' : g.state}</span> {g.name} <span className="faint">({g.detail})</span></p>
-                    ))}
-                    <p className="label" style={{ marginTop: 26 }}>spawned workers in this epoch</p>
-                    {agents.slice(0, 4).map((a, i) => (
-                      <p key={a.id} className="prose" style={{ margin: '2px 0' }}><span className="turnnum">{String(i + 1).padStart(2, '0')}</span> {a.name} <span className="faint">· {a.phase || a.state} · {a.progress}%</span></p>
-                    ))}
-                    <p className="label" style={{ marginTop: 26 }}>active turn trace</p>
+                    {threadId === 'board' && (
+                      <>
+                        <p className="label" style={{ marginTop: 22 }}>contract & invariant gates <span className="n">epoch {String(activeEpoch.n).padStart(2, '0')}</span></p>
+                        {seedInvariants.map((g) => (
+                          <p key={g.name} className="prose" style={{ margin: '2px 0' }}><span className={`invstate inv-${g.state}`}>{g.state === 'FAIL' && !gateOpen && gateResolved === 'yes' ? 'RUN' : g.state}</span> {g.name} <span className="faint">({g.detail})</span></p>
+                        ))}
+                      </>
+                    )}
+                    <p className="label" style={{ marginTop: 22 }}>active turn trace</p>
                     {(activeTurn.trace || []).map((l, i) => <p key={i} className="prose dim">{l}</p>)}
                     {(activeTurn.artifacts || []).length > 0 && (
                       <>
-                        <p className="label" style={{ marginTop: 22 }}>emitted artifacts</p>
+                        <p className="label" style={{ marginTop: 18 }}>emitted artifacts</p>
                         {activeTurn.artifacts.map((a) => (
                           <button key={a} className="artifactlink" data-cursor={`conv-artifact:${a}`} onClick={() => { const f = files.find((x) => x.name === a); if (f) actions.openFile(f) }}>→ {a}</button>
                         ))}

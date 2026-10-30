@@ -23,6 +23,7 @@ import {
   facetPartition, changeSetForThread, changeSetTotals, tileForThread,
   escalationLevel, applyAutoApprove, applyParallelCap, tickAgents, treemapSpan,
   deriveEpochs, assignTurnEpochs, deriveHotWords, turnMatchesHotWord, enrichTurn,
+  deriveSessionSignature, matchSessionOrienteering,
 } from './derive.js'
 
 const SESSION_KEY = 'zunecode.session.v1'
@@ -46,7 +47,7 @@ export default function App() {
   const [threads, setThreads] = useState(() => {
     const base = (savedSession?.threads || seedThreads).map((t) => {
       const seed = seedThreads.find((s) => s.id === t.id)
-      return seed ? { ...t, scope: t.scope || seed.scope } : t
+      return seed ? { ...t, scope: t.scope || seed.scope, timeWindow: t.timeWindow || seed.timeWindow, landmark: t.landmark || seed.landmark } : t
     })
     for (const st of seedThreads) {
       if (!base.some((t) => t.id === st.id)) base.push(st)
@@ -129,6 +130,9 @@ export default function App() {
   const [instructDraft, setInstructDraft] = useState('')
   const [facet, setFacet] = useState('all') // Z3 segmented facet bar: all | prompts | decisions | mutations | pty | artifacts
   const [hotWordFilter, setHotWordFilter] = useState(null) // Z3 hot-word filter key (LangExtract grounded token filter)
+  const [z0Query, setZ0Query] = useState('') // Z0 human-voice & landmark orienteering query
+  const [z0Filter, setZ0Filter] = useState('all') // all | now | oct | sept | friction | hero
+  const [z3InlineFold, setZ3InlineFold] = useState('z2-older') // z2-older | human-decisions | expanded
   const [epochGrid, setEpochGrid] = useState(false) // z — 2D epoch jump grid
   const [gateResolved, setGateResolved] = useState(null) // null | 'yes' | 'no' — the [y]/[n] arbitration
   const [jumpHint, setJumpHint] = useState(null) // f — two-letter gutter jump badges (string prefix while armed)
@@ -220,7 +224,17 @@ export default function App() {
     setConvLevel(1) // a chosen thread lands on its timeline page (inert on desktop)
     setPivot(PIVOTS.indexOf('conversation'))
   }, [])
-  /* landing on a thread selects its running turn, else its last */
+  /* Z0 sky map click → dive straight down to Z3 (the persistent 3-column workbench) */
+  const openThreadToWorkbench = useCallback((id) => {
+    setThreadId(id)
+    setThreads((ts) => ts.map((t) => (t.id === id ? { ...t, unread: 0 } : t)))
+    setFocusTick((n) => n + 1)
+    setPromptOpen(false)
+    setConvLevel(1)
+    setPivot(PIVOTS.indexOf('conversation'))
+    setZoom(3)
+  }, [])
+  /* landing on a thread selects its running turn, else its last, and syncs its linked changeSet */
   useEffect(() => {
     const ts = turnsByThread[threadId] || []
     const ri = ts.findIndex((t) => t.state === 'running')
@@ -228,6 +242,13 @@ export default function App() {
     setSelectedTurn(nextIdx)
     setCursorId((prev) => (prev && prev.startsWith('conv-turn:') ? `conv-turn:${nextIdx}` : prev))
     setHotWordFilter(null)
+    const targetThread = threads.find((t) => t.id === threadId)
+    const linkedCs = changeSetForThread(targetThread, changeSets)
+    if (linkedCs && linkedCs.files?.[0]) {
+      setReviewSetId(linkedCs.id)
+      setReviewFile(linkedCs.files[0].name)
+      setSelectedHunk(0)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
   useEffect(() => { if (promptOpen) promptRef.current?.focus() }, [promptOpen])
@@ -962,17 +983,66 @@ export default function App() {
     () => (hotWordFilter ? facetTurns.filter((t) => turnMatchesHotWord(t, hotWordFilter, workspaceCtx)) : facetTurns),
     [facetTurns, hotWordFilter, workspaceCtx],
   )
-  /* Z0 treemap: block area is proportional to real weight (turns, files, hunks, workers) */
+  /* Z0 Episodic & Fleet Sky Map: each session computes its visual "Album Art"
+     (Human-Voice-only prompt quote, folder blast-radius, struggle sparkline, 2x2 vs 1x1 size, and Git landmark) */
+  const BADGE_KEYS = 'asdfgwertyuiopzxcvbnm'
+  const sessionSignatures = useMemo(
+    () => threads.map((t, idx) => ({
+      ...deriveSessionSignature(t, turnsByThread[t.id] || [], changeSets, agents, files),
+      badge: BADGE_KEYS[idx] || String(idx + 1),
+      blocked: gateBlocking && t.id === seedGate.threadId,
+    })),
+    [threads, turnsByThread, changeSets, agents, gateBlocking],
+  )
+  const activeSignature = useMemo(
+    () => sessionSignatures.find((s) => s.id === threadId) || sessionSignatures[0],
+    [sessionSignatures, threadId],
+  )
+  const z0FilterActive = Boolean(z0Query.trim()) || z0Filter !== 'all'
+  const z0MatchedIds = useMemo(() => {
+    const out = new Map()
+    for (const sig of sessionSignatures) {
+      const m = matchSessionOrienteering(sig, z0Query)
+      const passFilter = z0Filter === 'all'
+        || (z0Filter === 'now' && sig.timeWindow.startsWith('NOW'))
+        || (z0Filter === 'oct' && sig.timeWindow.startsWith('3–4'))
+        || (z0Filter === 'sept' && sig.timeWindow.startsWith('6–8'))
+        || (z0Filter === 'friction' && sig.frictionCount > 0)
+        || (z0Filter === 'hero' && sig.isHero)
+      if (m.matched && passFilter) out.set(sig.id, m)
+    }
+    return out
+  }, [sessionSignatures, z0Query, z0Filter])
+  const z0MatchedWindows = useMemo(() => {
+    const ws = new Set()
+    for (const sig of sessionSignatures) {
+      if (z0MatchedIds.has(sig.id)) ws.add(sig.timeWindow)
+    }
+    return ws
+  }, [sessionSignatures, z0MatchedIds])
+  const z0Windows = useMemo(() => {
+    const order = []
+    const byWin = new Map()
+    for (const sig of sessionSignatures) {
+      const w = sig.timeWindow || 'NOW · THIS WEEK'
+      if (!byWin.has(w)) { byWin.set(w, []); order.push(w) }
+      byWin.get(w).push(sig)
+    }
+    const list = order.map((w) => ({
+      window: w,
+      landmarks: [...new Set(byWin.get(w).map((s) => s.landmark).filter(Boolean))],
+      sessions: byWin.get(w),
+    }))
+    if (!z0FilterActive) return list
+    return [...list].sort((a, b) => (z0MatchedWindows.has(b.window) ? 1 : 0) - (z0MatchedWindows.has(a.window) ? 1 : 0))
+  }, [sessionSignatures, z0FilterActive, z0MatchedWindows])
+
+  /* Z0 workspace rooms row: direct jumps to review, agents, terminal, docs */
   const mapBlocks = [
-    { badge: 'a', id: 'board', title: 'board of directors', weight: (turnsByThread.board || []).length, sub: `${gateBlocking ? '1 BLOCKED GATE · FAIL :142 · ' : gateOpen ? 'gate warning · ' : ''}${(turnsByThread.board || []).length} turns · ${seedEpochs.length} epochs`, blocked: gateBlocking, go: () => openThread('board') },
-    { badge: 's', id: 'auth', title: 'fragments.auth', weight: files.filter((f) => f.folder === 'fragments.auth').reduce((n, f) => n + f.lines, 0) / 40, sub: `${files.filter((f) => f.folder === 'fragments.auth').length} files · jwt + vault`, go: () => openFile(files[0]) },
-    { badge: 'd', id: 'review', title: 'review', weight: Math.max(2, unreviewed), sub: `${unreviewed} hunks unreviewed`, go: () => { setZoom(1); goPivot(PIVOTS.indexOf('review')) } },
-    { badge: 'f', id: 'docs', title: 'docs', weight: files.filter((f) => f.folder === 'docs').length * 2, sub: `test infra · ${suitesPass}/${suitesTotal} suites`, go: () => openFile(files[5]) },
-    { badge: 'g', id: 'agents', title: 'agents', weight: agents.length + fleetCounts.running * 2, sub: `${agents.length} subagents · ${fleetCounts.running} running · ${fleetCounts.blocked} blocked`, go: () => { setZoom(1); goPivot(PIVOTS.indexOf('agents')) } },
-    { badge: 'w', id: 'terminal', title: 'terminal', weight: termLines.length, sub: `${termLines.length} lines this session`, go: () => { setZoom(1); goPivot(PIVOTS.indexOf('terminal')) } },
-    { badge: 'e', id: 'siem', title: 'siem workbench', weight: (turnsByThread.siem || []).length + changeSetTotals(changeSets.find((c) => c.id === 'cs-siem')).hunks, sub: 'conversation · review ready', go: () => openThread('siem') },
-    { badge: 'r', id: 'ui', title: 'ui', weight: files.filter((f) => f.folder === 'ui').reduce((n, f) => n + f.lines, 0) / 60, sub: 'macos chrome · compose', go: () => openFile(files[2]) },
-    { badge: 't', id: 'e2e', title: 'e2e demo', weight: (turnsByThread.e2e || []).length, sub: 'complete · 6d', go: () => openThread('e2e') },
+    { badge: 'v', id: 'review', title: 'review hunks', weight: Math.max(2, unreviewed), sub: `${unreviewed} hunks unreviewed`, go: () => { setZoom(1); goPivot(PIVOTS.indexOf('review')) } },
+    { badge: 'm', id: 'agents', title: 'agent fleet', weight: agents.length + fleetCounts.running * 2, sub: `${agents.length} subagents · ${fleetCounts.running} running · ${fleetCounts.blocked} blocked`, go: () => { setZoom(1); goPivot(PIVOTS.indexOf('agents')) } },
+    { badge: 'n', id: 'terminal', title: 'terminal pty', weight: termLines.length, sub: `${termLines.length} lines this session`, go: () => { setZoom(1); goPivot(PIVOTS.indexOf('terminal')) } },
+    { badge: 'b', id: 'docs', title: 'collection & docs', weight: files.length * 2, sub: `${files.length} files · ${suitesPass}/${suitesTotal} suites`, go: () => openFile(files[0]) },
   ]
   const mapMaxWeight = Math.max(...mapBlocks.map((b) => b.weight), 1)
 
@@ -983,14 +1053,15 @@ export default function App() {
      change identity; the closures behind them read live state through `live`. */
   const live = useRef({})
   live.current = {
-    openThread, openFile, goPivot, resolveGate, toggleAgent, killAgent, pushActivity, newThread,
+    openThread, openThreadToWorkbench, openFile, goPivot, resolveGate, toggleAgent, killAgent, pushActivity, newThread,
     togglePin, sendInstruction, jumpToEpoch, setHunkState, scrollPayloadIntoView, runTerm, send,
     setPromptOpen, setZoom, setSelectedAgentId, setAgentsLevel, setEpochGrid, setReviewSetId,
-    setReviewFile, setSelectedTurn, setThreadId, setThreads, setDraft, setRunProgress, setRunLabel,
+    setReviewFile, setSelectedHunk, setSelectedTurn, setThreadId, setThreads, setDraft, setRunProgress, setRunLabel,
     setInstructOpen, setBridgeStatus, composerKey, setConvLevel, setRevLevel, setColLevel,
     setFolder, setFileName, setTermInput, setSearchOpen, setQuery, setFacet, setSplitTurn,
     setSetDomain, setCfg, setAccent, setTheme, setDensity, setGateResolved, setTurnsByThread,
     setAgents, setActivity, setChangeSets, setCursorId, setHotWordFilter, onSpanClick, resetCircuits,
+    setZ0Query, setZ0Filter, setZ3InlineFold,
   }
   const actions = useMemo(() => {
     const out = {}
@@ -1148,9 +1219,12 @@ export default function App() {
             sessionChangeSet={sessionChangeSet} sessionHunks={sessionHunks} facet={facet} facetTurns={facetTurns}
             splitTurn={splitTurn} promptOpen={promptOpen} engineSummary={engineSummary} draft={draft} setDraft={setDraft}
             promptRef={promptRef} gateOpen={gateOpen} gateResolved={gateResolved}
-            reviewFileObj={reviewFileObj} activeHunk={activeHunk} agents={agents} config={config}
+            reviewFileObj={reviewFileObj} activeHunk={activeHunk} selectedHunk={selectedHunk} setSelectedHunk={setSelectedHunk}
+            agents={agents} config={config}
             localStatus={localStatus} motion={motion}
             cmdMode={cmdMode} cmdHits={cmdHits} runCommand={runCommand} mentions={mentions}
+            sessionSignatures={sessionSignatures} activeSignature={activeSignature}
+            z3InlineFold={z3InlineFold} setZ3InlineFold={setZ3InlineFold}
             actions={actions}
           />
 
@@ -1201,17 +1275,156 @@ export default function App() {
           />
         </div>
 
-        {/* 3 · semantic zoom map */}
+        {/* 3 · Z0 Sky-Level Episodic & Fleet Map: Human-Voice-Only Indexing + Visual Session Album Art + Landmark Orienteering */}
         {zoom === 0 && (
-          <div className="zoommap" role="dialog" aria-label="semantic zoom map">
-            <p className="huge">fragments</p>
-            <p className="dim" style={{ fontWeight: 300 }}>{coarse ? 'Z0 · macro fleet map · tap a block to land in it · pinch out to step back in' : 'Z0 · macro fleet map · home-row badge or click lands in the block · ctrl + = steps in'}</p>
-            <div className="mapgrid">
-              {mapBlocks.map((b) => (
-                <button key={b.id} className={`mapblock ${b.blocked ? 'blocked' : ''} ${treemapSpan(b.weight, mapMaxWeight)} tiltcard`} {...tiltSpot} data-badge={b.badge} data-cursor={`zoom-map:${b.id}`} onClick={b.go}>
-                  <span className="mapbadge">{b.badge}</span><span className="t">{b.title}</span><small>{b.sub}</small>
-                </button>
-              ))}
+          <div className="zoommap z0skymap" role="dialog" aria-label="semantic zoom map">
+            <div className="z0head">
+              <div>
+                <p className="huge">sky map · orienteering</p>
+                <p className="dim" style={{ fontWeight: 300, margin: '4px 0 0 0' }}>
+                  Z0 · {sessionSignatures.length} sessions across 60 days · {agents.length} fleet workers · <b>human-voice indexed (robot filler muted)</b> · click any tile to dive straight into the 3-column workbench (Z3)
+                </p>
+              </div>
+              <div className="z0searchbox">
+                <input
+                  className="z0searchinput"
+                  data-testid="z0-orienteer-input"
+                  value={z0Query}
+                  onChange={(e) => setZ0Query(e.target.value)}
+                  placeholder='orienteer by what YOU typed ("log me out", "30s grace", "504", "attention sink"), folder ([auth], [stripe]), or git landmark (v2.1.0, PR #418)…'
+                  aria-label="orienteer by human prompts, folder blast-radius, or git landmark"
+                />
+                {z0Query && (
+                  <button className="ghostbtn z0clear" data-testid="z0-orienteer-clear" onClick={() => setZ0Query('')}>
+                    clear [{z0Query}]
+                  </button>
+                )}
+              </div>
+              <div className="z0filterbar" role="toolbar" aria-label="episodic landmark filters">
+                {[
+                  ['all', `all 60d (${sessionSignatures.length})`],
+                  ['now', 'now · this week'],
+                  ['oct', '3w–1mo · oct & stripe'],
+                  ['sept', '6w–2mo · sept & arm64e'],
+                  ['friction', '⚡ high friction / struggle'],
+                  ['hero', '■ 2×2 hero sessions'],
+                ].map(([k, label]) => (
+                  <button
+                    key={k}
+                    className={z0Filter === k ? 'epochchip on' : 'epochchip'}
+                    data-testid={`z0-filter-${k}`}
+                    onClick={() => setZ0Filter(k)}
+                  >
+                    {z0Filter === k ? '■ ' : ''}{label}
+                  </button>
+                ))}
+                {z0FilterActive && (
+                  <span className="faint" style={{ fontSize: '.76em' }}>
+                    {z0MatchedIds.size} matching in-place · temporal neighbors stay visible at 48%
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {z0Windows.map((win) => {
+              const winHasMatch = z0MatchedWindows.has(win.window)
+              return (
+                <div key={win.window} className={`z0swimlane ${z0FilterActive && !winHasMatch ? 'searchdim' : ''}`} data-testid={`z0-lane-${win.window}`}>
+                  <div className="z0lanehead">
+                    <span className="label" style={{ margin: 0 }}>{win.window}</span>
+                    <span className="z0landmarks">
+                      {win.landmarks.map((lm) => (
+                        <button
+                          key={lm}
+                          className="z0landmarkpill"
+                          onClick={() => setZ0Query(lm.replace(/^(tag:|PR|branch:)\s*/i, '').split('·')[0].trim())}
+                          title="click landmark to orienteer around this release/PR"
+                        >
+                          ⚑ {lm}
+                        </button>
+                      ))}
+                    </span>
+                  </div>
+                  <div className="mapgrid z0grid">
+                    {win.sessions.map((sig) => {
+                      const matchInfo = z0MatchedIds.get(sig.id)
+                      const isMatched = Boolean(matchInfo)
+                      const isNeighbor = z0FilterActive && !isMatched && winHasMatch
+                      const dimClass = z0FilterActive
+                        ? (isMatched ? 'z0-hit' : isNeighbor ? 'z0-neighbor' : 'searchdim')
+                        : ''
+                      return (
+                        <button
+                          key={sig.id}
+                          className={`mapblock z0tile ${sig.blocked ? 'blocked' : ''} ${sig.spanClass} ${dimClass} tiltcard`}
+                          {...tiltSpot}
+                          data-badge={sig.badge}
+                          data-testid={`z0-tile-${sig.id}`}
+                          data-cursor={`zoom-map:${sig.id}`}
+                          onClick={() => openThreadToWorkbench(sig.id)}
+                        >
+                          <span className="z0tiletop">
+                            <span className="mapbadge">{sig.badge}</span>
+                            <span className="z0landmark">⚑ {sig.landmark}</span>
+                            <span className="z0age">{sig.age}</span>
+                          </span>
+                          {z0FilterActive && isMatched && matchInfo.matchedBy && (
+                            <span className="z0matchbadge" data-testid={`z0-match-badge-${sig.id}`}>
+                              MATCHED {matchInfo.matchedBy.toUpperCase()}
+                            </span>
+                          )}
+                          {z0FilterActive && isNeighbor && (
+                            <span className="z0neighborbadge">TEMPORAL NEIGHBOR · {sig.age}</span>
+                          )}
+                          <span className="z0humanquote" title="Indexed strictly from your own human prompts (robot prose muted)">
+                            “{sig.humanHeadline}”
+                          </span>
+                          {sig.humanFollowup && (
+                            <span className="z0followup">
+                              ↳ you steered: “{sig.humanFollowup}”
+                            </span>
+                          )}
+                          <span className="t">{sig.title.toLowerCase()}</span>
+                          <span className="blastpills">
+                            {sig.blastFolders.map((bf) => (
+                              <span key={bf} className="blastpill">[{bf}]</span>
+                            ))}
+                            {(sig.adds > 0 || sig.dels > 0) && (
+                              <span className="blastdelta">
+                                <span style={{ color: sig.blocked ? '#fff' : 'var(--add)' }}>+{sig.adds}</span>
+                                {' / '}
+                                <span style={{ color: sig.blocked ? '#fff' : 'var(--del)' }}>−{sig.dels}</span>
+                                {' · '}
+                                {sig.filesCount} file{sig.filesCount === 1 ? '' : 's'}
+                              </span>
+                            )}
+                          </span>
+                          <span className="strugglebar" aria-label={`session rhythm: ${sig.turnsCount} turns, ${sig.frictionCount} friction spikes`}>
+                            {sig.struggleSeries.map((seg, si) => (
+                              <i key={si} className={`sseg seg-${seg.kind}`} title={`Turn ${seg.turn}: ${seg.label}`} />
+                            ))}
+                          </span>
+                          <small>
+                            {sig.turnsCount} turns · {sig.humanPrompts.length} human prompt{sig.humanPrompts.length === 1 ? '' : 's'} · {sig.subagentsCount} agent{sig.subagentsCount === 1 ? '' : 's'}
+                            {sig.frictionCount > 0 ? ` · ⚡ ${sig.frictionCount} struggle spike${sig.frictionCount === 1 ? '' : 's'}` : ' · clean pass'}
+                          </small>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })}
+
+            <div className="z0swimlane" style={{ marginTop: 22 }}>
+              <p className="label">workspace rooms & live fleet</p>
+              <div className="mapgrid" style={{ marginTop: 8 }}>
+                {mapBlocks.map((b) => (
+                  <button key={b.id} className={`mapblock ${b.blocked ? 'blocked' : ''} ${treemapSpan(b.weight, mapMaxWeight)} tiltcard`} {...tiltSpot} data-badge={b.badge} data-cursor={`zoom-map:${b.id}`} onClick={b.go}>
+                    <span className="mapbadge">{b.badge}</span><span className="t">{b.title}</span><small>{b.sub}</small>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         )}

@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { seedThreads, seedAgents, seedTurns, seedChangeSets, seedGate, seedEpochs } from '../src/data.js'
+import { seedThreads, seedAgents, seedTurns, seedChangeSets, seedGate, seedEpochs, files } from '../src/data.js'
 import {
   fmtTokens, parseCeiling, fleetCounts, fleetVelocity, epochTurnCounts,
   facetPartition, changeSetForThread, changeSetTotals, tileForThread,
   escalationLevel, applyAutoApprove, applyParallelCap, tickAgents, treemapSpan,
+  deriveSessionSignature, matchSessionOrienteering,
 } from '../src/derive.js'
 
 const POLICY = { onFail: true, onAmbiguity: true, onBigDiff: true, bigDiffLines: 250, autoApproveUnder: 0 }
@@ -95,4 +96,34 @@ test('misc: token formatting, ceilings, treemap spans, fleet counts sum to fleet
   assert.equal(treemapSpan(1, 10), '')
   const c = fleetCounts(seedAgents)
   assert.equal(c.running + c.verified + c.queued + c.blocked, seedAgents.length)
+})
+
+test('deriveSessionSignature & matchSessionOrienteering: human-voice indexing, struggle sparkline, and landmark orienteering', () => {
+  const refreshThread = seedThreads.find((t) => t.id === 'refresh-race')
+  const sig = deriveSessionSignature(refreshThread, seedTurns['refresh-race'], seedChangeSets, seedAgents, files)
+  assert.ok(sig.humanHeadline.includes('why does token refresh randomly log me out'), 'headline must be the human prompt, not robot filler')
+  assert.ok(sig.humanFollowup.includes('revert the Redis lock'), 'followup must capture human steering prompt')
+  assert.ok(sig.blastFolders.includes('fragments.auth'), 'blastFolders must include fragments.auth')
+  assert.equal(sig.filesCount, 2, 'refresh-race touches 2 files')
+  assert.ok(sig.frictionCount >= 2, 'refresh-race has >= 2 friction/failure spikes')
+  assert.equal(sig.spanClass, 'w2 h2', '6-turn, 2-file high-friction session earns 2x2 hero span')
+
+  // Matches human prompt
+  const mPrompt = matchSessionOrienteering(sig, 'randomly log me out')
+  assert.equal(mPrompt.matched, true)
+  assert.equal(mPrompt.matchedBy, 'your prompt')
+
+  // Matches git landmark
+  const mLandmark = matchSessionOrienteering(sig, 'v2.1.0')
+  assert.equal(mLandmark.matched, true)
+  assert.equal(mLandmark.matchedBy, 'git landmark')
+
+  // Matches folder/file blast radius
+  const mFile = matchSessionOrienteering(sig, 'RefreshGraceWindow.kt')
+  assert.equal(mFile.matched, true)
+  assert.equal(mFile.matchedBy, 'folder · file')
+
+  // Does NOT match robot-only prose that is absent from human prompts/landmarks/decisions
+  const mRobotFiller = matchSessionOrienteering(sig, 'sibling tab presenting R1')
+  assert.equal(mRobotFiller.matched, false, 'robot filler prose must be muted in Z0 orienteering index')
 })

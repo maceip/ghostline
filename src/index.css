@@ -79,7 +79,7 @@ button:hover { opacity:.85; } button:active { opacity:.65; }
 /* Off-canvas pages stay in the DOM (the canvas pans them) but the browser skips
    their layout and paint until they scroll into view. The active page is never
    skipped, so cursor hit-testing and zoom reads are unaffected. */
-.page:not(.isactive) { content-visibility:auto; contain-intrinsic-size:100% 900px; }
+.page:not(.isactive) { content-visibility:auto; contain-intrinsic-size:100% 900px; visibility:hidden; pointer-events:none; }
 @keyframes focusin { from { opacity:0; transform:scale(.96); } to { opacity:1; transform:scale(1); } }
 .focusenter { animation:focusin .15s ease-out; } /* 2 · 150ms scale-and-fade into focus */
 
@@ -330,7 +330,56 @@ code.codeview .ln { display:inline-block; width:38px; color:var(--fg-4); opacity
 .milestone { display:block; font-size:.72em; font-weight:700; letter-spacing:.18em; text-transform:uppercase; color:var(--fg-3); opacity:1; padding:14px 0 4px 0; }
 .milestone:hover { opacity:1; color:var(--accent); }
 .z3grid { display:grid; grid-template-columns:60fr 40fr; gap:44px; align-items:start; }
+.z3grid.workbench3 { grid-template-columns:23fr 44fr 33fr; gap:34px; align-items:start; }
 .z3grid.split { grid-template-columns:1fr 1fr; }
+.z3skymapbtn { font-size:.74em; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:#fff; background:var(--accent); padding:3px 10px; flex:none; }
+.z3skymapbtn:hover { background:var(--accent-hover); opacity:1; }
+.z3landmark { font-size:.74em; font-weight:600; letter-spacing:.08em; color:var(--fg-2); flex:none; }
+.foldbar { display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; margin-bottom:6px; padding-bottom:6px; border-bottom:1px solid color-mix(in srgb, var(--fg) 14%, transparent); }
+.wbrow { display:block; width:100%; text-align:left; padding:5px 0 8px 0; border-left:2px solid transparent; padding-left:8px; margin-left:-10px; }
+.wbrow.sel { border-left-color:var(--accent); }
+.wbrow.sel .wbrowtitle { color:var(--fg-1); font-weight:600; }
+.wbrowtitle { display:block; font-size:.94em; font-weight:300; color:var(--fg-2); line-height:1.28; overflow-wrap:anywhere; }
+.wbrowmeta { display:block; font-size:.66em; letter-spacing:.12em; text-transform:uppercase; color:var(--fg-3); margin-top:2px; }
+.wbfiletabs { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+.wbhunkcard { margin-bottom:16px; padding-bottom:10px; border-bottom:1px solid color-mix(in srgb, var(--fg) 12%, transparent); }
+.wbhunkhead { display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:.86em; }
+.wbhunkactions { display:flex; gap:16px; margin-top:6px; }
+.wbcomposer { margin-top:16px; padding-top:8px; border-top:1px solid color-mix(in srgb, var(--fg) 14%, transparent); }
+/* Z0 Sky-Level Episodic & Fleet Map */
+.z0head { margin-bottom:18px; }
+.z0searchbox { display:flex; gap:16px; align-items:baseline; margin:12px 0 10px 0; }
+.z0searchinput { flex:1; background:transparent; color:var(--fg); border:0; border-bottom:2px solid var(--accent); font:inherit; font-size:1.18em; font-weight:300; padding:6px 0; outline:none; caret-color:var(--accent); }
+.z0searchinput::placeholder { color:var(--fg-4); opacity:1; }
+.z0filterbar { display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+.z0swimlane { margin-top:12px; padding-top:8px; border-top:1px solid color-mix(in srgb, var(--fg) 16%, transparent); }
+.z0swimlane.searchdim { display:none; }
+.z0lanehead { display:flex; justify-content:space-between; align-items:baseline; gap:16px; flex-wrap:wrap; margin-bottom:6px; }
+.z0landmarks { display:flex; gap:14px; flex-wrap:wrap; }
+.z0landmarkpill { font-size:.72em; font-weight:600; letter-spacing:.08em; color:var(--accent); text-transform:uppercase; }
+.z0grid { grid-template-columns:repeat(4, minmax(0, 1fr)); grid-auto-rows:minmax(94px, auto); gap:10px 22px; margin-top:6px; }
+.z0tile { background:var(--bg2); padding:9px 12px !important; justify-content:flex-start; align-items:stretch; border-top:2px solid color-mix(in srgb, var(--fg) 22%, transparent); min-height:94px; }
+.z0tile.w2.h2 { grid-row:span 1; border-top-width:3px; border-top-color:var(--accent); }
+.z0tile.z0-hit { border-top:3px solid var(--accent); outline:2px solid var(--accent); outline-offset:-2px; opacity:1 !important; }
+.z0tile.z0-neighbor { opacity:.48 !important; }
+.z0tiletop { display:flex; justify-content:space-between; align-items:center; gap:8px; width:100%; margin-bottom:6px; }
+.z0tiletop .mapbadge { margin-bottom:0; }
+.z0landmark { font-size:.66em; font-weight:600; letter-spacing:.08em; color:var(--fg-2); text-transform:uppercase; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.z0age { font-size:.66em; font-weight:700; letter-spacing:.1em; color:var(--fg-3); text-transform:uppercase; flex:none; }
+.z0matchbadge { display:inline-block; align-self:flex-start; background:var(--accent); color:#fff; font-size:.62em; font-weight:700; letter-spacing:.12em; padding:2px 6px; margin-bottom:5px; }
+.z0neighborbadge { display:inline-block; align-self:flex-start; color:var(--fg-3); font-size:.62em; font-weight:700; letter-spacing:.12em; margin-bottom:5px; }
+.z0humanquote { display:block; font-size:.98em; font-weight:400; line-height:1.3; color:var(--fg-1); margin:2px 0 6px 0; }
+.z0followup { display:block; font-size:.82em; font-weight:300; line-height:1.25; color:var(--accent); margin:0 0 6px 0; }
+.blastpills { display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; margin-top:auto; padding-top:6px; }
+.blastpill { font-size:.68em; font-weight:700; letter-spacing:.08em; color:var(--fg-2); text-transform:lowercase; }
+.blastdelta { font-size:.68em; font-weight:600; letter-spacing:.06em; color:var(--fg-3); }
+.strugglebar { display:flex; gap:2px; height:4px; width:100%; margin:6px 0 4px 0; background:color-mix(in srgb, var(--fg) 10%, transparent); }
+.strugglebar .sseg { flex:1; height:100%; display:block; }
+.sseg.seg-prompt { background:#1ba1e2; }
+.sseg.seg-fail { background:var(--del); }
+.sseg.seg-mutation { background:var(--accent); }
+.sseg.seg-decision { background:#f09609; }
+.sseg.seg-ok { background:var(--add); }
 .streamturn { display:block; width:100%; text-align:left; padding:10px 0 16px 0; min-width:0; }
 .streamturn.compressed { padding:4px 0; font-size:.88em; color:var(--fg-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin:1px 0; }
 .streamturn.compressed .turnsummary { display:inline; color:var(--fg-2); }
