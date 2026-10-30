@@ -38,54 +38,6 @@ try {
 
   await page.goto(URL, { waitUntil: 'networkidle' })
 
-  const ARTIFACT_DIR = '/Users/mac/.gemini/antigravity/brain/37b400ed-56a2-4a43-8bff-a3c604af2958'
-
-  // 0. Verify Visual Studio 3-Pane Workbench geometry laws on initial launch (WORKBENCH-GEOMETRY-01 & WORKBENCH-CHROME-02)
-  await page.waitForSelector('.page.isactive[aria-label="conversation"]')
-  const railBox = await page.locator('nav.pivotrail.activitybar').boundingBox()
-  assert.ok(railBox && railBox.width <= 64 && railBox.height >= 700, `expected vertical left Activity Bar <=64px wide, got ${JSON.stringify(railBox)}`)
-
-  const firstTurnBox = await page.locator('.page.isactive [data-col="2"] [data-cursor="conv-turn:0"]').boundingBox()
-  assert.ok(firstTurnBox && firstTurnBox.y <= 110, `WORKBENCH-CHROME-02: first turn row must start within 110px of window top, got y=${firstTurnBox?.y}`)
-
-  // Verify Docked Prompt Composer in Col 2 and Right Inspector in Col 3 are simultaneously visible
-  const composerVisible = await page.locator('.col2-composer textarea.inlineprompt').isVisible()
-  const inspectorVisible = await page.locator('.page.isactive [data-col="3"]').isVisible()
-  assert.ok(composerVisible && inspectorVisible, 'Docked composer (Col 2) and Right Inspector (Col 3) must both be visible simultaneously')
-
-  if (fs.existsSync(ARTIFACT_DIR)) {
-    await page.screenshot({ path: `${ARTIFACT_DIR}/vs_workbench_1_conv_z1.png` })
-  }
-
-  // Exercise Right Inspector tabs (DIFF, FILES, PTY, TURN) inside Conversation Col 3
-  await page.click('.inspector-tabs button[role="tab"]:has-text("diff")')
-  assert.ok((await page.locator('.page.isactive [data-col="3"] .diffline').count()) > 0, 'expected live diff lines in Col 3 DIFF tab')
-  if (fs.existsSync(ARTIFACT_DIR)) {
-    await page.screenshot({ path: `${ARTIFACT_DIR}/vs_workbench_2_inspector_diff.png` })
-  }
-
-  await page.click('.inspector-tabs button[role="tab"]:has-text("files")')
-  assert.ok((await page.locator('.page.isactive [data-col="3"] code.codeview').count()) === 1, 'expected code view in Col 3 FILES tab')
-
-  await page.click('.inspector-tabs button[role="tab"]:has-text("pty")')
-  assert.ok((await page.locator('.page.isactive [data-col="3"] .term').count()) === 1, 'expected terminal in Col 3 PTY tab')
-
-  await page.click('.inspector-tabs button[role="tab"]:has-text("turn")')
-
-  // Verify split-pane resizer drag and double-click reset (WORKBENCH-NATIVE-05)
-  const leftResizer = page.locator('.page.isactive [data-col="1"] .split-resizer')
-  const rBox = await leftResizer.boundingBox()
-  assert.ok(rBox, 'expected draggable split-resizer on Col 1')
-  await page.mouse.move(rBox.x + 2, rBox.y + 100)
-  await page.mouse.down()
-  await page.mouse.move(rBox.x + 52, rBox.y + 100)
-  await page.mouse.up()
-  const col1AfterDrag = await page.locator('.page.isactive [data-col="1"]').boundingBox()
-  assert.ok(col1AfterDrag.width >= 300, `expected Col 1 width to expand after drag, got ${col1AfterDrag.width}`)
-  await leftResizer.dblclick()
-  const col1AfterReset = await page.locator('.page.isactive [data-col="1"]').boundingBox()
-  assert.equal(Math.round(col1AfterReset.width), 270, 'expected double-click on resizer to reset Col 1 width to 270px')
-
   // 1. Navigate to Conversation pivot (Z1) on Board of Directors
   await page.click('nav.pivotrail button.pivot:has-text("conversation")')
   await page.waitForSelector('.page.isactive[aria-label="conversation"]')

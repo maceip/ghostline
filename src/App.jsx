@@ -36,44 +36,8 @@ function loadSession() {
   } catch { return null }
 }
 
-const PIVOT_ICONS = {
-  hub: '⊞',
-  conversation: '▤',
-  collection: '◫',
-  review: '±',
-  terminal: '❯_',
-  agents: '❖',
-  settings: '⚙',
-}
-
 export default function App() {
-  const [pivot, setPivot] = useState(() => {
-    const hashIdx = PIVOTS.indexOf(location.hash.replace('#', ''))
-    return hashIdx >= 0 ? hashIdx : 1 // default to Conversation 3-pane workbench
-  })
-  const [colWidths, setColWidths] = useState({ left: 270, right: 420 })
-  const startResize = useCallback((side, e) => {
-    e.preventDefault()
-    const startX = e.clientX
-    const startLeft = colWidths.left
-    const startRight = colWidths.right
-    const onMove = (ev) => {
-      const dx = ev.clientX - startX
-      if (side === 'left') {
-        setColWidths((w) => ({ ...w, left: Math.max(190, Math.min(440, startLeft + dx)) }))
-      } else {
-        setColWidths((w) => ({ ...w, right: Math.max(260, Math.min(620, startRight - dx)) }))
-      }
-    }
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-  }, [colWidths.left, colWidths.right])
-  const resetPaneWidths = useCallback(() => setColWidths({ left: 270, right: 420 }), [])
-
+  const [pivot, setPivot] = useState(() => Math.max(0, PIVOTS.indexOf(location.hash.replace('#', '')))) // deep-link: #collection etc.
   /* four-stop semantic zoom: Z0 macro fleet map · Z1 3-column workbench ·
      Z2 decisions & mutations ledger · Z3 full-bleed focus. font size never shrinks. */
   const [zoom, setZoom] = useState(() => (location.hash === '#map' ? 0 : 1))
@@ -620,13 +584,18 @@ export default function App() {
     requestAnimationFrame(() => document.querySelectorAll('.page')[pivot]?.querySelector('[data-payload]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
   }
 
-  /* ---- trackpad: ctrl+wheel is semantic zoom; horizontal scroll stays inside code/diff panes ---- */
+  /* ---- trackpad: horizontal swipe pans pivots; ctrl+wheel is semantic zoom ---- */
   const onWheel = (e) => {
     if (e.ctrlKey || e.metaKey) {
       if (Date.now() - wheelLock.current < 350) return
       wheelLock.current = Date.now()
       setZoom((z) => (e.deltaY > 0 ? Math.max(0, z - 1) : Math.min(3, z + 1)))
+      return
     }
+    if (Math.abs(e.deltaX) < 24 || Math.abs(e.deltaX) < Math.abs(e.deltaY)) return
+    if (Date.now() - wheelLock.current < 650) return
+    wheelLock.current = Date.now()
+    goPivot(pivot + (e.deltaX > 0 ? 1 : -1))
   }
 
   /* ---- live fleet tick: agents advance, tokens burn, ceilings and caps bite.
@@ -888,14 +857,7 @@ export default function App() {
     })
   }, [query, searchOpen, pivot, zoom])
 
-  const style = {
-    '--accent': accent.value,
-    '--accent-hover': accent.hover,
-    '--accent-pressed': accent.pressed,
-    '--scale': density,
-    '--col1-w': `${colWidths.left}px`,
-    '--col3-w': `${colWidths.right}px`,
-  }
+  const style = { '--accent': accent.value, '--accent-hover': accent.hover, '--accent-pressed': accent.pressed, '--scale': density }
 
   const unreviewed = changeSets.reduce((n, cs) => n + cs.files.reduce((m, f) => m + f.hunks.filter((h) => h.state === 'UNREVIEWED').length, 0), 0)
   const pivotCounts = { conversation: threads.reduce((n, t) => n + t.unread, 0), agents: runningAgents.length, review: unreviewed }
@@ -1103,249 +1065,193 @@ export default function App() {
   return (
     <div className={`app ${motion.cascade ? "" : "m-nocascade "}${motion.shimmer ? "" : "m-noshimmer "}${motion.glow ? "" : "m-noglow "}${motion.tilt ? "" : "m-notilt"}`} style={style} data-theme={theme} onWheel={onWheel} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={(e) => { onTouchDone(e); onTouchEnd(e) }} onTouchCancel={onTouchDone}
       onFocusCapture={(e) => { const n = e.target.closest?.('[data-cursor]'); if (n) setCursorId(n.dataset.cursor) }}>
-      {/* 1 · Visual Studio 34px Top Title & Command Bar (78px left macOS traffic-light safe zone) */}
       <div className="topline" data-drag-zone="true" data-zode-drag-zone="true" title="drag to move · double-click to fill"
         onPointerDown={(e) => { if (e.target.closest('button,input,a,[data-zode-drag-ignore]')) return; window.zode?.window?.dragStart?.(e.screenX, e.screenY) }}
         onDoubleClick={(e) => { if (e.target.closest('button,input,a,[data-zode-drag-ignore]')) return; if (window.zode?.window?.toggleFillScreen) window.zode.window.toggleFillScreen().catch(() => {}); else if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else document.documentElement.requestFullscreen?.().catch(() => {}) }}>
         <img className="brandmark" src="/zode-mark.svg" alt="zode mark" />
         <span className="wordmark">zune <b>code</b></span>
-        <span className="topcrumb">
-          / <b>{thread.title}</b> · E{String(activeEpoch.n).padStart(2, '0')} {activeEpoch.name.toLowerCase()}
-        </span>
         {zoom === 3 && PIVOTS[pivot] === 'conversation' && (
-          <button className="ghostbtn" onClick={() => setZoom(1)}>← workbench [esc]</button>
+          <button className="sessiontab back" onClick={() => setZoom(1)}>← conversation <span className="faint">[esc]</span></button>
         )}
         <span className="spacer" />
-
-        {/* Center VS Command & Search Bar */}
-        <div className="topsearch" data-zode-drag-ignore="true">
-          <span className="faint">⌕</span>
-          <input
-            value={query}
-            placeholder="Search threads, files, agents (⌘K or /)"
-            aria-label="search threads, files, agents"
-            onFocus={() => setSearchOpen(true)}
-            onChange={(e) => { setQuery(e.target.value); setSearchOpen(true) }}
-            onBlur={() => setTimeout(() => { setSearchOpen(false) }, 180)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && searchHits[0]) {
-                searchHits[0].go()
-                setSearchOpen(false)
-                setQuery('')
-                e.currentTarget.blur()
-              } else if (e.key === 'Escape') {
-                setSearchOpen(false)
-                setQuery('')
-                e.currentTarget.blur()
-              }
-            }}
-          />
-          {searchOpen && (
-            <div className="searchresults">
-              {searchHits.length === 0 && (
-                <p className="dim" style={{ margin: 0, padding: '6px 12px', fontSize: '.9em' }}>
-                  {query ? 'nothing matches' : 'type to search threads, files, agents · esc closes'}
-                </p>
-              )}
-              {searchHits.map((h, i) => (
-                <button key={i} onMouseDown={() => { h.go(); setSearchOpen(false); setQuery('') }}>
-                  <span className="faint">{h.kind} · </span>{h.label}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <span className="spacer" />
-        {showHints && <span className="kbd">⌘1–9 sessions · [ ] views · h j k l move · f jump · z epochs</span>}
-        <span className="zoomstops" aria-label={`semantic zoom Z${zoom}`}>
-          {[0, 1, 2, 3].map((z) => (
-            <button key={z} className={z === zoom ? 'zstop on' : 'zstop'} onClick={() => setZoom(z)}>
-              {z === zoom ? `■ Z${z}` : `Z${z}`}
-            </button>
-          ))}
-        </span>
-        <button className="toplink" onClick={newThread}>
-          <span className="onlywide">+ new conversation</span>
-          <span className="onlynarrow">+ new</span>
-        </button>
+        {showHints && <span className="kbd">⌘1–9 sessions · [ ] pivots · h j k l move · f jump · z epochs · ctrl+scroll zoom Z0–Z3 · ? hide</span>}
+        {(PIVOTS[pivot] === 'conversation' || PIVOTS[pivot] === 'review' || zoom === 0) && (
+          <span className="zoomstops" aria-label={`semantic zoom Z${zoom}`}>{[0, 1, 2, 3].map((z) => (
+            <button key={z} className={z === zoom ? 'zstop on' : 'zstop'} onClick={() => setZoom(z)}>{z === zoom ? `■ Z${z}` : `Z${z}`}</button>
+          )).reduce((acc, el, i) => (i ? [...acc, <span key={'d' + i} className="faint">─</span>, el] : [el]), [])}</span>
+        )}
+        <button className="toplink" onClick={newThread}><span className="onlywide">+ new conversation</span><span className="onlynarrow">+ new</span></button>
       </div>
 
-      {/* 2 · Main Workbench Shell: Left 56px Activity Bar + 3-Pane Split Viewport */}
-      <div className="workbench-shell">
-        <nav className="pivotrail activitybar" aria-label="pivots">
-          <div className="pivottrack" ref={pivotTrackRef}>
-            {PIVOTS.map((p, i) => (
-              <button
-                key={p}
-                ref={(el) => (pivotRefs.current[i] = el)}
-                className={i === pivot && zoom !== 0 ? 'pivot active' : 'pivot'}
-                onClick={() => goPivot(i)}
-                aria-current={i === pivot}
-                title={`${p} (Ctrl+${i + 1})`}
-              >
-                <span className="pivot-icon" aria-hidden="true">{PIVOT_ICONS[p] || '■'}</span>
-                <span className="pivot-word">{p}</span>
-                {pivotCounts[p] > 0 && <span className="count">{pivotCounts[p]}</span>}
+      {/* 1 · typographic pivots — navigation is the header; no left sidebar exists.
+             / or ctrl+k morphs the active 42pt word itself into the search cursor. */}
+      <nav className="pivotrail" aria-label="pivots">
+        {zoom === 3 && PIVOTS[pivot] === 'conversation' ? (
+          /* Degree 2 · segmented session facet bar: the 42pt header re-scopes to this session */
+          <div className="pivottrack facetrack">
+            {[['all', 'all turns'], ['prompts', 'my prompts'], ['decisions', 'decisions'], ['mutations', 'mutations'], ['pty', 'live pty'], ['artifacts', 'artifacts']].map(([k, label]) => (
+              <button key={k} className={facet === k ? 'pivot active' : 'pivot'} data-cursor={`conv-facet:${k}`} onClick={() => setFacet(k)}>
+                {label}<span className="count">{facetCounts[k]}</span>
               </button>
             ))}
           </div>
-          {zoom === 3 && PIVOTS[pivot] === 'conversation' && (
-            <div className="pivottrack" style={{ borderTop: '1px solid var(--border)', paddingTop: 4 }}>
-              {[['all', 'all'], ['prompts', 'ask'], ['decisions', 'dec'], ['mutations', 'diff'], ['pty', 'pty'], ['artifacts', 'art']].map(([k, shortLabel]) => (
-                <button
-                  key={k}
-                  className={facet === k ? 'pivot active' : 'pivot'}
-                  data-cursor={`conv-facet:${k}`}
-                  onClick={() => setFacet(k)}
-                  title={`facet: ${k} (${facetCounts[k]})`}
-                >
-                  <span className="pivot-word">{shortLabel}</span>
-                  <span className="count">{facetCounts[k]}</span>
+        ) : (
+        <div className="pivottrack" ref={pivotTrackRef} style={{ transform: `translateX(${(window.innerWidth <= 1100 ? 24 : 48) - pivotShift}px)` }}>
+          {PIVOTS.map((p, i) => searchOpen && i === pivot ? (
+            <input key={p} ref={(el) => (pivotRefs.current[i] = el)} className="pivot searchmorph" autoFocus
+              style={{ width: `${Math.max(p.length, query.length) + 2}ch` }}
+              value={query} placeholder={p} aria-label="search threads, files, agents"
+              onChange={(e) => setQuery(e.target.value)}
+              onBlur={() => setTimeout(() => { setSearchOpen(false); setQuery('') }, 160)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && searchHits[0]) { searchHits[0].go(); setSearchOpen(false); setQuery('') } }} />
+          ) : (
+            <button key={p} ref={(el) => (pivotRefs.current[i] = el)} className={i === pivot && zoom !== 0 ? 'pivot active' : 'pivot'} onClick={() => goPivot(i)} aria-current={i === pivot}>
+              {p}{pivotCounts[p] > 0 && <span className="count">{pivotCounts[p]}</span>}
+            </button>
+          ))}
+        </div>
+        )}
+        {searchOpen && zoom !== 3 && (
+          <div className="searchresults">
+            {searchHits.length === 0 && <p className="dim" style={{ fontWeight: 300, margin: 0 }}>{query ? 'nothing matches' : 'type to search threads, files, agents · esc closes'}</p>}
+            {searchHits.map((h, i) => (
+              <button key={i} onClick={() => { h.go(); setSearchOpen(false); setQuery('') }}><span className="faint">{h.kind} · </span>{h.label}</button>
+            ))}
+          </div>
+        )}
+      </nav>
+
+      <div className="viewport">
+        <div className="canvas" style={{ transform: `translateX(${-pivot * 100}%)` }}>
+          {/* ============ HUB ============ */}
+                    <HubPage
+            active={pivot === 0}
+            tiledThreads={tiledThreads} threadTiles={threadTiles} effectivePolicy={effectivePolicy}
+            gateBlocking={gateBlocking} gateResolved={gateResolved} idleThreads={idleThreads}
+            turnsByThread={turnsByThread} thread={thread} threads={threads} runningAgents={runningAgents}
+            sendingRef={sendingRef} runProgress={runProgress} runLabel={runLabel} agents={agents}
+            activity={activity} fleetCounts={fleetCounts} suitesPass={suitesPass} suitesTotal={suitesTotal}
+            allTurnsCount={allTurnsCount} tokVelocity={tokVelocity} fleetSpent={fleetSpent}
+            derivedEpochs={derivedEpochs}
+            tiltSpot={tiltSpot} motion={motion} actions={actions}
+          />
+
+          {/* ============ CONVERSATION — spatial turn matrix. no bubbles, no scroll-of-death. ============ */}
+                    <ConversationPage
+            active={pivot === 1}
+            zoom={zoom} focusTick={focusTick} narrow={narrow} convLevel={convLevel} setConvLevel={setConvLevel}
+            thread={thread} threadId={threadId} threads={threads} turns={turns}
+            selectedTurn={selectedTurn} setSelectedTurn={setSelectedTurn} activeTurn={activeTurn}
+            promptTurns={promptTurns} decisionTurns={decisionTurns} activeEpoch={activeEpoch} epochCounts={epochCounts}
+            derivedEpochs={derivedEpochs} hotWords={hotWords} hotWordFilter={hotWordFilter}
+            visibleFacetTurns={visibleFacetTurns} workspaceCtx={workspaceCtx}
+            sessionChangeSet={sessionChangeSet} sessionHunks={sessionHunks} facet={facet} facetTurns={facetTurns}
+            splitTurn={splitTurn} promptOpen={promptOpen} engineSummary={engineSummary} draft={draft} setDraft={setDraft}
+            promptRef={promptRef} gateOpen={gateOpen} gateResolved={gateResolved}
+            reviewFileObj={reviewFileObj} activeHunk={activeHunk} agents={agents} config={config}
+            localStatus={localStatus} motion={motion}
+            cmdMode={cmdMode} cmdHits={cmdHits} runCommand={runCommand} mentions={mentions}
+            actions={actions}
+          />
+
+          {/* ============ COLLECTION (folders / files / code) ============ */}
+                    <CollectionPage
+            active={pivot === 2}
+            narrow={narrow} colLevel={colLevel} setColLevel={setColLevel}
+            folder={folder} setFolder={setFolder} fileName={fileName} setFileName={setFileName}
+            focusTick={focusTick} file={file} threadId={threadId} actions={actions}
+          />
+
+          {/* ============ REVIEW — hunk-level triage. never scroll a raw file to review a mutation. ============ */}
+                    <ReviewPage
+            active={pivot === 3}
+            zoom={zoom} reviewSet={reviewSet} reviewFileObj={reviewFileObj} activeHunk={activeHunk}
+            selectedHunk={selectedHunk} setSelectedHunk={setSelectedHunk}
+            promptTurns={promptTurns} decisionTurns={decisionTurns}
+            changeSets={changeSets} reviewSetId={reviewSetId} setReviewSetId={setReviewSetId}
+            reviewFile={reviewFile} setReviewFile={setReviewFile}
+            narrow={narrow} revLevel={revLevel} setRevLevel={setRevLevel}
+            instructOpen={instructOpen} instructDraft={instructDraft} setInstructDraft={setInstructDraft}
+            instructRef={instructRef} actions={actions}
+          />
+
+          {/* ============ TERMINAL ============ */}
+                    <TerminalPage
+            active={pivot === 4}
+            termLines={termLines} termInput={termInput} setTermInput={setTermInput} actions={actions}
+          />
+
+          {/* ============ AGENTS — same 3-column Swiss grid as the hub, never full-width rows ============ */}
+                    <AgentsPage
+            active={pivot === 5}
+            narrow={narrow} agentsLevel={agentsLevel} setAgentsLevel={setAgentsLevel}
+            runningAgents={runningAgents} agents={agents} tiltSpot={tiltSpot} motion={motion}
+            telemetryAgent={telemetryAgent} fleetSpent={fleetSpent} config={config} actions={actions}
+          />
+
+          {/* ============ SETTINGS ============ */}
+                    <SettingsPage
+            active={pivot === 6}
+            setDomain={setDomain} setSetDomain={setSetDomain} config={config} setCfg={setCfg}
+            accent={accent} theme={theme} density={density} setAccent={setAccent} setTheme={setTheme} setDensity={setDensity}
+            gates={gates} tilePolicy={tilePolicy} effectivePolicy={effectivePolicy} motion={motion}
+            coarse={coarse} localStatus={localStatus} bridgeStatus={bridgeStatus} circuitStats={circuitStats} engineSummary={engineSummary}
+            agents={agents} fleetCounts={fleetCounts} fleetSpent={fleetSpent} tokVelocity={tokVelocity}
+            threads={threads} threadTiles={threadTiles} allTurnsCount={allTurnsCount} actions={actions}
+          />
+        </div>
+
+        {/* 3 · semantic zoom map */}
+        {zoom === 0 && (
+          <div className="zoommap" role="dialog" aria-label="semantic zoom map">
+            <p className="huge">fragments</p>
+            <p className="dim" style={{ fontWeight: 300 }}>{coarse ? 'Z0 · macro fleet map · tap a block to land in it · pinch out to step back in' : 'Z0 · macro fleet map · home-row badge or click lands in the block · ctrl + = steps in'}</p>
+            <div className="mapgrid">
+              {mapBlocks.map((b) => (
+                <button key={b.id} className={`mapblock ${b.blocked ? 'blocked' : ''} ${treemapSpan(b.weight, mapMaxWeight)} tiltcard`} {...tiltSpot} data-badge={b.badge} data-cursor={`zoom-map:${b.id}`} onClick={b.go}>
+                  <span className="mapbadge">{b.badge}</span><span className="t">{b.title}</span><small>{b.sub}</small>
                 </button>
               ))}
             </div>
-          )}
-        </nav>
-
-        <div className="viewport">
-          <div className="canvas">
-            {/* ============ HUB ============ */}
-            <HubPage
-              active={pivot === 0}
-              tiledThreads={tiledThreads} threadTiles={threadTiles} effectivePolicy={effectivePolicy}
-              gateBlocking={gateBlocking} gateResolved={gateResolved} idleThreads={idleThreads}
-              turnsByThread={turnsByThread} thread={thread} threads={threads} runningAgents={runningAgents}
-              sendingRef={sendingRef} runProgress={runProgress} runLabel={runLabel} agents={agents}
-              activity={activity} fleetCounts={fleetCounts} suitesPass={suitesPass} suitesTotal={suitesTotal}
-              allTurnsCount={allTurnsCount} tokVelocity={tokVelocity} fleetSpent={fleetSpent}
-              derivedEpochs={derivedEpochs}
-              tiltSpot={tiltSpot} motion={motion} actions={actions}
-            />
-
-            {/* ============ CONVERSATION (3-PANE WORKBENCH) ============ */}
-            <ConversationPage
-              active={pivot === 1}
-              zoom={zoom} focusTick={focusTick} narrow={narrow} convLevel={convLevel} setConvLevel={setConvLevel}
-              thread={thread} threadId={threadId} threads={threads} turns={turns}
-              selectedTurn={selectedTurn} setSelectedTurn={setSelectedTurn} activeTurn={activeTurn}
-              promptTurns={promptTurns} decisionTurns={decisionTurns} activeEpoch={activeEpoch} epochCounts={epochCounts}
-              derivedEpochs={derivedEpochs} hotWords={hotWords} hotWordFilter={hotWordFilter}
-              visibleFacetTurns={visibleFacetTurns} workspaceCtx={workspaceCtx}
-              sessionChangeSet={sessionChangeSet} sessionHunks={sessionHunks} facet={facet} facetTurns={facetTurns}
-              splitTurn={splitTurn} promptOpen={promptOpen} engineSummary={engineSummary} draft={draft} setDraft={setDraft}
-              promptRef={promptRef} gateOpen={gateOpen} gateResolved={gateResolved}
-              reviewFileObj={reviewFileObj} activeHunk={activeHunk} agents={agents} config={config}
-              localStatus={localStatus} motion={motion}
-              cmdMode={cmdMode} cmdHits={cmdHits} runCommand={runCommand} mentions={mentions}
-              termLines={termLines} termInput={termInput} setTermInput={setTermInput}
-              startResize={startResize} resetPaneWidths={resetPaneWidths}
-              actions={actions}
-            />
-
-            {/* ============ COLLECTION (folders / files / code) ============ */}
-            <CollectionPage
-              active={pivot === 2}
-              narrow={narrow} colLevel={colLevel} setColLevel={setColLevel}
-              folder={folder} setFolder={setFolder} fileName={fileName} setFileName={setFileName}
-              focusTick={focusTick} file={file} threadId={threadId} actions={actions}
-            />
-
-            {/* ============ REVIEW — hunk-level triage ============ */}
-            <ReviewPage
-              active={pivot === 3}
-              zoom={zoom} reviewSet={reviewSet} reviewFileObj={reviewFileObj} activeHunk={activeHunk}
-              selectedHunk={selectedHunk} setSelectedHunk={setSelectedHunk}
-              promptTurns={promptTurns} decisionTurns={decisionTurns}
-              changeSets={changeSets} reviewSetId={reviewSetId} setReviewSetId={setReviewSetId}
-              reviewFile={reviewFile} setReviewFile={setReviewFile}
-              narrow={narrow} revLevel={revLevel} setRevLevel={setRevLevel}
-              instructOpen={instructOpen} instructDraft={instructDraft} setInstructDraft={setInstructDraft}
-              instructRef={instructRef} actions={actions}
-            />
-
-            {/* ============ TERMINAL ============ */}
-            <TerminalPage
-              active={pivot === 4}
-              termLines={termLines} termInput={termInput} setTermInput={setTermInput} actions={actions}
-            />
-
-            {/* ============ AGENTS ============ */}
-            <AgentsPage
-              active={pivot === 5}
-              narrow={narrow} agentsLevel={agentsLevel} setAgentsLevel={setAgentsLevel}
-              runningAgents={runningAgents} agents={agents} tiltSpot={tiltSpot} motion={motion}
-              telemetryAgent={telemetryAgent} fleetSpent={fleetSpent} config={config} actions={actions}
-            />
-
-            {/* ============ SETTINGS ============ */}
-            <SettingsPage
-              active={pivot === 6}
-              setDomain={setDomain} setSetDomain={setSetDomain} config={config} setCfg={setCfg}
-              accent={accent} theme={theme} density={density} setAccent={setAccent} setTheme={setTheme} setDensity={setDensity}
-              gates={gates} tilePolicy={tilePolicy} effectivePolicy={effectivePolicy} motion={motion}
-              coarse={coarse} localStatus={localStatus} bridgeStatus={bridgeStatus} circuitStats={circuitStats} engineSummary={engineSummary}
-              agents={agents} fleetCounts={fleetCounts} fleetSpent={fleetSpent} tokVelocity={tokVelocity}
-              threads={threads} threadTiles={threadTiles} allTurnsCount={allTurnsCount} actions={actions}
-            />
           </div>
-
-          {/* 3 · semantic zoom map */}
-          {zoom === 0 && (
-            <div className="zoommap" role="dialog" aria-label="semantic zoom map">
-              <p className="huge">fragments</p>
-              <p className="dim pane-pad">{coarse ? 'Z0 · macro fleet map · tap a block to land in it' : 'Z0 · macro fleet map · home-row badge or click lands in the block · ctrl + = steps in'}</p>
-              <div className="mapgrid">
-                {mapBlocks.map((b) => (
-                  <button key={b.id} className={`mapblock ${b.blocked ? 'blocked' : ''} ${treemapSpan(b.weight, mapMaxWeight)} tiltcard`} {...tiltSpot} data-badge={b.badge} data-cursor={`zoom-map:${b.id}`} onClick={b.go}>
-                    <span className="mapbadge">{b.badge}</span><span className="t">{b.title}</span><small>{b.sub}</small>
-                  </button>
-                ))}
-              </div>
+        )}
+        {/* z · epoch jump grid: the whole multi-day session as one screen of squares */}
+        {epochGrid && (
+          <div className="zoommap epochgrid" role="dialog" aria-label="epoch jump grid">
+            <p className="huge">epochs · {thread.title.toLowerCase()}</p>
+            <p className="dim" style={{ fontWeight: 300 }}>{turns.length} turns across {derivedEpochs.length} epochs · click a square to teleport · esc closes · never scroll two days of history</p>
+            <div className="mapgrid epochcells">
+              {derivedEpochs.map((ep, i) => (
+                <button key={ep.n} className={`mapblock ${ep.n === activeEpoch.n ? 'live' : ''} ${derivedEpochs.length <= 6 && i === derivedEpochs.length - 1 ? 'w2' : ''}`} data-cursor={`conv-epoch:${ep.n}`} onClick={() => jumpToEpoch(ep)}>
+                  <span className="t">[{String(ep.n).padStart(2, '0')}] {ep.name.toLowerCase()}</span>
+                  <small>{ep.when} · {epochCounts.get(ep.n) || 0} turns{ep.n === activeEpoch.n ? ' · you are here' : ''}</small>
+                  <small className="epochsummary">{ep.summary}</small>
+                  {(ep.hotWords || []).length > 0 && (
+                    <span className="ephotwords">
+                      {ep.hotWords.map((hw) => <span key={hw.key} className="ephw">{hw.label}<sup>{hw.count}</sup></span>)}
+                    </span>
+                  )}
+                </button>
+              ))}
             </div>
-          )}
-          {/* z · epoch jump grid */}
-          {epochGrid && (
-            <div className="zoommap epochgrid" role="dialog" aria-label="epoch jump grid">
-              <p className="huge">epochs · {thread.title.toLowerCase()}</p>
-              <p className="dim pane-pad">{turns.length} turns across {derivedEpochs.length} epochs · click a square to teleport · esc closes</p>
-              <div className="mapgrid epochcells">
-                {derivedEpochs.map((ep, i) => (
-                  <button key={ep.n} className={`mapblock ${ep.n === activeEpoch.n ? 'live' : ''} ${derivedEpochs.length <= 6 && i === derivedEpochs.length - 1 ? 'w2' : ''}`} data-cursor={`conv-epoch:${ep.n}`} onClick={() => jumpToEpoch(ep)}>
-                    <span className="t">[{String(ep.n).padStart(2, '0')}] {ep.name.toLowerCase()}</span>
-                    <small>{ep.when} · {epochCounts.get(ep.n) || 0} turns{ep.n === activeEpoch.n ? ' · you are here' : ''}</small>
-                    <small className="epochsummary">{ep.summary}</small>
-                    {(ep.hotWords || []).length > 0 && (
-                      <span className="ephotwords">
-                        {ep.hotWords.map((hw) => <span key={hw.key} className="ephw">{hw.label}<sup>{hw.count}</sup></span>)}
-                      </span>
-                    )}
-                  </button>
-                ))}
-              </div>
-              <button className="ghostbtn" style={{ marginTop: 16 }} onClick={() => setEpochGrid(false)}>close · esc</button>
-            </div>
-          )}
-        </div>
+            <button className="ghostbtn" style={{ marginTop: 22 }} onClick={() => setEpochGrid(false)}>close · esc</button>
+          </div>
+        )}
       </div>
 
-      {/* global fleet heartbeat: 2px segmented strip */}
+      {/* global fleet heartbeat: 2px segmented strip — the whole fleet's state ratio, no transport controls */}
       <div className="fleetstrip" role="img" aria-label={`fleet: ${fleetSegs.map((s) => `${s.n} ${s.k}`).join(', ')}`} title={fleetSegs.map((s) => `${s.n} ${s.k}`).join(' · ')}>
         {fleetSegs.filter((s) => s.n > 0).map((s) => <i key={s.k} style={{ width: `${(s.n / fleetTotal) * 100}%`, background: s.c }} />)}
       </div>
-      {/* Visual Studio / Zune 24px Status Bar Ribbon: always shows active scope, actions, and telemetry */}
-      <footer className={`actionstrip${gateBlocking ? ' gate-active' : ''}`}>
-        <span className="striplabel">{jumpHint !== null ? `jump: ${jumpHint}▌` : stripLabel}</span>
-        {stripActions.map(([k, label]) => (
-          <button key={k + label} className="stripaction" onClick={() => runStripAction(k)}>
-            {coarse ? label : <><b>[{k}]</b> {label}</>}
-          </button>
+      {/* contextual baseline: whisper-quiet status line; keybind hints appear only when ? is toggled */}
+      <footer className={showHints || jumpHint !== null ? 'actionstrip lit' : 'actionstrip'}>
+        <span className="striplabel">{jumpHint !== null ? `jump: ${jumpHint}▌` : thread.title}</span>
+        {showHints && stripActions.map(([k, label]) => (
+          <button key={k + label} className="stripaction" onClick={() => runStripAction(k)}>{coarse ? label : <><b>[{k}]</b> {label}</>}</button>
         ))}
         <span className="spacer" style={{ flex: 1 }} />
         <span className="sr" aria-live="polite">{activity[0]?.what || ''}</span>
-        <span className="stripaction faint stripmodel">
-          {fleetCounts.running} run · {suitesPass}/{suitesTotal} suites · {tokVelocity} tok/s · {engineSummary}
-        </span>
+        <span className="stripaction faint stripmodel">{tokVelocity} tok/s · {engineSummary}</span>
       </footer>
     </div>
   )
