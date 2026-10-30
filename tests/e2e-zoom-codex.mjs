@@ -172,13 +172,34 @@ try {
   assert.equal(storedAfterOptOff.optimizer.cacheInjection, false, 'optimizer.cacheInjection=false must persist')
   await page.click('.page.isactive .paramrow:has-text("prompt cache 4-breakpoint injector") button:has-text("on")')
 
-  // 6. E2E Verification of Z0 Sky-Level Episodic & Fleet Map -> Z3 Persistent 3-Column Zune Workbench
+  // 6. E2E Verification of Z0 Sky-Level Mosaic -> Z3 Persistent 3-Column Zune Workbench
   await page.click('nav.pivotrail button.pivot:has-text("conversation")')
   await page.click('.zoomstops button:has-text("Z0")')
   await page.waitForSelector('.zoommap.z0skymap')
 
+  // Verify the room pivot rail (hub conversation collection...) is NOT rendered at Z0
+  const pivotRailAtZ0 = await page.locator('nav.pivotrail').count()
+  assert.equal(pivotRailAtZ0, 0, 'nav.pivotrail (hub conversation...) must be hidden at Z0')
+
   const z0TilesCount = await page.locator('.z0skymap .z0tile').count()
   assert.equal(z0TilesCount, 9, `expected 9 episodic session tiles across 60d in Z0 sky map, got ${z0TilesCount}`)
+
+  // Verify every Z0 session tile has both a Square Live Telemetry Tile (.z0square) and a Paired Tile Description (.z0desc)
+  const z0SquaresCount = await page.locator('.z0skymap .z0tile .z0square').count()
+  const z0DescsCount = await page.locator('.z0skymap .z0tile .z0desc').count()
+  assert.equal(z0SquaresCount, 9, 'every Z0 session must render a .z0square live telemetry tile face')
+  assert.equal(z0DescsCount, 9, 'every Z0 session must render a paired .z0desc typographic description')
+
+  // Verify all 6 live fleet workers render as live tiles + descriptions in the Z0 right column
+  const z0AgentUnitsCount = await page.locator('.z0skymap .z0agentunit').count()
+  assert.equal(z0AgentUnitsCount, 6, `expected 6 live fleet agent tile units in Z0 right rail, got ${z0AgentUnitsCount}`)
+
+  // Verify live gate arbitration right on the Z0 blocked tile (board) updates the tile big numeral live
+  const boardBigBefore = await page.locator('[data-testid="z0-tile-big-board"]').textContent()
+  assert.equal(boardBigBefore?.trim(), 'FAIL :142', `expected FAIL :142 on blocked board tile, got ${boardBigBefore}`)
+  await page.click('[data-testid="z0-gate-yes"]')
+  const boardBigAfter = await page.locator('[data-testid="z0-tile-big-board"]').textContent()
+  assert.notEqual(boardBigAfter?.trim(), 'FAIL :142', 'resolving gate on Z0 tile must immediately transition board tile to live testing telemetry')
 
   // Orienteer by typing a human prompt fragment from 2 months ago ("randomly log me out")
   await page.fill('[data-testid="z0-orienteer-input"]', 'randomly log me out')

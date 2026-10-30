@@ -106,7 +106,8 @@ test('deriveSessionSignature & matchSessionOrienteering: human-voice indexing, s
   assert.ok(sig.blastFolders.includes('fragments.auth'), 'blastFolders must include fragments.auth')
   assert.equal(sig.filesCount, 2, 'refresh-race touches 2 files')
   assert.ok(sig.frictionCount >= 2, 'refresh-race has >= 2 friction/failure spikes')
-  assert.equal(sig.spanClass, 'w2 h2', '6-turn, 2-file high-friction session earns 2x2 hero span')
+  assert.equal(sig.isHero, true, '6-turn, 2-file high-friction session is a hero session')
+  assert.equal(sig.tileFace.big, '+52 −12', 'tileFace.big must derive +52 -12 from cs-refresh')
 
   // Matches human prompt
   const mPrompt = matchSessionOrienteering(sig, 'randomly log me out')

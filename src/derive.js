@@ -194,10 +194,18 @@ export function treemapSpan(weight, maxWeight) {
  * human's own prompts, folder/file blast radius, struggle rhythm, and Git landmarks
  * are surfaced for episodic orienteering.
  */
-export function deriveSessionSignature(thread, turns = [], changeSets = [], agents = [], filesCatalog = []) {
+export function deriveSessionSignature(thread, turns = [], changeSets = [], agents = [], filesCatalog = [], liveTile = null) {
   if (!thread) return null
   const cs = changeSetForThread(thread, changeSets)
   const totals = changeSetTotals(cs)
+  const sessionAgents = agents.filter((a) => a.threadId === thread.id)
+  const activeWorker = sessionAgents.find((a) => a.state === 'running')
+    || sessionAgents.find((a) => a.state === 'blocked')
+    || sessionAgents[0]
+    || null
+  const liveTokens = sessionAgents.reduce((sum, a) => sum + (a.tokens || 0), 0)
+  const liveRate = sessionAgents.filter((a) => a.state === 'running').reduce((sum, a) => sum + (a.rate || 0), 0)
+
   const humanPrompts = turns
     .filter((t) => t.actor === 'user' || t.kind === 'prompt')
     .map((t) => cleanDisplayText(t.full || t.intent || t.summary || ''))
@@ -215,19 +223,28 @@ export function deriveSessionSignature(thread, turns = [], changeSets = [], agen
   const filesTouched = [...new Set([...csFiles, ...turnArtifactFiles])]
 
   const folderSet = new Set()
-  if (thread.scope) folderSet.add(thread.scope.replace(/^:/, ''))
-  if (thread.project) folderSet.add(thread.project)
+  const normSet = new Set()
+  const addFolder = (raw) => {
+    if (!raw) return
+    const clean = raw.replace(/^:/, '')
+    const norm = clean.toLowerCase().replace(/[-_]/g, '.')
+    if (normSet.has(norm)) return
+    normSet.add(norm)
+    folderSet.add(clean)
+  }
+  addFolder(thread.scope)
+  addFolder(thread.project)
   for (const fname of filesTouched) {
     const fObj = filesCatalog.find((x) => x.name === fname)
-    if (fObj?.folder) folderSet.add(fObj.folder)
+    if (fObj?.folder) addFolder(fObj.folder)
   }
   const blastFolders = [...folderSet]
 
   const actorSet = new Set(
     turns.map((t) => t.actor).filter((a) => a && a !== 'user' && !a.startsWith('queued')),
   )
-  for (const a of agents) {
-    if (a.threadId === thread.id) actorSet.add(a.name)
+  for (const a of sessionAgents) {
+    actorSet.add(a.name)
   }
   const subagentsCount = Math.max(1, actorSet.size)
 
@@ -260,14 +277,67 @@ export function deriveSessionSignature(thread, turns = [], changeSets = [], agen
     }
   }
 
+  const effAdds = totals.adds || activeWorker?.adds || 0
+  const effDels = totals.dels || activeWorker?.dels || 0
+  const effFilesCount = Math.max(totals.files, filesTouched.length, activeWorker?.adds ? 1 : 0)
+
+  let tileFace
+  if (liveTile) {
+    tileFace = {
+      phase: liveTile.phase,
+      big: liveTile.big,
+      sub: liveTile.sub,
+      tail: liveTile.tail,
+      progress: liveTile.progress ?? 100,
+    }
+  } else if (activeWorker && (activeWorker.state === 'running' || activeWorker.state === 'blocked')) {
+    const big = (activeWorker.adds || activeWorker.dels)
+      ? `+${activeWorker.adds || 0} −${activeWorker.dels || 0}`
+      : activeWorker.total
+        ? `${activeWorker.pass || 0} / ${activeWorker.total}`
+        : `${activeWorker.progress}%`
+    tileFace = {
+      phase: activeWorker.state === 'blocked' ? 'blocked' : 'running',
+      big,
+      sub: `${activeWorker.name} · ${activeWorker.phase || activeWorker.state}`,
+      tail: activeWorker.tail || activeWorker.task,
+      progress: activeWorker.progress ?? 0,
+    }
+  } else if (effAdds > 0 || effDels > 0) {
+    tileFace = {
+      phase: totals.unreviewed > 0 ? 'ready' : 'merged',
+      big: `+${effAdds} −${effDels}`,
+      sub: `${effFilesCount} file${effFilesCount === 1 ? '' : 's'} · ${Math.max(1, totals.hunks)} hunk${totals.hunks === 1 ? '' : 's'}`,
+      tail: filesTouched.slice(0, 2).join(', ') || thread.status,
+      progress: 100,
+    }
+  } else if (turns.length >= 50) {
+    tileFace = {
+      phase: 'indexed',
+      big: `${turns.length}t`,
+      sub: `14 epochs · ${humanPrompts.length} prompts`,
+      tail: filesTouched.slice(0, 2).join(', ') || thread.status,
+      progress: 100,
+    }
+  } else {
+    tileFace = {
+      phase: 'verified',
+      big: '29 / 29',
+      sub: 'suites green · 0 fail',
+      tail: filesTouched.slice(0, 2).join(', ') || thread.status,
+      progress: 100,
+    }
+  }
+
   const weight = turns.length + filesTouched.length * 5 + totals.hunks * 3 + subagentsCount * 3 + frictionCount * 4
-  const isHero = turns.length >= 6 || filesTouched.length >= 2 || totals.hunks >= 3
-  const spanClass = isHero ? 'w2 h2' : (filesTouched.length >= 1 || turns.length >= 4 ? 'w2' : '')
+  const isHero = thread.id === 'board' || turns.length >= 6 || filesTouched.length >= 2 || totals.hunks >= 3
+  const spanClass = thread.id === 'board' ? 'w2 h2' : (isHero ? 'w2' : '')
 
   return {
     id: thread.id,
     title: thread.title,
     project: thread.project,
+    scope: thread.scope || `:${thread.project}`,
     age: thread.age,
     status: thread.status,
     timeWindow: thread.timeWindow || 'NOW · THIS WEEK',
@@ -278,14 +348,20 @@ export function deriveSessionSignature(thread, turns = [], changeSets = [], agen
     decisions,
     blastFolders,
     filesTouched,
-    filesCount: Math.max(totals.files, filesTouched.length),
+    filesCount: effFilesCount,
     hunksCount: totals.hunks,
-    adds: totals.adds,
-    dels: totals.dels,
+    unreviewedCount: totals.unreviewed,
+    adds: effAdds,
+    dels: effDels,
     subagentsCount,
     turnsCount: turns.length,
     frictionCount,
     struggleSeries,
+    activeWorker,
+    sessionAgents,
+    liveTokens,
+    liveRate,
+    tileFace,
     weight,
     isHero,
     spanClass,

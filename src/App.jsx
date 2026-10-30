@@ -535,7 +535,11 @@ export default function App() {
       else if (!typing && e.key === 'z' && (PIVOTS[pivot] === 'conversation' || PIVOTS[pivot] === 'hub')) { e.preventDefault(); setEpochGrid((g) => !g) }
       else if (!typing && e.key === 'v' && zoom === 3 && PIVOTS[pivot] === 'conversation') { e.preventDefault(); setSplitTurn((s) => (s === selectedTurn ? null : selectedTurn)) }
       else if (!typing && e.key === 'f') { e.preventDefault(); setJumpHint('') }
-      else if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === '/' || e.key === ':')) { e.preventDefault(); setSearchOpen(true) }
+      else if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === '/' || e.key === ':')) {
+        e.preventDefault()
+        if (zoom === 0) document.querySelector('[data-testid="z0-orienteer-input"]')?.focus()
+        else setSearchOpen(true)
+      }
       else if (!typing && e.key === '?') { e.preventDefault(); setHelpOn((h) => !h) }
       else if (!typing && ['h', 'j', 'k', 'l'].includes(e.key)) { e.preventDefault(); moveCursor(e.key) }
       else if (!typing && e.key.startsWith('Arrow')) { e.preventDefault(); moveCursor({ ArrowDown: 'j', ArrowUp: 'k', ArrowRight: 'l', ArrowLeft: 'h' }[e.key]) }
@@ -988,11 +992,11 @@ export default function App() {
   const BADGE_KEYS = 'asdfgwertyuiopzxcvbnm'
   const sessionSignatures = useMemo(
     () => threads.map((t, idx) => ({
-      ...deriveSessionSignature(t, turnsByThread[t.id] || [], changeSets, agents, files),
+      ...deriveSessionSignature(t, turnsByThread[t.id] || [], changeSets, agents, files, threadTiles.get(t.id)),
       badge: BADGE_KEYS[idx] || String(idx + 1),
       blocked: gateBlocking && t.id === seedGate.threadId,
     })),
-    [threads, turnsByThread, changeSets, agents, gateBlocking],
+    [threads, turnsByThread, changeSets, agents, threadTiles, gateBlocking],
   )
   const activeSignature = useMemo(
     () => sessionSignatures.find((s) => s.id === threadId) || sessionSignatures[0],
@@ -1141,6 +1145,11 @@ export default function App() {
         onDoubleClick={(e) => { if (e.target.closest('button,input,a,[data-zode-drag-ignore]')) return; if (window.zode?.window?.toggleFillScreen) window.zode.window.toggleFillScreen().catch(() => {}); else if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else document.documentElement.requestFullscreen?.().catch(() => {}) }}>
         <img className="brandmark" src="/zode-mark.svg" alt="zode mark" />
         <span className="wordmark">zune <b>code</b></span>
+        {zoom === 0 && (
+          <span className="z0toppulse" data-testid="z0-live-pulse">
+            <b>{fleetCounts.running}</b> live workers · <b>{suitesPass}/{suitesTotal}</b> suites · <b>{tokVelocity}</b> tok/s · {fmtTokens(fleetSpent)} tok
+          </span>
+        )}
         {zoom === 3 && PIVOTS[pivot] === 'conversation' && (
           <button className="sessiontab back" onClick={() => setZoom(1)}>← conversation <span className="faint">[esc]</span></button>
         )}
@@ -1155,7 +1164,8 @@ export default function App() {
       </div>
 
       {/* 1 · typographic pivots — navigation is the header; no left sidebar exists.
-             / or ctrl+k morphs the active 42pt word itself into the search cursor. */}
+             At Z0, the Sky Map owns the entire window height without room pivots. */}
+      {zoom !== 0 && (
       <nav className="pivotrail" aria-label="pivots">
         {zoom === 3 && PIVOTS[pivot] === 'conversation' ? (
           /* Degree 2 · segmented session facet bar: the 42pt header re-scopes to this session */
@@ -1191,6 +1201,7 @@ export default function App() {
           </div>
         )}
       </nav>
+      )}
 
       <div className="viewport">
         <div className="canvas" style={{ transform: `translateX(${-pivot * 100}%)` }}>
@@ -1275,39 +1286,18 @@ export default function App() {
           />
         </div>
 
-        {/* 3 · Z0 Sky-Level Episodic & Fleet Map: Human-Voice-Only Indexing + Visual Session Album Art + Landmark Orienteering */}
+        {/* 3 · Z0 Sky-Level Mosaic: Live Telemetry Tiles + Paired Tile Descriptions (no pivot rail, no tutorial header) */}
         {zoom === 0 && (
           <div className="zoommap z0skymap" role="dialog" aria-label="semantic zoom map">
-            <div className="z0head">
-              <div>
-                <p className="huge">sky map · orienteering</p>
-                <p className="dim" style={{ fontWeight: 300, margin: '4px 0 0 0' }}>
-                  Z0 · {sessionSignatures.length} sessions across 60 days · {agents.length} fleet workers · <b>human-voice indexed (robot filler muted)</b> · click any tile to dive straight into the 3-column workbench (Z3)
-                </p>
-              </div>
-              <div className="z0searchbox">
-                <input
-                  className="z0searchinput"
-                  data-testid="z0-orienteer-input"
-                  value={z0Query}
-                  onChange={(e) => setZ0Query(e.target.value)}
-                  placeholder='orienteer by what YOU typed ("log me out", "30s grace", "504", "attention sink"), folder ([auth], [stripe]), or git landmark (v2.1.0, PR #418)…'
-                  aria-label="orienteer by human prompts, folder blast-radius, or git landmark"
-                />
-                {z0Query && (
-                  <button className="ghostbtn z0clear" data-testid="z0-orienteer-clear" onClick={() => setZ0Query('')}>
-                    clear [{z0Query}]
-                  </button>
-                )}
-              </div>
+            <div className="z0bar">
               <div className="z0filterbar" role="toolbar" aria-label="episodic landmark filters">
                 {[
                   ['all', `all 60d (${sessionSignatures.length})`],
-                  ['now', 'now · this week'],
-                  ['oct', '3w–1mo · oct & stripe'],
-                  ['sept', '6w–2mo · sept & arm64e'],
-                  ['friction', '⚡ high friction / struggle'],
-                  ['hero', '■ 2×2 hero sessions'],
+                  ['now', 'now · live'],
+                  ['oct', '3w–1mo · oct'],
+                  ['sept', '6w–2mo · sept'],
+                  ['friction', '⚡ struggle'],
+                  ['hero', '■ 2×2 hero'],
                 ].map(([k, label]) => (
                   <button
                     key={k}
@@ -1319,112 +1309,243 @@ export default function App() {
                   </button>
                 ))}
                 {z0FilterActive && (
-                  <span className="faint" style={{ fontSize: '.76em' }}>
-                    {z0MatchedIds.size} matching in-place · temporal neighbors stay visible at 48%
+                  <span className="z0matchstatus">
+                    {z0MatchedIds.size} hit{z0MatchedIds.size === 1 ? '' : 's'} · temporal neighbors 48%
                   </span>
+                )}
+              </div>
+              <div className="z0searchbox">
+                <input
+                  className="z0searchinput"
+                  data-testid="z0-orienteer-input"
+                  value={z0Query}
+                  onChange={(e) => setZ0Query(e.target.value)}
+                  placeholder='filter by your prompt ("randomly log me out", "30s grace", "504"), [folder], or git tag/PR…'
+                  aria-label="orienteer by human prompts, folder blast-radius, or git landmark"
+                />
+                {z0Query && (
+                  <button className="ghostbtn z0clear" data-testid="z0-orienteer-clear" onClick={() => setZ0Query('')}>
+                    clear [{z0Query}]
+                  </button>
                 )}
               </div>
             </div>
 
-            {z0Windows.map((win) => {
-              const winHasMatch = z0MatchedWindows.has(win.window)
-              return (
-                <div key={win.window} className={`z0swimlane ${z0FilterActive && !winHasMatch ? 'searchdim' : ''}`} data-testid={`z0-lane-${win.window}`}>
-                  <div className="z0lanehead">
-                    <span className="label" style={{ margin: 0 }}>{win.window}</span>
-                    <span className="z0landmarks">
-                      {win.landmarks.map((lm) => (
-                        <button
-                          key={lm}
-                          className="z0landmarkpill"
-                          onClick={() => setZ0Query(lm.replace(/^(tag:|PR|branch:)\s*/i, '').split('·')[0].trim())}
-                          title="click landmark to orienteer around this release/PR"
-                        >
-                          ⚑ {lm}
-                        </button>
-                      ))}
-                    </span>
-                  </div>
-                  <div className="mapgrid z0grid">
-                    {win.sessions.map((sig) => {
-                      const matchInfo = z0MatchedIds.get(sig.id)
-                      const isMatched = Boolean(matchInfo)
-                      const isNeighbor = z0FilterActive && !isMatched && winHasMatch
-                      const dimClass = z0FilterActive
-                        ? (isMatched ? 'z0-hit' : isNeighbor ? 'z0-neighbor' : 'searchdim')
-                        : ''
-                      return (
-                        <button
-                          key={sig.id}
-                          className={`mapblock z0tile ${sig.blocked ? 'blocked' : ''} ${sig.spanClass} ${dimClass} tiltcard`}
-                          {...tiltSpot}
-                          data-badge={sig.badge}
-                          data-testid={`z0-tile-${sig.id}`}
-                          data-cursor={`zoom-map:${sig.id}`}
-                          onClick={() => openThreadToWorkbench(sig.id)}
-                        >
-                          <span className="z0tiletop">
-                            <span className="mapbadge">{sig.badge}</span>
-                            <span className="z0landmark">⚑ {sig.landmark}</span>
-                            <span className="z0age">{sig.age}</span>
-                          </span>
-                          {z0FilterActive && isMatched && matchInfo.matchedBy && (
-                            <span className="z0matchbadge" data-testid={`z0-match-badge-${sig.id}`}>
-                              MATCHED {matchInfo.matchedBy.toUpperCase()}
-                            </span>
-                          )}
-                          {z0FilterActive && isNeighbor && (
-                            <span className="z0neighborbadge">TEMPORAL NEIGHBOR · {sig.age}</span>
-                          )}
-                          <span className="z0humanquote" title="Indexed strictly from your own human prompts (robot prose muted)">
-                            “{sig.humanHeadline}”
-                          </span>
-                          {sig.humanFollowup && (
-                            <span className="z0followup">
-                              ↳ you steered: “{sig.humanFollowup}”
-                            </span>
-                          )}
-                          <span className="t">{sig.title.toLowerCase()}</span>
-                          <span className="blastpills">
-                            {sig.blastFolders.map((bf) => (
-                              <span key={bf} className="blastpill">[{bf}]</span>
-                            ))}
-                            {(sig.adds > 0 || sig.dels > 0) && (
-                              <span className="blastdelta">
-                                <span style={{ color: sig.blocked ? '#fff' : 'var(--add)' }}>+{sig.adds}</span>
-                                {' / '}
-                                <span style={{ color: sig.blocked ? '#fff' : 'var(--del)' }}>−{sig.dels}</span>
-                                {' · '}
-                                {sig.filesCount} file{sig.filesCount === 1 ? '' : 's'}
-                              </span>
-                            )}
-                          </span>
-                          <span className="strugglebar" aria-label={`session rhythm: ${sig.turnsCount} turns, ${sig.frictionCount} friction spikes`}>
-                            {sig.struggleSeries.map((seg, si) => (
-                              <i key={si} className={`sseg seg-${seg.kind}`} title={`Turn ${seg.turn}: ${seg.label}`} />
-                            ))}
-                          </span>
-                          <small>
-                            {sig.turnsCount} turns · {sig.humanPrompts.length} human prompt{sig.humanPrompts.length === 1 ? '' : 's'} · {sig.subagentsCount} agent{sig.subagentsCount === 1 ? '' : 's'}
-                            {sig.frictionCount > 0 ? ` · ⚡ ${sig.frictionCount} struggle spike${sig.frictionCount === 1 ? '' : 's'}` : ' · clean pass'}
-                          </small>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )
-            })}
+            <div className="z0body">
+              <div className="z0sessionscol">
+                {z0Windows.map((win) => {
+                  const winHasMatch = z0MatchedWindows.has(win.window)
+                  return (
+                    <div key={win.window} className={`z0swimlane ${z0FilterActive && !winHasMatch ? 'searchdim' : ''}`} data-testid={`z0-lane-${win.window}`}>
+                      <div className="z0lanehead">
+                        <span className="label" style={{ margin: 0 }}>{win.window}</span>
+                        <span className="z0landmarks">
+                          {win.landmarks.map((lm) => (
+                            <button
+                              key={lm}
+                              className="z0landmarkpill"
+                              onClick={() => setZ0Query(lm.replace(/^(tag:|PR|branch:)\s*/i, '').split('·')[0].trim())}
+                              title="click landmark to orienteer around this release/PR"
+                            >
+                              ⚑ {lm}
+                            </button>
+                          ))}
+                        </span>
+                      </div>
+                      <div className="mapgrid z0grid">
+                        {win.sessions.map((sig) => {
+                          const matchInfo = z0MatchedIds.get(sig.id)
+                          const isMatched = Boolean(matchInfo)
+                          const isNeighbor = z0FilterActive && !isMatched && winHasMatch
+                          const dimClass = z0FilterActive
+                            ? (isMatched ? 'z0-hit' : isNeighbor ? 'z0-neighbor' : 'searchdim')
+                            : ''
+                          const tf = sig.tileFace
+                          const isLive = sig.activeWorker?.state === 'running'
+                          const sqClass = sig.blocked
+                            ? 'tile-blocked'
+                            : tf.phase === 'ready'
+                              ? 'tile-ready'
+                              : isLive
+                                ? `tile-${tf.phase}`
+                                : `tile-${tf.phase}`
+                          return (
+                            <div
+                              key={sig.id}
+                              role="button"
+                              tabIndex={0}
+                              className={`mapblock z0tile ${sig.blocked ? 'blocked' : ''} ${sig.id === 'board' ? 'hero2x2' : ''} ${dimClass} tiltcard`}
+                              {...tiltSpot}
+                              data-badge={sig.badge}
+                              data-testid={`z0-tile-${sig.id}`}
+                              data-cursor={`zoom-map:${sig.id}`}
+                              onClick={() => openThreadToWorkbench(sig.id)}
+                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openThreadToWorkbench(sig.id) } }}
+                            >
+                              {/* LEFT: Proportional Zune Square Live Telemetry Tile */}
+                              <div className={`z0square ${sqClass}`}>
+                                <span className="tiletop">
+                                  <span>[{sig.badge}] {sig.scope}</span>
+                                  <span>{sig.blocked ? `BLOCK · ${seedGate.age}` : isLive ? `LIVE · ${tf.progress}%` : tf.phase === 'ready' ? 'READY' : sig.age}</span>
+                                </span>
+                                <span className="tilebig" data-testid={`z0-tile-big-${sig.id}`}>{tf.big}</span>
+                                <span className="tilesub">
+                                  {sig.liveRate > 0 ? `${fmtTokens(sig.liveTokens)} tok · ${fmtTokens(sig.liveRate)}/s` : tf.sub}
+                                </span>
+                                <span className="tiletail">{tf.tail}</span>
+                                <span className="tileprog"><i style={{ width: `${tf.progress}%` }} /></span>
+                                <span className="strugglebar" aria-label={`session rhythm: ${sig.turnsCount} turns, ${sig.frictionCount} friction spikes`}>
+                                  {sig.struggleSeries.map((seg, si) => (
+                                    <i key={si} className={`sseg seg-${seg.kind}`} title={`Turn ${seg.turn}: ${seg.label}`} />
+                                  ))}
+                                </span>
+                              </div>
 
-            <div className="z0swimlane" style={{ marginTop: 22 }}>
-              <p className="label">workspace rooms & live fleet</p>
-              <div className="mapgrid" style={{ marginTop: 8 }}>
-                {mapBlocks.map((b) => (
-                  <button key={b.id} className={`mapblock ${b.blocked ? 'blocked' : ''} ${treemapSpan(b.weight, mapMaxWeight)} tiltcard`} {...tiltSpot} data-badge={b.badge} data-cursor={`zoom-map:${b.id}`} onClick={b.go}>
-                    <span className="mapbadge">{b.badge}</span><span className="t">{b.title}</span><small>{b.sub}</small>
-                  </button>
-                ))}
+                              {/* RIGHT: Paired Typographic Tile Description */}
+                              <div className="z0desc">
+                                <div className="z0desctop">
+                                  <span className="t">{sig.title}</span>
+                                  <span className="z0landmark">⚑ {sig.landmark}</span>
+                                  <span className="z0age">{sig.age} · Z3</span>
+                                </div>
+                                {z0FilterActive && isMatched && matchInfo.matchedBy && (
+                                  <span className="z0matchbadge" data-testid={`z0-match-badge-${sig.id}`}>
+                                    MATCHED {matchInfo.matchedBy.toUpperCase()}
+                                  </span>
+                                )}
+                                {z0FilterActive && isNeighbor && (
+                                  <span className="z0neighborbadge">TEMPORAL NEIGHBOR · {sig.age}</span>
+                                )}
+                                <span className="z0humanquote" title="Indexed strictly from your own human prompts (robot prose muted)">
+                                  “{sig.humanHeadline}”
+                                </span>
+                                {sig.humanFollowup && (
+                                  <span className="z0followup">
+                                    ↳ “{sig.humanFollowup}”
+                                  </span>
+                                )}
+                                {sig.sessionAgents.length > 0 && (
+                                  <div className="z0liveworkers">
+                                    {sig.sessionAgents.map((wa) => (
+                                      <span key={wa.id} className={`z0workerchip state-${wa.state}`}>
+                                        ● {wa.name} · {wa.state === 'running' ? `${wa.progress}% · ${fmtTokens(wa.tokens)} tok` : wa.phase}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                {sig.blocked && (
+                                  <div className="z0gatebar" onClick={(e) => e.stopPropagation()}>
+                                    <span className="z0gateq">GATE: {seedGate.question}</span>
+                                    <button data-testid="z0-gate-yes" onClick={() => resolveGate('yes')}>[y] {seedGate.yes}</button>
+                                    <button data-testid="z0-gate-no" onClick={() => resolveGate('no')}>[n] {seedGate.no}</button>
+                                  </div>
+                                )}
+                                <div className="blastpills">
+                                  {sig.blastFolders.map((bf) => (
+                                    <span key={bf} className="blastpill">[{bf}]</span>
+                                  ))}
+                                  {sig.filesTouched.slice(0, 2).map((fn) => (
+                                    <span key={fn} className="z0filepill">{fn}</span>
+                                  ))}
+                                  {(sig.adds > 0 || sig.dels > 0) && (
+                                    <span className="blastdelta">
+                                      <span style={{ color: 'var(--add)' }}>+{sig.adds}</span>
+                                      {' / '}
+                                      <span style={{ color: 'var(--del)' }}>−{sig.dels}</span>
+                                    </span>
+                                  )}
+                                  <span className="z0turnmeta">
+                                    {sig.turnsCount}t · {sig.humanPrompts.length}p{sig.frictionCount > 0 ? ` · ⚡${sig.frictionCount}` : ''}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
+
+              {/* RIGHT COLUMN: Live Fleet Workers Mosaic + Workspace Room Tiles */}
+              <aside className="z0fleetcol" aria-label="live fleet workers and rooms">
+                <div className="z0lanehead">
+                  <span className="label" style={{ margin: 0 }}>live fleet · {agents.length} workers</span>
+                  <span className="z0landmarkpill">{fleetCounts.running} running · {tokVelocity} tok/s</span>
+                </div>
+                <div className="z0agentlist">
+                  {agents.map((a) => {
+                    const aBig = a.total
+                      ? `${a.pass || 0}/${a.total}`
+                      : (a.adds || a.dels)
+                        ? `+${a.adds || 0}`
+                        : a.scanned
+                          ? `${a.scanned}f`
+                          : `${a.progress}%`
+                    const sqState = a.state === 'blocked' ? 'tile-blocked' : a.state === 'running' ? 'tile-running' : a.state === 'complete' ? 'tile-ready' : ''
+                    return (
+                      <div
+                        key={a.id}
+                        role="button"
+                        tabIndex={0}
+                        className="z0agentunit tiltcard"
+                        {...tiltSpot}
+                        data-testid={`z0-agent-tile-${a.id}`}
+                        data-cursor={`zoom-agent:${a.id}`}
+                        onClick={() => openThreadToWorkbench(a.threadId || 'board')}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openThreadToWorkbench(a.threadId || 'board') } }}
+                      >
+                        <div className={`z0agentsq ${sqState}`}>
+                          <span className="tiletop">
+                            <span>{a.state === 'running' ? 'LIVE' : a.state === 'complete' ? 'DONE' : a.state === 'queued' ? 'QUEUE' : 'BLOCK'}</span>
+                            <span>:{a.threadId}</span>
+                          </span>
+                          <span className="z0agentbig" data-testid={`z0-agent-big-${a.id}`}>{aBig}</span>
+                          <span className="z0agentsub">{a.rate ? `${fmtTokens(a.rate)}/s` : `${fmtTokens(a.tokens)}t`}</span>
+                          <span className="tileprog"><i style={{ width: `${a.progress}%` }} /></span>
+                        </div>
+                        <div className="z0agentdesc">
+                          <div className="z0agenthead">
+                            <span className={a.state === 'running' && motion.shimmer ? 'shimmer z0agentname' : `z0agentname state-${a.state}`}>{a.name}</span>
+                            <button
+                              className="z0agentact"
+                              title={a.state === 'running' ? 'pause worker' : 'run worker'}
+                              onClick={(e) => { e.stopPropagation(); toggleAgent(a.id) }}
+                            >
+                              [{a.state === 'running' ? 'pause' : 'run'}]
+                            </button>
+                          </div>
+                          <span className="z0agenttask">{a.task}</span>
+                          <span className="z0agenttail">{a.tail}</span>
+                          <span className="z0agentmeta">{fmtTokens(a.tokens)} tok · {a.tools} tools · {a.elapsed}</span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <div className="z0lanehead" style={{ marginTop: 14 }}>
+                  <span className="label" style={{ margin: 0 }}>workspace · Z1 rooms</span>
+                  <span className="faint" style={{ fontSize: '.68em' }}>{suitesPass}/{suitesTotal} suites</span>
+                </div>
+                <div className="z0roomsgrid">
+                  {mapBlocks.map((b) => (
+                    <button
+                      key={b.id}
+                      className="z0roomtile tiltcard"
+                      {...tiltSpot}
+                      data-badge={b.badge}
+                      data-cursor={`zoom-map:${b.id}`}
+                      onClick={b.go}
+                    >
+                      <span className="tiletop"><span>[{b.badge}]</span><span>Z1</span></span>
+                      <span className="z0roomtitle">{b.title}</span>
+                      <small>{b.sub}</small>
+                    </button>
+                  ))}
+                </div>
+              </aside>
             </div>
           </div>
         )}
