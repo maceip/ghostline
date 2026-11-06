@@ -566,9 +566,12 @@ function renderDetail(rec) {
     Array.isArray(v.cluster_scores) && v.cluster_scores.length >= 3
       ? `${fmt(v.cluster_scores[0])} / ${fmt(v.cluster_scores[1])} / ${fmt(v.cluster_scores[2])}`
       : "—";
-  const attrText = v.attribution_token
-    ? `“${escapeHtml(v.attribution_token)}” (cos ${fmt(v.attribution_cosine)}, ${v.span_tokens ?? "?"} span tokens)`
-    : "—";
+  let attrText = "—";
+  if (v.attribution_token) {
+    const rawTok = String(v.attribution_token);
+    const dispTok = rawTok.trim() === "" ? "⎵ (space)" : `“${escapeHtml(rawTok)}”`;
+    attrText = `${dispTok} (cos ${fmt(v.attribution_cosine)}, ${v.span_tokens ?? "?"} span tokens)`;
+  }
 
   detailEl.innerHTML = `
     <div class="detail-head">

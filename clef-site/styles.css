@@ -1525,6 +1525,8 @@ img.brand-mark-mobile {
   border-radius: 4px;
   border: 1px solid var(--border-visible);
   color: var(--text-disabled);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .tl-filter-btn.is-on .tl-filter-check {
   border-color: var(--success);

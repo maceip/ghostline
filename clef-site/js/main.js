@@ -23,6 +23,7 @@ field.start();
 /* ---------- state ---------- */
 let records = [];
 let selectedRec = null;
+let activeProbeSeq = 0;
 const optedInClusters = new Set(["0", "1", "2"]);
 const THRESHOLD = 0.002;
 
@@ -102,7 +103,14 @@ function renderPromptButtons() {
 }
 
 async function runTimelineForRecord(rec, instant = false) {
+  const seq = ++activeProbeSeq;
   selectedRec = rec;
+  const rawCmd =
+    (rec.tool_args && rec.tool_args.cmd) ||
+    (rec.verdict?.tool_args_preview || rec.call_render || "").replace(/^cmd=/, "");
+  if (!instant && $("tl-custom-input")) {
+    $("tl-custom-input").value = rawCmd;
+  }
   for (const b of document.querySelectorAll("#tl-prompts .tl-prompt-btn")) {
     b.classList.toggle("is-active", b.dataset.recId === rec.id);
   }
@@ -112,9 +120,6 @@ async function runTimelineForRecord(rec, instant = false) {
   if (!instant) {
     // Fire a real live forward pass against /v1/guard/tool-call when clicked
     try {
-      const rawCmd =
-        (rec.tool_args && rec.tool_args.cmd) ||
-        (rec.verdict?.tool_args_preview || rec.call_render || "").replace(/^cmd=/, "");
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), 1800);
       const res = await fetch("/v1/guard/tool-call", {
@@ -129,16 +134,14 @@ async function runTimelineForRecord(rec, instant = false) {
         signal: ctl.signal,
       });
       clearTimeout(timer);
-      if (res.ok && selectedRec && selectedRec.id === rec.id) {
+      if (res.ok && seq === activeProbeSeq && selectedRec && selectedRec.id === rec.id) {
         const liveVerdict = await res.json();
         if (liveVerdict && typeof liveVerdict.harm_cosine === "number") {
           selectedRec = {
             ...rec,
             verdict: {
               ...rec.verdict,
-              harm_cosine: liveVerdict.harm_cosine,
-              pca_subspace_energy:
-                liveVerdict.pca_subspace_energy ?? rec.verdict?.pca_subspace_energy,
+              ...liveVerdict,
             },
           };
           renderTimelineResult(selectedRec);
@@ -263,9 +266,12 @@ function renderTimelineResult(rec) {
     $("tl-clusters").textContent = cs;
   }
   if ($("tl-attr")) {
-    const tok = v.attribution_token
-      ? `“${v.attribution_token}” (cos ${fmt(v.attribution_cosine)}, ${v.span_tokens ?? "?"} tok)`
-      : "—";
+    let tok = "—";
+    if (v.attribution_token) {
+      const rawTok = String(v.attribution_token);
+      const dispTok = rawTok.trim() === "" ? "⎵ (space)" : `“${rawTok}”`;
+      tok = `${dispTok} (cos ${fmt(v.attribution_cosine)}, ${v.span_tokens ?? "?"} tok)`;
+    }
     $("tl-attr").textContent = tok;
   }
   if ($("tl-optin-state")) {
@@ -287,6 +293,7 @@ async function runCustomTimelineProbe() {
   const cmd = inputEl ? inputEl.value.trim() : "";
   if (!cmd) return;
 
+  const seq = ++activeProbeSeq;
   if (btn) {
     btn.disabled = true;
     btn.textContent = "PROBING L16…";
@@ -298,13 +305,9 @@ async function runCustomTimelineProbe() {
 
   const steps = Array.from(document.querySelectorAll("#tl-steps .tl-step"));
   steps.forEach((s, idx) => {
-    s.classList.toggle("is-active", idx === 0);
-    s.classList.remove("is-done", "is-flagged");
-  });
-  await wait(100);
-  steps.forEach((s, idx) => {
     s.classList.toggle("is-done", idx < 2);
     s.classList.toggle("is-active", idx === 2);
+    s.classList.remove("is-flagged");
   });
 
   try {
@@ -321,6 +324,7 @@ async function runCustomTimelineProbe() {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const verdict = await res.json();
+    if (seq !== activeProbeSeq) return;
     const attrCluster =
       verdict.attribution_cluster != null ? String(verdict.attribution_cluster) : "0";
     const customRec = {
@@ -336,6 +340,7 @@ async function runCustomTimelineProbe() {
     selectedRec = customRec;
     renderTimelineResult(customRec);
   } catch {
+    if (seq !== activeProbeSeq) return;
     // Fallback to matching captured record if offline
     const match = records.find((r) =>
       String(r.call_render || "").toLowerCase().includes(cmd.toLowerCase())
@@ -345,7 +350,7 @@ async function runCustomTimelineProbe() {
       renderTimelineResult(match);
     }
   } finally {
-    if (btn) {
+    if (btn && seq === activeProbeSeq) {
       btn.disabled = false;
       btn.innerHTML = `<span class="live-dot live-dot-btn" aria-hidden="true"></span> PROBE LAYER 16 →`;
     }
