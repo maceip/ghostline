@@ -114,3 +114,8 @@ Please build `clef-site/demo.html`, `clef-site/exhibit.css`, and `clef-site/js/e
 4. **Prompt Delta Prefix Parity on Page 1 (`js/main.js`)**:
    - *Finding*: Page 2 prompt cards showed `Δ +0.051` while Page 1 prompt cards showed `+0.051` without `Δ`.
    - *Fix Applied*: Added `Δ ` prefix to `clef-site/js/main.js` so prompt buttons on both pages are 100% identical.
+5. **Production CSP Hardening & Live Public HTTPS Tunnel**:
+   - *Finding*: Removed inline `<script>` / `style=` attributes from `demo.html` and `index.html`, updated `deploy/Caddyfile` `style-src` for Three.js/SVG meter positioning, and launched a live Cloudflare HTTPS tunnel verified end-to-end with Playwright:
+     - **Public HTTPS URL (Page 1)**: `https://participated-dentists-moments-philips.trycloudflare.com/index.html`
+     - **Public HTTPS URL (Page 2 Live Demo)**: `https://participated-dentists-moments-philips.trycloudflare.com/demo.html`
+     - **Local URLs**: `http://127.0.0.1:8412/index.html` & `http://127.0.0.1:8412/demo.html` (plus `:8413` for the session-cookie guard on `:8094`)
