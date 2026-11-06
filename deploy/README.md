@@ -50,6 +50,20 @@ sudo -u "$USER" bash scripts/bootstrap_cloud_metal.sh \
     --domain <your-hostname> --email <your-acme-contact>
 ```
 
+The bootstrap's dry run is worth doing first — it does not need root and it
+is not a mock:
+
+```bash
+bash scripts/bootstrap_cloud_metal.sh --dry-run \
+    --domain <your-hostname> --email <your-acme-contact>
+```
+
+It prints the whole plan, and it **writes the three launchd property lists
+for real** into a scratch directory and checks them with `plutil -lint`, so
+a plist launchd would refuse is caught before the box ever sees it. It also
+validates the Caddy configuration it will write, with the same environment
+the box will run it with.
+
 ---
 
 ## The pieces

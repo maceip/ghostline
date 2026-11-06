@@ -632,7 +632,58 @@ CADDY_CONFIG="$CADDY_DIR/Caddyfile"
 if [ "$DRY_RUN" -eq 1 ]; then
     plan "write $CADDY_CONFIG (from $CADDYFILE_SRC, mode 0644)"
     plan "write $CADDY_ENV    (CLEF_DOMAIN, GUARD_PORT, SITE_ROOT, ACME_EMAIL, RL_*; mode 0640)"
-    plan "caddy validate --config $CADDY_CONFIG --envfile $CADDY_ENV"
+
+    # Actually check the configuration, with the environment the box will
+    # run it with.  The shipped Caddyfile uses `rate_limit`, so only a
+    # Caddy with that module can load it — which is the point: a stock
+    # binary refusing the file is the deployment failing loudly instead
+    # of serving unprotected.
+    caddy_scratch="$(mktemp -d /tmp/zcode-caddy.XXXXXX)"
+    install -m 0644 "$CADDYFILE_SRC" "$caddy_scratch/Caddyfile"
+    {
+        printf 'CLEF_DOMAIN=%s\n' "$CLEF_DOMAIN"
+        printf 'GUARD_PORT=%s\n' "$GUARD_PORT"
+        printf 'SITE_ROOT=%s\n' "$SITE_ROOT"
+        printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
+        printf 'RL_TOOL_CALL_EVENTS=%s\n' "$RL_TOOL_CALL_EVENTS"
+        printf 'RL_TOOL_CALL_WINDOW=%s\n' "$RL_TOOL_CALL_WINDOW"
+        printf 'RL_API_EVENTS=%s\n' "$RL_API_EVENTS"
+        printf 'RL_API_WINDOW=%s\n' "$RL_API_WINDOW"
+        # The access log and the ACME storage are the two paths a
+        # non-root machine cannot create, so they point at the scratch
+        # directory for the check.
+        printf 'CADDY_ACCESS_LOG=%s/caddy-access.log\n' "$caddy_scratch"
+        printf 'CADDY_STORAGE=%s/acme\n' "$caddy_scratch"
+    } > "$caddy_scratch/caddy.env"
+
+    module_caddy=""
+    for candidate in "$OPT_ROOT/bin/caddy" "/tmp/caddy-rl/caddy" "$(command -v caddy || true)"; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+        if "$candidate" list-modules 2>/dev/null | grep -q "http.handlers.rate_limit"; then
+            module_caddy="$candidate"
+            break
+        fi
+    done
+    if [ -n "$module_caddy" ]; then
+        if "$module_caddy" validate --config "$caddy_scratch/Caddyfile" \
+                --envfile "$caddy_scratch/caddy.env" >/dev/null 2>&1; then
+            ok "the Caddy configuration validates ($module_caddy)"
+        else
+            validate_out="$("$module_caddy" validate --config "$caddy_scratch/Caddyfile" \
+                --envfile "$caddy_scratch/caddy.env" 2>&1 || true)"
+            rm -f "$caddy_scratch"/*
+            rmdir "$caddy_scratch" 2>/dev/null || true
+            die "the Caddy configuration did NOT validate — nothing was loaded:
+$validate_out"
+        fi
+    else
+        plan "caddy validate --config $CADDY_CONFIG --envfile $CADDY_ENV"
+        info "no Caddy with the rate_limit module was found, so the configuration could not be checked here."
+        info "Build one with: xcaddy build --with github.com/mholt/caddy-ratelimit --output /tmp/caddy-rl/caddy"
+    fi
+    rm -f "$caddy_scratch"/*
+    rmdir "$caddy_scratch" 2>/dev/null || true
+
     plan "launchctl bootstrap system $LAUNCHD_DIR/$CADDY_LABEL.plist ; launchctl kickstart -k system/$CADDY_LABEL"
 else
     install -m 0644 -o "$CURRENT_USER" -g "$CURRENT_GROUP" "$CADDYFILE_SRC" /tmp/zcode-Caddyfile
@@ -840,6 +891,30 @@ if [ "$DRY_RUN" -eq 1 ]; then
     plan "write $LAUNCHD_DIR/$UPSTREAM_LABEL.plist  (mlx_lm.server, runs as $SERVICE_USER)"
     plan "write $LAUNCHD_DIR/$GUARD_LABEL.plist     (the guard, runs as $SERVICE_USER, --trust-proxy)"
     plan "write $LAUNCHD_DIR/$CADDY_LABEL.plist      (caddy run --config ... --envfile ..., runs as root for :443)"
+
+    # Write them for real, into a scratch directory, and check them with
+    # plutil.  A property list launchd will not load is a deployment that
+    # fails on the box, after the money is spent; a malformed one is the
+    # cheapest thing in the world to catch here.  The writers take their
+    # output path, so this is the same file the box would get.
+    scratch="$(mktemp -d /tmp/zcode-plists.XXXXXX)"
+    write_upstream_plist "$scratch/$UPSTREAM_LABEL.plist"
+    write_guard_plist "$scratch/$GUARD_LABEL.plist"
+    write_caddy_plist "$scratch/$CADDY_LABEL.plist"
+    for plist_file in "$scratch"/*.plist; do
+        if plutil -lint "$plist_file" >/dev/null 2>&1; then
+            ok "the plist $(basename "$plist_file") is well-formed"
+        else
+            lint_out="$(plutil -lint "$plist_file" 2>&1 || true)"
+            rm -f "$scratch"/*.plist
+            rmdir "$scratch" 2>/dev/null || true
+            die "the plist $(basename "$plist_file") is malformed:
+$lint_out"
+        fi
+    done
+    rm -f "$scratch"/*.plist
+    rmdir "$scratch" 2>/dev/null || true
+
     plan "launchctl bootout system/$UPSTREAM_LABEL ; launchctl bootstrap system $LAUNCHD_DIR/$UPSTREAM_LABEL.plist ; launchctl kickstart -k system/$UPSTREAM_LABEL"
     plan "launchctl bootout system/$GUARD_LABEL    ; launchctl bootstrap system $LAUNCHD_DIR/$GUARD_LABEL.plist    ; launchctl kickstart -k system/$GUARD_LABEL"
     plan "launchctl bootout system/$CADDY_LABEL     ; launchctl bootstrap system $LAUNCHD_DIR/$CADDY_LABEL.plist     ; launchctl kickstart -k system/$CADDY_LABEL"
