@@ -27,6 +27,38 @@
 #    caddy validate --config /opt/zcode/caddy/Caddyfile \
 #                       --envfile /opt/zcode/caddy/caddy.env
 #
+#  ---------------------------------------------------------------------------
+#  RATE LIMITING IS NOT IN THIS FILE — AND THAT IS A REQUIREMENT, NOT AN
+#  OVERSIGHT.
+#
+#  The public deployment must rate limit HERE, at the edge, keyed by client
+#  IP.  Two reasons:
+#
+#    * It sheds load before it costs anything.  The expensive part of this
+#      system is the model forward pass behind /v1/*.  A limit inside the
+#      guard is applied AFTER the request was accepted and routed.
+#    * It is keyed on the address this proxy saw on the socket.  The guard's
+#      own limiter has to trust X-Forwarded-For because it sits behind a
+#      proxy; this one trusts no header at all, so there is nothing to
+#      forge.
+#
+#  The reason the zone is not written out below is that `rate_limit` is NOT a
+#  directive in the standard Caddy build.  It comes from the community
+#  module github.com/mholt/caddy-ratelimit and has to be compiled in:
+#
+#    xcaddy build --with github.com/mholt/caddy-ratelimit \
+#                 --output /opt/zcode/bin/caddy
+#
+#  A Caddyfile that contains `rate_limit` on a binary WITHOUT the module is
+#  a parse error — Caddy refuses to load it rather than quietly serving an
+#  unprotected site.  So if this config refuses to load with
+#  "unrecognized directive: rate_limit", the fix is the BINARY.
+#
+#  The zone configuration to paste, the xcaddy build, and how to verify it
+#  are all in deploy/README.md — "Rate limiting belongs at THIS layer, keyed
+#  by IP".  Read that section before the first public deploy.
+#  ---------------------------------------------------------------------------
+#
 #  The variables marked "required" above have NO default on purpose.  An
 #  unset CLEF_DOMAIN or GUARD_TOKEN has to fail loudly at parse time rather
 #  than quietly serve the wrong thing.
@@ -95,6 +127,11 @@
 	#   /api/events        the live telemetry stream (SSE)
 	#   /v1/guard/tool-call the tool-call probe
 	#   /health            the liveness probe
+	#
+	# Everything here is expensive enough to need an edge rate limit keyed
+	# by client IP.  See the header of this file and deploy/README.md —
+	# "Rate limiting belongs at THIS layer, keyed by IP".  The zone goes
+	# ABOVE these handle blocks, not inside them.
 	@guard path /api/* /v1/* /health
 
 	handle @guard {

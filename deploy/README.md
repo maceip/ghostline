@@ -160,13 +160,177 @@ with. That is why a token change needs a restart.
 
 ---
 
-## Checking that rate limiting works
+## Rate limiting belongs at THIS layer, keyed by IP
 
-The guard rate-limits per client IP over a sliding sixty-second window
+**The public deployment must rate limit at Caddy, by client IP.** Not in the
+guard, not in the browser — in the reverse proxy, before the request is
+proxied onward.
+
+Two reasons, and together they are the whole reason:
+
+1. **It sheds load before it costs anything.** The expensive part of this
+   system is the model forward pass behind `/v1/guard/tool-call` and
+   `/v1/chat/completions`. A limit applied inside the guard is applied
+   *after* the request has been accepted, routed, and — for the inference
+   routes — after it has already taken the Metal device. The edge limit
+   refuses the request before any of that happens.
+2. **It is keyed on the address Caddy saw on the socket.** The limiter uses
+   `{remote_host}` and trusts no header at all. The guard's own limiter has
+   to trust the right-most `X-Forwarded-For` entry, because it sits behind a
+   proxy; the edge limiter needs no such trust, so there is nothing to
+   forge.
+
+### The gotcha: stock Caddy has no rate limiter
+
+**`rate_limit` is not a Caddyfile directive in the standard build.** It comes
+from the community module
+[`github.com/mholt/caddy-ratelimit`](https://github.com/mholt/caddy-ratelimit),
+which has to be compiled in.
+
+A Caddy installed with `brew install caddy` — which is what
+`scripts/bootstrap_cloud_metal.sh` does — **does not have it**.
+
+This fails loudly, which is the good way to fail: a Caddyfile containing
+`rate_limit` on a binary without the module is a parse error, so Caddy
+refuses to load the configuration rather than quietly serving an
+unprotected site.
+
+```
+Error: adapting config using caddyfile: parsing caddyfile tokens for 'rate_limit': unrecognized directive: rate_limit
+```
+
+If you see that, the fix is the **binary**, not the Caddyfile.
+
+### Build Caddy with the module
+
+```bash
+brew install xcaddy
+mkdir -p /opt/zcode/bin
+xcaddy build --with github.com/mholt/caddy-ratelimit --output /opt/zcode/bin/caddy
+
+# the module must be in the build
+/opt/zcode/bin/caddy list-modules | grep rate
+#   http.handlers.rate_limit
+```
+
+Then point the launchd daemon at that binary instead of the Homebrew one.
+In `/Library/LaunchDaemons/com.zcode.caddy.plist`, change the
+`ProgramArguments` entry to `/opt/zcode/bin/caddy`, then:
+
+```bash
+sudo launchctl bootout system/com.zcode.caddy
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.zcode.caddy.plist
+sudo launchctl kickstart -k system/com.zcode.caddy
+```
+
+### The configuration to paste
+
+Put this inside the `{$CLEF_DOMAIN}` site block, **above** the `handle`
+blocks — a `rate_limit` directive placed after a `handle` would only apply
+to the route it is written in, and these routes are the ones you want
+protected.
+
+```caddyfile
+rate_limit {
+	# The expensive routes: the model forward pass. Tight.
+	zone guard_inference {
+		match {
+			path /v1/*
+		}
+		key    {remote_host}
+		events 10
+		window 1m
+	}
+
+	# Everything else that reaches the guard: the session endpoint, the
+	# info endpoint, the label endpoint. Looser, but still bounded.
+	zone guard_api {
+		match {
+			path /api/*
+		}
+		key    {remote_host}
+		events 30
+		window 1m
+	}
+
+	log_key
+}
+```
+
+Notes on that configuration:
+
+- **`key {remote_host}` is the client IP.** That is the requirement: rate
+  limiting by address, not by a header the client controls.
+- **The module uses a sliding window**, so `events 10 / window 1m` means ten
+  requests in *any* sixty-second span, not ten per clock minute.
+- **Over the limit the module answers `429` and sets `Retry-After` itself**,
+  before the request is proxied to the guard.
+- **`ipv6_prefix` matters.** A client with a `/64` can cycle through
+  billions of IPv6 addresses and walk straight past a per-address limit.
+  Group the prefix so the whole network shares one bucket:
+
+  ```caddyfile
+  rate_limit {
+      zone guard_inference {
+          match {
+              path /v1/*
+          }
+          key         {remote_host}
+          events      10
+          window      1m
+          ipv4_prefix 24
+          ipv6_prefix 64
+      }
+  }
+  ```
+
+- **`match` takes Caddy request matchers** (`path`, `method`, `header`, …).
+  Match the expensive paths specifically rather than the whole site, so the
+  static assets are not charged against the API budget.
+
+### Verify it is actually limiting
+
+```bash
+# 1. the module is in the binary
+sudo /opt/zcode/bin/caddy list-modules | grep rate_limit
+
+# 2. the configuration loads
+sudo caddy validate --config /opt/zcode/caddy/Caddyfile \
+                     --envfile /opt/zcode/caddy/caddy.env
+
+# 3. it limits, from outside
+for i in $(seq 1 40); do
+    curl -s -o /dev/null -w '%{http_code} %{time_total}s\n' \
+        -X POST https://clef.example.com/v1/guard/tool-call \
+        -H 'Content-Type: application/json' -d '{"prompt":"ls"}'
+done
+#   the first ten answer 200, the rest answer 429
+```
+
+If step 1 prints nothing, the binary has no limiter and the site is
+unprotected at the edge — fix that before anything else.
+
+### If you cannot build the module
+
+If you are stuck with the stock Homebrew binary, then the **guard's own
+limiter is the only limit there is**. Set `--rate-limit-rpm` tight (the
+bootstrap defaults to 30), and treat the deployment as *not* edge-limited.
+That is a weaker posture: the request has already been accepted and routed
+before the guard refuses it, and the identity it trusts is a forwarded
+header rather than a socket address.
+
+---
+
+## The guard's own limiter — the backstop
+
+The guard also rate-limits per client IP over a sliding sixty-second window
 (`--rate-limit-rpm N`): a client gets exactly `N` requests in *any* sixty
-second span, not `N` per clock minute. It is the layer that actually protects
-a public endpoint, because the expensive part is the model inference behind
-the guard, not the token check.
+second span, not `N` per clock minute.
+
+**This is the backstop, not the primary limit.** It exists so that a direct
+client — something on the machine, or a proxy that is misconfigured — cannot
+spend the model's time without a ceiling. The edge limit in Caddy is what
+protects a public deployment; see the section above.
 
 The identity is the **right-most** `X-Forwarded-For` entry — the address the
 nearest proxy observed — and Caddy overwrites that header with the address it

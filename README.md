@@ -472,6 +472,26 @@ front end (Caddy, the site copy, the service account, the launchd daemons,
 and a validated config). `deploy/README.md` is the operator's notes — TLS,
 token rotation, rate-limit checks, troubleshooting.
 
+### Rate limiting belongs at the Caddy layer, by IP
+
+**The public deployment must rate limit at Caddy, keyed by client IP** — not
+in the guard. The edge limit sheds load before the model forward pass ever
+starts, and it keys on the address Caddy saw on the socket, so there is no
+forwarded header to forge.
+
+One thing to know before the first deploy: **`rate_limit` is not a Caddyfile
+directive in the standard build.** It comes from the community module
+`github.com/mholt/caddy-ratelimit` and has to be compiled in with `xcaddy`.
+A Caddyfile containing `rate_limit` on a binary without the module is a
+parse error, so Caddy refuses to load it — it fails loudly rather than
+quietly serving an unprotected site. The exact build command, the zone
+configuration to paste, the IPv6-prefix caveat and a three-step verification
+are in `deploy/README.md`, under *Rate limiting belongs at THIS layer, keyed
+by IP*.
+
+The guard's own `--rate-limit-rpm` remains as a **backstop** for direct or
+misconfigured clients — not as the public deployment's limit.
+
 ### The guard's access control
 
 Two independent layers, both **off by default**, so a local run and the

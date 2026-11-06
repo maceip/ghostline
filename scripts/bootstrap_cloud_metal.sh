@@ -27,6 +27,17 @@
 #   9. Waits for the upstream and the guard, then prints the DNS/TLS steps
 #      the operator still has to do.
 #
+# ONE THING THIS SCRIPT CANNOT DO FOR YOU
+# ---------------------------------------
+#   The public deployment must rate limit at Caddy, keyed by client IP, and
+#   stock Caddy has no rate limiter: `rate_limit` is a community module
+#   (github.com/mholt/caddy-ratelimit) that has to be compiled in with
+#   xcaddy.  This script installs the Homebrew build, so it checks for the
+#   module and tells you how to build one, but the zone configuration and
+#   the xcaddy build are yours to do.
+#
+#   See deploy/README.md — "Rate limiting belongs at THIS layer, keyed by IP".
+#
 # sudo IS USED — and only for the things that genuinely need it: the
 # /opt/zcode tree, the /Library/LaunchDaemons plists, the service account,
 # and the launchctl calls that manage system daemons.
@@ -247,6 +258,25 @@ else
         brew install caddy || die "brew install caddy failed"
         [ -x "$CADDY_BIN" ] || die "caddy was installed but $CADDY_BIN is not there"
         ok "caddy  $CADDY_BIN"
+    fi
+fi
+
+# The Homebrew build of Caddy has NO rate limiter: `rate_limit` is a
+# community module (github.com/mholt/caddy-ratelimit) that has to be
+# compiled in with xcaddy.  The public deployment is supposed to rate limit
+# at this layer, keyed by client IP, so say so out loud rather than letting
+# the operator discover it from the traffic.  See deploy/README.md —
+# "Rate limiting belongs at THIS layer, keyed by IP".
+if [ "$DRY_RUN" -eq 0 ] && [ -x "$CADDY_BIN" ]; then
+    if "$CADDY_BIN" list-modules 2>/dev/null | grep -q "http.handlers.rate_limit"; then
+        ok "caddy has the rate_limit module"
+    else
+        warn "this Caddy has NO rate_limit module (stock Homebrew build)"
+        warn "the public deployment must rate limit at this layer, keyed by client IP."
+        warn "build it with:  xcaddy build --with github.com/mholt/caddy-ratelimit \\"
+        warn "                  --output /opt/zcode/bin/caddy"
+        warn "then point the ${CADDY_LABEL} launchd daemon at that binary."
+        warn "full instructions: deploy/README.md"
     fi
 fi
 
@@ -786,4 +816,13 @@ cat <<SUMMARY
       check the rate limiter        for i in \$(seq 1 40); do curl -s -o /dev/null -w '%{http_code}\n' \\
                                        -X POST https://${DOMAIN_HOST}/v1/guard/tool-call \\
                                        -H 'Content-Type: application/json' -d '{}'; done
+
+    BEFORE YOU OPEN THIS TO THE PUBLIC
+      The deployment MUST rate limit at Caddy, keyed by client IP.  Stock
+      Caddy has no rate_limit module, so build one:
+          xcaddy build --with github.com/mholt/caddy-ratelimit \\
+                       --output /opt/zcode/bin/caddy
+      then point the ${CADDY_LABEL} daemon at it and add the zone config.
+      Full instructions: deploy/README.md —
+      "Rate limiting belongs at THIS layer, keyed by IP".
 SUMMARY
