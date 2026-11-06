@@ -1,0 +1,118 @@
+{
+  "logits": {
+    "file": "logits.f32",
+    "shape": [
+      9
+    ]
+  },
+  "stages": [
+    {
+      "file": "stage_normalized_hidden.f32",
+      "index": 0,
+      "name": "normalized_hidden",
+      "shape": [
+        2,
+        96,
+        4096
+      ]
+    },
+    {
+      "file": "stage_memory_0.f32",
+      "index": 0,
+      "name": "memory",
+      "shape": [
+        1,
+        80,
+        1024
+      ]
+    },
+    {
+      "file": "stage_memory_1.f32",
+      "index": 1,
+      "name": "memory",
+      "shape": [
+        1,
+        64,
+        1024
+      ]
+    },
+    {
+      "file": "stage_question_vectors_0.f32",
+      "index": 0,
+      "name": "question_vectors",
+      "shape": [
+        2,
+        4096
+      ]
+    },
+    {
+      "file": "stage_question_vectors_1.f32",
+      "index": 1,
+      "name": "question_vectors",
+      "shape": [
+        1,
+        4096
+      ]
+    },
+    {
+      "file": "stage_option_queries_0.f32",
+      "index": 0,
+      "name": "option_queries",
+      "shape": [
+        1,
+        5,
+        1024
+      ]
+    },
+    {
+      "file": "stage_option_queries_1.f32",
+      "index": 1,
+      "name": "option_queries",
+      "shape": [
+        1,
+        4,
+        1024
+      ]
+    },
+    {
+      "file": "stage_routed_options_0.f32",
+      "index": 0,
+      "name": "routed_options",
+      "shape": [
+        1,
+        5,
+        1024
+      ]
+    },
+    {
+      "file": "stage_routed_options_1.f32",
+      "index": 1,
+      "name": "routed_options",
+      "shape": [
+        1,
+        4,
+        1024
+      ]
+    },
+    {
+      "file": "stage_fields_0.f32",
+      "index": 0,
+      "name": "fields",
+      "shape": [
+        1,
+        2,
+        1024
+      ]
+    },
+    {
+      "file": "stage_fields_1.f32",
+      "index": 1,
+      "name": "fields",
+      "shape": [
+        1,
+        1,
+        1024
+      ]
+    }
+  ]
+}

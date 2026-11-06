@@ -396,6 +396,39 @@ node shells/windows/tools/verify_against_web.mjs  # Windows C# bridge vs src/bri
 ./scripts/check_windows_build.sh                  # cross-compiles Windows shell via EnableWindowsTargeting
 ```
 
+## Working on the RepE guard
+
+The guard's source lives in `repe-mods/`; `repe-compose.py` assembles
+`upgrade_generic_viz.sh` from it, and the generator rebuilds
+`qwen-clef-repe-guard/` from that. The generated tree and the module
+workspace are both committed, and a pre-commit hook refuses a commit whose
+generator has drifted from `repe-mods/` — the drift that silently rewrites
+the project with stale sources.
+
+One command checks, commits, and pushes:
+
+```bash
+scripts/repe_checkpoint.sh              # sync check, commit, push
+scripts/repe_checkpoint.sh --verify     # ...after the full verification suite
+scripts/repe_checkpoint.sh --no-push    # local only
+```
+
+The full end-to-end verification (build, unit tests, the canonical and
+real-upstream benchmarks, the render / GDN / joint-head parity suites) needs
+Apple Silicon, so it runs locally:
+
+```bash
+bash evals/verify_all.sh
+```
+
+The pure-arithmetic parts — the Ledoit-Wolf whitening, the cross-turn
+trajectory — have no MLX dependency and are also checked in CI on every push
+(`.github/workflows/repe-guard.yml`).
+
+The calibrated vectors under `qwen-clef-repe-guard/artifacts/` are committed
+on purpose: they are the measured operating point, not a derived file, and
+they cost minutes of calibration against a specific checkpoint snapshot.
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).

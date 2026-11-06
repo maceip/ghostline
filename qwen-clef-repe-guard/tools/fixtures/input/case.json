@@ -1,0 +1,101 @@
+{
+  "batch": 2,
+  "seq_len": 96,
+  "hidden_size": 4096,
+  "vocab_size": 512,
+  "records": [
+    {
+      "record_id": "record-0",
+      "length": 80,
+      "questions": [
+        {
+          "question_id": "q0",
+          "question_type": 0,
+          "question_span": [
+            10,
+            18
+          ],
+          "option_spans": [
+            [
+              30,
+              35
+            ],
+            [
+              40,
+              44
+            ]
+          ],
+          "option_ids": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "question_id": "q1",
+          "question_type": 1,
+          "question_span": [
+            48,
+            56
+          ],
+          "option_spans": [
+            [
+              58,
+              62
+            ],
+            [
+              63,
+              66
+            ],
+            [
+              67,
+              71
+            ]
+          ],
+          "option_ids": [
+            "alpha",
+            "beta",
+            "gamma"
+          ]
+        }
+      ]
+    },
+    {
+      "record_id": "record-1",
+      "length": 64,
+      "questions": [
+        {
+          "question_id": "q0",
+          "question_type": 2,
+          "question_span": [
+            20,
+            28
+          ],
+          "option_spans": [
+            [
+              32,
+              36
+            ],
+            [
+              37,
+              41
+            ],
+            [
+              42,
+              46
+            ],
+            [
+              47,
+              51
+            ]
+          ],
+          "option_ids": [
+            "0",
+            "1",
+            "2",
+            "3"
+          ]
+        }
+      ]
+    }
+  ]
+}

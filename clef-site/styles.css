@@ -554,9 +554,11 @@ input[type="range"]:disabled { opacity: 0.4; }
   font-family: var(--mono);
 }
 .count-num {
-  font-family: var(--display);
-  font-size: 40px;
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
   color: var(--text-display);
+  font-variant-numeric: tabular-nums;
   line-height: 1;
 }
 .count-num.is-alarm { color: var(--accent); }
@@ -1041,7 +1043,7 @@ input[type="range"]:disabled { opacity: 0.4; }
   font-family: var(--mono);
   font-size: 12px;
   letter-spacing: 0.1em;
-  color: var(--accent);
+  color: var(--text-secondary);
   padding-top: 4px;
 }
 .steps h3 {

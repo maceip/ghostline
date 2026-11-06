@@ -65,16 +65,11 @@ if [ "$DO_VERIFY" -eq 1 ]; then
 fi
 
 say "3. stage"
-git add -A \
-  repe-mods/ \
-  repe-compose.py \
-  upgrade_generic_viz.sh \
-  evals/ \
-  .githooks/ \
-  scripts/ \
-  extract_repe_vectors.py \
-  qwen-clef-repe-guard/artifacts/ \
-  .gitignore 2>/dev/null || true
+# Stage EVERYTHING that is not ignored. The whole point of this script is
+# that nothing sits uncommitted on a laptop that might lose power — an
+# explicit path list would leave exactly the kind of loose change that
+# disappears.
+git add -A
 # The generated project tree is committed too, so a fresh clone has both the
 # canonical modules and a ready-to-build project. The pre-commit hook is what
 # guarantees the two cannot drift apart.
