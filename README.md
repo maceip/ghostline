@@ -429,6 +429,70 @@ The calibrated vectors under `qwen-clef-repe-guard/artifacts/` are committed
 on purpose: they are the measured operating point, not a derived file, and
 they cost minutes of calibration against a specific checkpoint snapshot.
 
+## Installing the guard
+
+One command on a fresh Apple Silicon Mac:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/maceip/zune-code/main/scripts/install_guard.sh | bash
+```
+
+It checks the platform, installs `cargo` and `uv` if they are missing, clones
+the repository, builds the release binary, downloads
+`Qwen/Qwen2.5-0.5B-Instruct`, writes a bearer token, installs two launchd
+agents — the upstream model server and the guard — waits for both to answer,
+and prints the URLs. It never runs `sudo` and never writes outside `$HOME`.
+
+```bash
+bash scripts/install_guard.sh --dry-run        # print the plan, touch nothing
+bash scripts/install_guard.sh --dir ~/zune-code --port 8090 --rate-limit 60
+bash scripts/install_guard.sh --help
+```
+
+### Putting it on the internet
+
+The guard binds `127.0.0.1` and **refuses to start** on a routable address
+without a bearer token, so the public face is a reverse proxy that holds the
+token server-side:
+
+```
+browser ──https──> Caddy ──http──> guard (127.0.0.1:8090) ──http──> mlx_lm (127.0.0.1:8123)
+                    │
+                    └── Authorization: Bearer <token>   ← added here, server-side
+```
+
+`deploy/Caddyfile` terminates TLS with an automatically renewed ACME
+certificate, serves `clef-site/` on the same origin as the API so the browser
+never makes a cross-origin request, injects the token into every proxied
+request, and replaces `X-Forwarded-For` with the address it actually saw — a
+client cannot forge its way into somebody else's rate-limit budget.
+
+`scripts/bootstrap_cloud_metal.sh` provisions a cloud macOS box with that
+front end (Caddy, the site copy, the service account, the launchd daemons,
+and a validated config). `deploy/README.md` is the operator's notes — TLS,
+token rotation, rate-limit checks, troubleshooting.
+
+### The guard's access control
+
+Two independent layers, both **off by default**, so a local run and the
+benchmark harnesses behave exactly as they did before:
+
+| Flag | Effect |
+|---|---|
+| `--auth-token-file PATH` | Every route except `/health` needs `Authorization: Bearer <token>`. Compared in constant time over SHA-256 digests. |
+| `--rate-limit-rpm N` | `N` requests per client per minute over a sliding window — `N` in *any* sixty-second span, not `N` per clock minute. `0` disables the limit. |
+| `--trust-proxy` | Take the client identity from the **right-most** `X-Forwarded-For` entry instead of the socket peer. |
+| `--host` | The interface to bind. A routable address requires a token. |
+
+The env equivalents are `ZCODE_GUARD_TOKEN`, `ZCODE_GUARD_TOKEN_FILE` and
+`ZCODE_GUARD_RATE_LIMIT_RPM`. The token is read from a file rather than the
+command line because the command line is world-readable through `ps`.
+
+`python3 evals/access_control.py` proves all of this against a live guard: it
+starts one and checks the authentication matrix, that the rate limit holds,
+that a forged `X-Forwarded-For` cannot buy extra budget, and that a routable
+bind without a token refuses to start.
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).

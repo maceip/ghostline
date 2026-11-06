@@ -22,6 +22,24 @@ The guard and the upstream both listen on loopback only. **Caddy is the only
 thing the internet can reach**, and it is the only thing that holds the token
 in a request.
 
+### How Caddy is started
+
+Caddy is installed with `brew install caddy` and run by a **system launchd
+daemon**, `/Library/LaunchDaemons/com.zcode.caddy.plist`:
+
+```
+/opt/homebrew/bin/caddy run --config /opt/zcode/caddy/Caddyfile \
+                            --envfile /opt/zcode/caddy/caddy.env
+```
+
+It runs as `root` because it has to bind ports 80 and 443, which are
+privileged on macOS.  Its own launchd daemon — rather than
+`brew services start caddy` — is what makes the `--envfile` flag possible:
+Homebrew's generated service plist has no such flag, so it could not load
+the canonical `caddy.env` that holds the token.  If you prefer to manage
+Caddy through Homebrew, stop the daemon first (`sudo launchctl bootout
+system/com.zcode.caddy`) or the two will fight over the ports.
+
 ### The request path
 
 ```
@@ -230,7 +248,7 @@ if the token is missing or wrong.
 |---|---|
 | `/var/log/zcode/caddy.log` | Caddy's own log: startup, ACME, certificate renewals. |
 | `/var/log/zcode/caddy.err.log` | Caddy's stderr. |
-| `/var/log/zcode/caddy-access.log` | One JSON line per request (the `log` block in the Caddyfile). |
+| `/var/log/zcode/caddy-access.log` | One JSON line per request (the `log` block in the Caddyfile). The `Authorization` header is logged as `REDACTED`, so the token never lands in the log. |
 | `/var/log/zcode/guard.log` | The guard's structured log (`RUST_LOG=info`). |
 | `/var/log/zcode/guard.err.log` | The guard's stderr. |
 | `/var/log/zcode/upstream.log` | The `mlx_lm.server` output. |

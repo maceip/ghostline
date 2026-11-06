@@ -5327,21 +5327,40 @@ fn main() -> Result<()> {
     // Access control: the bearer token and the rate limit, both opt-in.
     // ---------------------------------------------------------------------
     let auth_token = resolve_auth_token(args.auth_token.as_ref(), args.auth_token_file.as_ref())?;
-    let rate_limit_rpm = args.rate_limit_rpm.or_else(|| {
+    let configured_rate_limit = args.rate_limit_rpm.or_else(|| {
         std::env::var("ZCODE_GUARD_RATE_LIMIT_RPM")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
     });
+    // Zero is the documented way to say "no ceiling". It is dropped here so
+    // that no limiter is built at all, rather than one built with a ceiling
+    // of a single request a minute.
+    let rate_limit_rpm = match configured_rate_limit {
+        Some(0) => {
+            tracing::warn!("--rate-limit-rpm 0 — rate limiting is DISABLED");
+            None
+        }
+        other => other,
+    };
 
     // The safety rail. A routable bind without a token would put an open
     // inference proxy on the network, so the guard refuses to start.
-    if !is_loopback_host(&args.host) && auth_token.is_none() {
-        anyhow::bail!(
-            "refusing to bind {}: a non-loopback address needs a bearer token \
-             (--auth-token, --auth-token-file or ZCODE_GUARD_TOKEN). \
-             An unauthenticated guard is an open inference proxy.",
-            args.host
-        );
+    if !is_loopback_host(&args.host) {
+        if auth_token.is_none() {
+            anyhow::bail!(
+                "refusing to bind {}: a non-loopback address needs a bearer token \
+                 (--auth-token, --auth-token-file or ZCODE_GUARD_TOKEN). \
+                 An unauthenticated guard is an open inference proxy.",
+                args.host
+            );
+        }
+        if rate_limit_rpm.is_none() {
+            tracing::warn!(
+                "the guard is bound to {} with NO rate limit — every client can \
+                 spend the model's time. Set --rate-limit-rpm.",
+                args.host
+            );
+        }
     }
 
     let access = AccessConfig {
