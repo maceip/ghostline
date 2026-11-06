@@ -39,6 +39,13 @@ done
 say() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 
 say "1. generator sync"
+# Install the versioned pre-commit hook on first run. `core.hooksPath` lives
+# in .git/config, which is not versioned, so a fresh clone has to be told
+# once — this does it.
+if [ "$(git config core.hooksPath || true)" != ".githooks" ]; then
+  git config core.hooksPath .githooks
+  echo "installed the pre-commit hook (core.hooksPath=.githooks)"
+fi
 if ! python3 repe-compose.py --check; then
   echo "The generator is out of sync with repe-mods/." >&2
   echo "Run:  python3 repe-compose.py && bash upgrade_generic_viz.sh" >&2
