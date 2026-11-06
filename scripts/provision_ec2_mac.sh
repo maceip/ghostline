@@ -53,6 +53,12 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 INSTANCE_TYPE="${ZCODE_INSTANCE_TYPE:-mac2-m2.metal}"
 REGION="${ZCODE_AWS_REGION:-us-east-1}"
+# Whether the operator pinned the region.  If they did not, the script is
+# free to move to one that actually has the quota.
+REGION_EXPLICIT=0
+if [ -n "${ZCODE_AWS_REGION:-}" ]; then
+    REGION_EXPLICIT=1
+fi
 AZ=""
 AMI=""
 MACOS_VERSION="${ZCODE_MACOS_VERSION:-26}"
@@ -124,7 +130,7 @@ USAGE
 while [ $# -gt 0 ]; do
     case "$1" in
         --instance-type)    INSTANCE_TYPE="$2"; shift 2 ;;
-        --region)           REGION="$2"; shift 2 ;;
+        --region)           REGION="$2"; REGION_EXPLICIT=1; shift 2 ;;
         --az)               AZ="$2"; shift 2 ;;
         --ami)              AMI="$2"; shift 2 ;;
         --macos-version)    MACOS_VERSION="$2"; shift 2 ;;
@@ -178,17 +184,28 @@ ok "$INSTANCE_TYPE  $vcpu vCPU, $((mem / 1024)) GiB, $arch"
 # ---------------------------------------------------------------------------
 log "2. the service quota"
 FAMILY="$(family_of "$INSTANCE_TYPE")"
-QUOTA_ROW="$(awsq service-quotas list-service-quotas --service-code ec2 \
-    --query "Quotas[?QuotaName=='Running Dedicated ${FAMILY} Hosts'].[QuotaCode,QuotaName,Value]" \
-    --output text 2>/dev/null | head -1)"
-if [ -z "$QUOTA_ROW" ]; then
-    die "no quota named 'Running Dedicated ${FAMILY} Hosts' in $REGION."
-fi
-QUOTA_CODE="$(printf '%s' "$QUOTA_ROW" | cut -f1)"
-QUOTA_NAME="$(printf '%s' "$QUOTA_ROW" | cut -f2)"
-QUOTA_VALUE="$(printf '%s' "$QUOTA_ROW" | cut -f3)"
 
-if [ "$QUOTA_VALUE" = "0.0" ] || [ "$QUOTA_VALUE" = "0" ]; then
+# The quota for a Mac family is PER REGION: the same account can have none
+# in one region and several in another.  So the lookup is a function, and
+# it is run again after the region moves.
+fetch_quota() {
+    QUOTA_ROW="$(awsq service-quotas list-service-quotas --service-code ec2 \
+        --query "Quotas[?QuotaName=='Running Dedicated ${FAMILY} Hosts'].[QuotaCode,QuotaName,Value]" \
+        --output text 2>/dev/null | head -1)"
+    [ -z "$QUOTA_ROW" ] && return 1
+    QUOTA_CODE="$(printf '%s' "$QUOTA_ROW" | cut -f1)"
+    QUOTA_NAME="$(printf '%s' "$QUOTA_ROW" | cut -f2)"
+    QUOTA_VALUE="$(printf '%s' "$QUOTA_ROW" | cut -f3)"
+    return 0
+}
+
+quota_is_zero() {
+    [ "$QUOTA_VALUE" = "0.0" ] || [ "$QUOTA_VALUE" = "0" ]
+}
+
+fetch_quota || die "no quota named 'Running Dedicated ${FAMILY} Hosts' in $REGION."
+
+if quota_is_zero; then
     cat >&2 <<EOF
 
     The quota "$QUOTA_NAME" ($QUOTA_CODE) is 0 in $REGION, so no Mac host can
@@ -197,6 +214,7 @@ if [ "$QUOTA_VALUE" = "0.0" ] || [ "$QUOTA_VALUE" = "0" ]; then
 
 EOF
 
+    ALT_REGION=""
     for r in $MAC_REGIONS; do
         [ "$r" = "$REGION" ] && continue
         v="$(aws --region "$r" service-quotas get-service-quota --service-code ec2 \
@@ -206,11 +224,28 @@ EOF
         esac
         if [ "$v" != "0.0" ] && [ "$v" != "0" ] && [ "$v" != "?" ]; then
             printf '      %-16s %s   <- available\n' "$r" "$v" >&2
+            [ -z "$ALT_REGION" ] && ALT_REGION="$r"
         else
             printf '      %-16s %s\n' "$r" "$v" >&2
         fi
     done
-    cat >&2 <<EOF
+
+    if [ -n "$ALT_REGION" ] && [ "$REGION_EXPLICIT" -eq 0 ]; then
+        # Nobody pinned a region, and one of them has the quota.  Move
+        # there rather than dying on the default and making the operator
+        # read this table and retype the command.
+        cat >&2 <<EOF
+
+    $REGION has no quota for $FAMILY but $ALT_REGION does, and no region
+    was pinned, so moving there.  Pass --region to choose one yourself.
+
+EOF
+        REGION="$ALT_REGION"
+        fetch_quota || die "no quota named 'Running Dedicated ${FAMILY} Hosts' in $REGION."
+        quota_is_zero && die "the quota in $REGION reads 0 after the move — rerun to see why."
+        ok "$QUOTA_NAME = $QUOTA_VALUE  ($QUOTA_CODE) in $REGION"
+    else
+        cat >&2 <<EOF
 
     If a region above shows a number above zero, use it:
 
@@ -229,12 +264,13 @@ EOF
     three checks are separate.
 
 EOF
-    if [ "$DRY_RUN" -eq 1 ]; then
-        # A dry run allocates nothing, so there is nothing to be protected
-        # from.  Carry on so the rest of the plan is visible.
-        warn "the quota is 0 in $REGION — the run below would stop here"
-    else
-        die "nothing was billed.  Use a region with quota, or raise $QUOTA_CODE."
+        if [ "$DRY_RUN" -eq 1 ]; then
+            # A dry run allocates nothing, so there is nothing to be
+            # protected from.  Carry on so the rest of the plan is visible.
+            warn "the quota is 0 in $REGION — the run below would stop here"
+        else
+            die "nothing was billed.  Use a region with quota, or raise $QUOTA_CODE."
+        fi
     fi
 else
     ok "$QUOTA_NAME = $QUOTA_VALUE  ($QUOTA_CODE)"

@@ -255,6 +255,94 @@ def main() -> int:
         "no diff" if fmt.stdout == CADDYFILE.read_text() else "caddy fmt would change it",
     )
 
+    # ------------------------------------------------------------------
+    # 1b. The DEPLOYED configuration.
+    #
+    # The rest of this file exercises the Caddyfile with values chosen to
+    # make it runnable on a laptop: a plain-HTTP address on a high port
+    # and a site root in a temp directory.  The box runs it with a bare
+    # hostname, :443 and :80, and the real paths — and those are the
+    # values that have to work, so they are checked here with the same
+    # env file the bootstrap writes.
+    #
+    # Only two paths are redirected, and they are the two a non-root
+    # machine cannot create: the access log and the ACME storage.  The
+    # bootstrap creates both with `install -d` before it validates.
+    # ------------------------------------------------------------------
+    print("\n1b. the configuration as the box will run it")
+    deployed_env = {
+        "CLEF_DOMAIN": "clef.example.com",
+        "ACME_EMAIL": "ops@example.com",
+        "GUARD_PORT": "8090",
+        "SITE_ROOT": "/opt/zcode/site",
+        "RL_TOOL_CALL_EVENTS": "10",
+        "RL_TOOL_CALL_WINDOW": "1m",
+        "RL_API_EVENTS": "60",
+        "RL_API_WINDOW": "1m",
+        "CADDY_ACCESS_LOG": str(tmp / "deployed-access.log"),
+        "CADDY_STORAGE": str(tmp / "deployed-acme"),
+    }
+    deployed_envfile = tmp / "deployed.env"
+    deployed_envfile.write_text("".join(f"{k}={v}\n" for k, v in deployed_env.items()))
+    proc = subprocess.run(
+        [caddy, "validate", "--config", str(CADDYFILE), "--envfile", str(deployed_envfile)],
+        capture_output=True,
+        text=True,
+    )
+    output = (proc.stdout + proc.stderr).strip()
+    check(
+        proc.returncode == 0 and "Valid configuration" in output,
+        "the deployed values validate: a bare hostname, :443, /opt/zcode/site",
+        output.splitlines()[-1][:110] if output else "",
+    )
+
+    # The adapted config is the thing that actually runs, so check the
+    # limits in it rather than in the source text.
+    adapted = subprocess.run(
+        [caddy, "adapt", "--config", str(CADDYFILE), "--envfile", str(deployed_envfile)],
+        capture_output=True,
+        text=True,
+    )
+    zones = {}
+    if adapted.returncode == 0:
+        def find_rate_limits(node):
+            if isinstance(node, dict):
+                if node.get("handler") == "rate_limit":
+                    zones.update(node.get("rate_limits", {}))
+                for value in node.values():
+                    find_rate_limits(value)
+            elif isinstance(node, list):
+                for value in node:
+                    find_rate_limits(value)
+        try:
+            find_rate_limits(json.loads(adapted.stdout))
+        except json.JSONDecodeError:
+            pass
+    tool_call = zones.get("tool_call", {})
+    api = zones.get("api", {})
+    check(
+        tool_call.get("max_events") == 10
+        and tool_call.get("window") == 60_000_000_000
+        and tool_call.get("match") == [{"path": ["/v1/*"]}]
+        and tool_call.get("key") == "{http.request.remote.host}",
+        "the tool-call zone is /v1/* at 10 a minute, keyed by client IP",
+        json.dumps(tool_call),
+    )
+    check(
+        api.get("max_events") == 60
+        and api.get("window") == 60_000_000_000
+        and api.get("match") == [{"path": ["/api/*"]}]
+        and api.get("key") == "{http.request.remote.host}",
+        "the api zone is /api/* at 60 a minute, keyed by client IP",
+        json.dumps(api),
+    )
+    check(
+        "/health" not in json.dumps(api.get("match", []))
+        and "/health" not in json.dumps(tool_call.get("match", [])),
+        "the liveness probe is in no zone, so it is never throttled",
+        "/health is proxied but unthrottled",
+    )
+
     print("\n2. the edge, running the shipped configuration")
     caddy_proc = subprocess.Popen(
         [caddy, "run", "--config", str(CADDYFILE), "--envfile", str(envfile)],

@@ -382,7 +382,6 @@ log "3. layout"
 if [ "$DRY_RUN" -eq 1 ]; then
     plan "create the service account $SERVICE_USER (uid $SERVICE_UID, home $SERVICE_HOME)"
     plan "install -d $OPT_ROOT $SITE_ROOT $CADDY_DIR $MODEL_ROOT $SERVICE_HOME $LOG_DIR $ACME_STORAGE"
-    plan "install the token at $TOKEN_FILE (owner $SERVICE_USER, mode 0640)"
 else
     if dscl . -read "/Users/$SERVICE_USER" RecordName >/dev/null 2>&1; then
         ok "the service account $SERVICE_USER already exists"
@@ -940,7 +939,7 @@ cat <<SUMMARY
 
     FILES
       Caddy config      ${CADDY_CONFIG}
-      Caddy environment ${CADDY_ENV}        (holds the token; mode 0640)
+      Caddy environment ${CADDY_ENV}        (no token in it, on purpose; mode 0640)
       guard token       ${TOKEN_FILE}   (mode 0640, owner ${SERVICE_USER})
       session secret    ${SESSION_SECRET_FILE}   (mode 0640, owner ${SERVICE_USER})
       static site       ${SITE_ROOT}
@@ -967,11 +966,16 @@ cat <<SUMMARY
                                        -H 'Content-Type: application/json' -d '{}'; done
 
     BEFORE YOU OPEN THIS TO THE PUBLIC
-      The deployment MUST rate limit at Caddy, keyed by client IP.  Stock
-      Caddy has no rate_limit module, so build one:
-          xcaddy build --with github.com/mholt/caddy-ratelimit \\
-                       --output /opt/zcode/bin/caddy
-      then point the ${CADDY_LABEL} daemon at it and add the zone config.
+      The deployment MUST rate limit at Caddy, keyed by client IP.  That
+      is already done: this script builds a Caddy with the rate_limit
+      module into ${CADDY_BIN}, the shipped Caddyfile carries the zones,
+      and the daemon runs that binary.  The limits live in ${CADDY_ENV}:
+          RL_TOOL_CALL_EVENTS  requests a minute on /v1/*  (default 10)
+          RL_API_EVENTS        requests a minute on /api/*  (default 60)
+      The static site and /health are in neither zone, so a visitor is
+      never throttled for loading a page.
+      Check it is live with:
+          sudo ${CADDY_BIN} list-modules | grep rate_limit
       Full instructions: deploy/README.md —
       "Rate limiting belongs at THIS layer, keyed by IP".
 SUMMARY

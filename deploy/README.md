@@ -439,11 +439,19 @@ HTTP backend, and asserts that:
 2. a **stock** Caddy *refuses* the same file, so a mis-provisioned box
    fails loudly instead of serving unprotected;
 3. the file is `caddy fmt` clean;
-4. a client that sends its own `X-Forwarded-For` has it **replaced** with
+4. **the configuration as the box will run it validates** — a bare
+   hostname, `:443`, `/opt/zcode/site` — and the *adapted* config (the
+   thing that actually runs) really carries the two zones with the
+   documented limits, keyed by client IP, with `/health` in neither;
+5. a client that sends its own `X-Forwarded-For` has it **replaced** with
    the address Caddy saw, so it cannot choose its own bucket;
-5. the limit sheds load **before** the backend — the refused requests never
+6. the limit sheds load **before** the backend — the refused requests never
    arrive, and the `429` carries a `Retry-After`;
-6. the static site and `/health` are in no zone and are never throttled.
+7. the static site and `/health` are in no zone and are never throttled.
+
+Check 4 is the one that matters for the box: everything else in this list
+runs the config with values chosen to make it runnable on a laptop, while
+check 4 uses the exact env file `bootstrap_cloud_metal.sh` writes.
 
 The same script runs in CI, so a Caddyfile that would refuse to start on the
 box cannot be committed.
