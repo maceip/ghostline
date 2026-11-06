@@ -71,6 +71,24 @@ jobs:
           EOF
           cd /tmp/access_test && cargo test --quiet
 
+      # The session module is the same story: the HMAC signing, the device
+      # binding and the replay refusals are all pure logic, and a silent
+      # regression there would be invisible until it was deployed.
+      - name: session module tests
+        run: |
+          mkdir -p /tmp/session_test/src
+          cp repe-mods/src/session.rs /tmp/session_test/src/lib.rs
+          cat > /tmp/session_test/Cargo.toml <<'EOF'
+          [package]
+          name = "session_test"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          ring = "0.17"
+          EOF
+          cd /tmp/session_test && cargo test --quiet
+
       # The Python extractor's LSE pooling must agree with the Rust one to
       # within float32 round-off. The reference implementation recomputes the
       # statistic independently and compares.
@@ -79,4 +97,4 @@ jobs:
 
       - name: evaluation scripts parse
         run: |
-          python3 -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ['evals/canonical_40.py','evals/real_upstream_20.py','evals/access_control.py']]; print('eval scripts parse')"
+          python3 -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ['evals/canonical_40.py','evals/real_upstream_20.py','evals/access_control.py','evals/session_guard.py']]; print('eval scripts parse')"

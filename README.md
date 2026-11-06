@@ -499,19 +499,62 @@ benchmark harnesses behave exactly as they did before:
 
 | Flag | Effect |
 |---|---|
-| `--auth-token-file PATH` | Every route except `/health` needs `Authorization: Bearer <token>`. Compared in constant time over SHA-256 digests. |
+| `--auth-token-file PATH` | The operator's bearer token. Opens every route. |
 | `--rate-limit-rpm N` | `N` requests per client per minute over a sliding window — `N` in *any* sixty-second span, not `N` per clock minute. `0` disables the limit. |
 | `--trust-proxy` | Take the client identity from the **right-most** `X-Forwarded-For` entry instead of the socket peer. |
 | `--host` | The interface to bind. A routable address requires a token. |
+| `--session-ttl-secs N` | How long a device-bound session lives. One hour by default. |
+| `--no-sessions` | Refuse to mint sessions: the bearer token becomes the only way in. |
+| `--session-secret-file PATH` | The HMAC key that signs the session cookies. A random one is generated per process when absent, which ends every session on restart. |
 
-The env equivalents are `ZCODE_GUARD_TOKEN`, `ZCODE_GUARD_TOKEN_FILE` and
-`ZCODE_GUARD_RATE_LIMIT_RPM`. The token is read from a file rather than the
-command line because the command line is world-readable through `ps`.
+The env equivalents are `ZCODE_GUARD_TOKEN`, `ZCODE_GUARD_TOKEN_FILE`,
+`ZCODE_GUARD_RATE_LIMIT_RPM` and `ZCODE_SESSION_SECRET_FILE`.
 
-`python3 evals/access_control.py` proves all of this against a live guard: it
-starts one and checks the authentication matrix, that the rate limit holds,
-that a forged `X-Forwarded-For` cannot buy extra budget, and that a routable
-bind without a token refuses to start.
+### Device-bound sessions
+
+A visitor of the public demo is admitted by a **session**, not by an
+account. There is no sign-in, no email, and nothing about the visitor is
+kept.
+
+1. The page asks the guard for one: `POST /api/session`.
+2. The guard answers `200` and sets two `HttpOnly` cookies — `zcode_sid`
+   (the session, carrying its own claims — id, device hash, issue time and
+   expiry — under an HMAC over a server secret) and `zcode_dev` (a random
+   value binding the session to this browser).
+3. The browser sends both on every later request. The guard checks that the
+   pair belongs together and that the user-agent matches the one the
+   session was minted with.
+4. The session expires by itself. The site notices the `401`, mints a new
+   one and carries on.
+
+**The session is stateless.** The cookie carries everything the guard needs
+to check it, so the guard keeps no session table, a restart does not end
+every session, and a session minted before a deploy still works after it.
+What survives a restart is the *secret*: with `--session-secret-file` the
+secret is stable, and without it a random one is generated per process, so
+every session ends when the process does. Rotating the secret is how every
+session is ended at once.
+
+**What it defends against:** a session cookie copied into another browser on
+its own, a cookie edited to point at somebody else's session, and a client
+that never went through the admission step at all. **What it does not:**
+an attacker holding both cookies with the same user-agent. It is an
+admission step and an accounting mechanism, not an identity system.
+
+**Caddy deliberately injects no token.** If the proxy added the operator's
+token to every request, the guard could not tell a visitor from the
+operator and the session gate would be decorative. The operator's token
+stays on the box, for direct clients; the public path carries a session.
+
+`python3 evals/session_guard.py` proves all of this against a live guard:
+admission, device binding, forgery, the operator's token, `--no-sessions`,
+that a session survives a restart when the secret is stable and dies when it
+rotates, and that local mode needs nothing at all.
+
+`python3 evals/access_control.py` proves the bearer token, the rate limit and
+the safety rail against a live guard: the authentication matrix, that the
+rate limit holds, that a forged `X-Forwarded-For` cannot buy extra budget,
+and that a routable bind without a token refuses to start.
 
 ## Licence
 

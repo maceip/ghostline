@@ -53,6 +53,7 @@ INSTALL_DIR="${ZCODE_DIR:-$OPT_ROOT/zune-code}"
 SITE_ROOT="${ZCODE_SITE_ROOT:-$OPT_ROOT/site}"
 CADDY_DIR="${ZCODE_CADDY_DIR:-$OPT_ROOT/caddy}"
 TOKEN_FILE="${ZCODE_TOKEN_FILE:-$OPT_ROOT/guard.token}"
+SESSION_SECRET_FILE="${ZCODE_SESSION_SECRET_FILE:-$OPT_ROOT/session.secret}"
 MODEL_ROOT="${ZCODE_MODEL_ROOT:-$OPT_ROOT/models}"
 SERVICE_HOME="$OPT_ROOT/home"
 LOG_DIR="/var/log/zcode"
@@ -440,6 +441,26 @@ else
     fi
 fi
 
+# The session secret signs the device-bound session cookies.  It is a
+# DIFFERENT secret from the bearer token: rotating the token must not end
+# every visitor's session, and rotating the session secret must not lock the
+# operator out.  It is a file so the sessions survive a restart of the
+# guard — a random per-process secret would end every session each time
+# launchd restarted the daemon.
+log "6b. session secret"
+if [ -s "$SESSION_SECRET_FILE" ]; then
+    ok "reusing $SESSION_SECRET_FILE"
+else
+    if [ "$DRY_RUN" -eq 1 ]; then
+        plan "openssl rand -hex 32 > $SESSION_SECRET_FILE (owner $SERVICE_USER, mode 0640)"
+    else
+        ( umask 077; openssl rand -hex 32 > /tmp/zcode-session-secret.txt )
+        as_root install -m 0640 -o "$SERVICE_USER" -g "$SERVICE_USER" \
+            /tmp/zcode-session-secret.txt "$SESSION_SECRET_FILE"
+        ok "wrote a new session secret to $SESSION_SECRET_FILE (mode 0640)"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # 7. the static site
 # ---------------------------------------------------------------------------
@@ -491,27 +512,25 @@ CADDY_CONFIG="$CADDY_DIR/Caddyfile"
 
 if [ "$DRY_RUN" -eq 1 ]; then
     plan "write $CADDY_CONFIG (from $CADDYFILE_SRC, mode 0644)"
-    plan "write $CADDY_ENV    (CLEF_DOMAIN, GUARD_TOKEN, GUARD_PORT, SITE_ROOT, ACME_EMAIL; mode 0640)"
+    plan "write $CADDY_ENV    (CLEF_DOMAIN, GUARD_PORT, SITE_ROOT, ACME_EMAIL; mode 0640)"
     plan "caddy validate --config $CADDY_CONFIG --envfile $CADDY_ENV"
     plan "launchctl bootstrap system $LAUNCHD_DIR/$CADDY_LABEL.plist ; launchctl kickstart -k system/$CADDY_LABEL"
 else
     install -m 0644 -o "$CURRENT_USER" -g "$CURRENT_GROUP" "$CADDYFILE_SRC" /tmp/zcode-Caddyfile
     as_root install -m 0644 -o root -g wheel /tmp/zcode-Caddyfile "$CADDY_CONFIG"
 
-    # The environment the Caddy service loads.  GUARD_TOKEN is written from
-    # the token file so there is exactly one secret to rotate.
-    TOKEN_VALUE=""
-    if [ -s "$TOKEN_FILE" ]; then
-        TOKEN_VALUE="$(cat "$TOKEN_FILE")"
-    fi
-    [ -n "$TOKEN_VALUE" ] || die "the token file $TOKEN_FILE is empty — cannot configure Caddy"
-
+    # The environment the Caddy service loads.
+    #
+    # There is NO token in here on purpose.  The guard's bearer token is the
+    # operator's credential — direct clients on the box send it themselves —
+    # and the public path uses a device-bound session cookie that the guard
+    # issues.  Injecting the operator token here would make the guard unable
+    # to tell a visitor from the operator, and the session gate would be
+    # decorative.  The token file still exists; only the guard reads it.
     {
         printf '# Environment for the Caddy service.  Loaded with --envfile.\n'
-        printf '# Rotating the token means editing CLEF_GUARD_TOKEN below and\n'
-        printf '# restarting BOTH caddy and the guard.\n'
+        printf '# There is no GUARD_TOKEN here on purpose — see deploy/README.md.\n'
         printf 'CLEF_DOMAIN=%s\n' "$CLEF_DOMAIN"
-        printf 'GUARD_TOKEN=%s\n' "$TOKEN_VALUE"
         printf 'GUARD_PORT=%s\n' "$GUARD_PORT"
         printf 'SITE_ROOT=%s\n' "$SITE_ROOT"
         printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
@@ -647,6 +666,8 @@ write_guard_plist() {
 		<string>info</string>
 		<key>ZCODE_GUARD_TOKEN_FILE</key>
 		<string>$(xml_escape "$TOKEN_FILE")</string>
+		<key>ZCODE_SESSION_SECRET_FILE</key>
+		<string>$(xml_escape "$SESSION_SECRET_FILE")</string>
 		<key>ZCODE_GUARD_RATE_LIMIT_RPM</key>
 		<string>${RATE_LIMIT}</string>
 	</dict>
@@ -794,6 +815,7 @@ cat <<SUMMARY
       Caddy config      ${CADDY_CONFIG}
       Caddy environment ${CADDY_ENV}        (holds the token; mode 0640)
       guard token       ${TOKEN_FILE}   (mode 0640, owner ${SERVICE_USER})
+      session secret    ${SESSION_SECRET_FILE}   (mode 0640, owner ${SERVICE_USER})
       static site       ${SITE_ROOT}
       model             ${MODEL_DIR}
       install root      ${INSTALL_DIR}

@@ -5,6 +5,7 @@ use qwen_clef_repe_guard::enforcer_proxy::{
     default_questions, EngineInfo, EngineSpec, Enforcer, EnforcerConfig, EnforcementMode,
     PromptEncoder, ToolCallProbe,
 };
+use qwen_clef_repe_guard::session::SessionConfig;
 use qwen_clef_repe_guard::zero_shot_loader::UniversalModelRuntime;
 use std::path::PathBuf;
 
@@ -115,6 +116,35 @@ struct Args {
     /// Enable this only when a reverse proxy you control sits in front.
     #[arg(long, default_value_t = false)]
     trust_proxy: bool,
+    /// How long a device-bound session lives.
+    #[arg(long, default_value_t = 3600)]
+    session_ttl_secs: u64,
+    /// The file holding the session-signing secret.
+    ///
+    /// A random secret is generated per process when this is absent, which
+    /// means sessions do not survive a restart. Supply a stable file for a
+    /// long-lived deployment.
+    #[arg(long)]
+    session_secret_file: Option<PathBuf>,
+    /// Refuse to mint sessions.
+    ///
+    /// With this on, the bearer token is the only way in — the posture for
+    /// a private deployment.
+    #[arg(long, default_value_t = false)]
+    no_sessions: bool,
+    /// The cookie carrying the signed session id.
+    #[arg(long, default_value = "zcode_sid")]
+    session_cookie_name: String,
+    /// The cookie carrying the device binding value.
+    #[arg(long, default_value = "zcode_dev")]
+    device_cookie_name: String,
+    /// Whether the session cookies carry the `Secure` attribute.
+    ///
+    /// True by default, because the public deployment is behind TLS.
+    /// Browsers accept `Secure` cookies on `http://localhost`, so a local
+    /// run does not need to turn it off.
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    session_cookie_secure: bool,
 }
 
 fn main() -> Result<()> {
@@ -177,6 +207,32 @@ fn main() -> Result<()> {
         rate_limit_per_minute: rate_limit_rpm,
         trust_proxy: args.trust_proxy,
     };
+
+    // ---------------------------------------------------------------------
+    // Device-bound sessions.
+    //
+    // The session is the public visitor's credential: no account, no
+    // sign-in, nothing about who they is. It is bound to a device-only
+    // cookie and the user-agent, so it cannot be lifted into another
+    // browser on its own.
+    // ---------------------------------------------------------------------
+    let session_secret = resolve_session_secret(
+        args.session_secret_file.as_ref(),
+    )?;
+    let session = SessionConfig {
+        session_cookie: args.session_cookie_name.clone(),
+        device_cookie: args.device_cookie_name.clone(),
+        ttl: std::time::Duration::from_secs(args.session_ttl_secs),
+        secret: session_secret,
+        enabled: !args.no_sessions,
+        cookie_secure: args.session_cookie_secure,
+    };
+    tracing::info!(
+        enabled = session.enabled,
+        ttl_secs = session.ttl.as_secs(),
+        cookie_secure = session.cookie_secure,
+        "device-bound sessions enabled"
+    );
     if access.is_enabled() {
         tracing::info!(
             token = access.token().is_some(),
@@ -193,6 +249,7 @@ fn main() -> Result<()> {
         clamp_threshold: 0.45,
         clem_temperature: 1.0,
         access,
+        session,
     };
 
     // ---------------------------------------------------------------------
@@ -427,6 +484,34 @@ fn resolve_auth_token(
         return Ok(Some(token));
     }
     Ok(None)
+}
+
+/// Where the session-signing secret comes from, in order of precedence: the
+/// `--session-secret-file` flag, the `ZCODE_SESSION_SECRET_FILE` environment
+/// variable, then the `ZCODE_SESSION_SECRET` environment variable. With
+/// none of them a random secret is generated, which means the sessions do
+/// not survive a restart.
+fn resolve_session_secret(file: Option<&PathBuf>) -> Result<Vec<u8>> {
+    let path = file
+        .cloned()
+        .or_else(|| std::env::var("ZCODE_SESSION_SECRET_FILE").ok().map(PathBuf::from));
+    if let Some(path) = path {
+        let raw = std::fs::read_to_string(&path).with_context(|| {
+            format!("reading the session secret from {}", path.display())
+        })?;
+        let secret = raw.trim().to_string();
+        if secret.is_empty() {
+            anyhow::bail!("the session secret in {} is empty", path.display());
+        }
+        return Ok(secret.into_bytes());
+    }
+    if let Ok(secret) = std::env::var("ZCODE_SESSION_SECRET") {
+        let secret = secret.trim().to_string();
+        if !secret.is_empty() {
+            return Ok(secret.into_bytes());
+        }
+    }
+    Ok(qwen_clef_repe_guard::session::random_hex(32).into_bytes())
 }
 
 /// Whether `host` only accepts connections from this machine.

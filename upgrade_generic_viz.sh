@@ -12,6 +12,12 @@ KEEP="$(mktemp -d)"
 # rebuild resolve fresh versions, so the build would no longer be the build
 # that was measured. It is preserved like the build cache.
 [ -f "$PROJ/Cargo.lock" ] && cp "$PROJ/Cargo.lock" "$KEEP/Cargo.lock" 2>/dev/null || true
+# The parity fixtures are checked-in reference data, but they live inside the
+# project directory and the wipe below takes the whole directory with it. They
+# are regenerated deterministically by tools/joint_head_reference.py, so losing
+# them silently means every rebuild shows them as deleted in git — a change
+# nobody made and nobody meant. They are preserved like the rest.
+[ -d "$PROJ/tools/fixtures" ] && mkdir -p "$KEEP/fixtures" && cp -R "$PROJ/tools/fixtures/." "$KEEP/fixtures/" 2>/dev/null || true
 
 rm -rf "$PROJ" "${PROJ}.zip"
 mkdir -p "$PROJ/src/bin" "$PROJ/artifacts" "$PROJ/tools"
@@ -19,6 +25,7 @@ mkdir -p "$PROJ/src/bin" "$PROJ/artifacts" "$PROJ/tools"
 [ -d "$KEEP/target" ] && mv "$KEEP/target" "$PROJ/target" 2>/dev/null || true
 [ -d "$KEEP/artifacts" ] && cp -R "$KEEP/artifacts/." "$PROJ/artifacts/" 2>/dev/null || true
 [ -f "$KEEP/Cargo.lock" ] && cp "$KEEP/Cargo.lock" "$PROJ/Cargo.lock" 2>/dev/null || true
+[ -d "$KEEP/fixtures" ] && mkdir -p "$PROJ/tools/fixtures" && cp -R "$KEEP/fixtures/." "$PROJ/tools/fixtures/" 2>/dev/null || true
 rm -rf "$KEEP"
 # ------------------------------------------------------------------------------
 # 1. Cargo.toml
@@ -89,6 +96,7 @@ pub mod enforcer_proxy;
 pub mod mlx_loader;
 pub mod qwen_hook;
 pub mod repe_sensor;
+pub mod session;
 pub mod trajectory;
 pub mod whiten;
 pub mod zero_shot_loader;
@@ -3425,6 +3433,10 @@ cat << 'ENFORCER' > "$PROJ/src/enforcer_proxy.rs"
 use crate::access::{AccessConfig, AuthOutcome, RateLimiter, check_bearer, client_key};
 use crate::clef_head::{ClefDecision, ClefQuestion, ClefSchemaHead};
 use crate::mlx_loader::{QwenLoadedLayer, ShardedModelLoader};
+use crate::session::{
+    SessionConfig, SessionIssuer, SessionLookup, device_hash as compute_device_hash, parse_cookies,
+    random_hex, set_cookie, unix_now,
+};
 use crate::qwen_hook::{GuardableEngine, HookedQwenClefEngine};
 use crate::repe_sensor::{
     render_reference_tool_call_turn, render_tool_call_turn, render_user_turn, tool_call_span_prefix,
@@ -3434,10 +3446,12 @@ use crate::trajectory::ExcessTrajectory;
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::{Request, State, connect_info::ConnectInfo},
+    extract::{Extension, Request, State, connect_info::ConnectInfo},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        header::{
+            ACCEPT_LANGUAGE, AUTHORIZATION, COOKIE, SET_COOKIE, USER_AGENT, WWW_AUTHENTICATE,
+        },
     },
     middleware::{self, Next},
     response::{
@@ -3457,6 +3471,7 @@ use mlx_rs::{Array, ops::*};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::time::Instant;
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
@@ -3695,6 +3710,8 @@ pub struct EnforcerConfig {
     ///
     /// Both are off by default, so a local run is unchanged.
     pub access: AccessConfig,
+    /// Device-bound sessions for the public surface.
+    pub session: SessionConfig,
 }
 
 /// How the engine inside the worker thread should be built.
@@ -4167,6 +4184,12 @@ pub struct Enforcer {
     /// `None` when no ceiling is configured — an unlimited guard must not
     /// pay for a map it never uses.
     limiter: Option<Arc<RateLimiter>>,
+    /// The session issuer, shared by every request.
+    ///
+    /// Sessions are stateless: the cookie carries its own signed claims,
+    /// so this holds the signing secret and the revocation list, not a
+    /// table of live sessions.
+    pub sessions: Arc<SessionIssuer>,
 }
 
 impl Enforcer {
@@ -4188,6 +4211,7 @@ impl Enforcer {
             .access
             .rate_limit_per_minute
             .map(|rpm| Arc::new(RateLimiter::new(rpm)));
+        let sessions = Arc::new(SessionIssuer::new(config.session.clone()));
         std::thread::Builder::new()
             .name("mlx-engine".to_string())
             .spawn(move || {
@@ -4271,6 +4295,7 @@ impl Enforcer {
             events,
             info,
             limiter,
+            sessions,
         })
     }
 
@@ -4312,6 +4337,10 @@ impl Enforcer {
             .route("/v1/guard/tool-call", post(guard_tool_call))
             .route("/v1/chat/completions", post(proxy_chat_completions))
             .route("/api/label", post(record_label))
+            .route(
+                "/api/session",
+                get(session_status).post(session_issue),
+            )
             .route_layer(middleware::from_fn_with_state(
                 state.clone(),
                 access_guard,
@@ -4322,52 +4351,124 @@ impl Enforcer {
 
 /// The access-control layer.
 ///
-/// Authentication and rate limiting are both opt-in: with no token and no
-/// ceiling configured, the guard behaves exactly as it did before, which
-/// keeps the local workflow and the benchmark harnesses unchanged.
+/// Three things happen here, in this order:
 ///
-/// `/health` is exempt from both. It is the liveness probe the supervisor
-/// polls, and it exposes nothing but the service name.
+/// 1. **The device is identified.** A second, device-only cookie is
+///    required alongside the session cookie, and the session is bound to
+///    it together with the request's user-agent. A session cookie copied
+///    into another browser does not work on its own.
+/// 2. **The caller is admitted.** A bearer token (the operator's
+///    credential) or a live session. When no token is configured — the
+///    local case — nothing is required, so the local workflow and the
+///    benchmark harnesses behave exactly as they always have.
+/// 3. **The caller is rate limited.** The per-IP backstop. The limit that
+///    protects a public deployment lives at the edge, at Caddy, keyed by
+///    client IP.
+///
+/// `/health` is exempt from all three: it is the liveness probe the
+/// supervisor polls, and it exposes nothing but the service name.
+/// `/api/session` is exempt from the credential check — it is the
+/// admission step, so it has to be reachable by somebody who does not
+/// have a session yet.
 async fn access_guard(
     State(state): State<EnforcerState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let access = &state.enforcer.config.access;
+    let path = request.uri().path().to_string();
 
-    if request.uri().path() == "/health" {
+    if path == "/health" {
         return next.run(request).await;
     }
 
-    if let Some(expected) = access.token() {
-        let header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-        let outcome = check_bearer(header, expected);
-        if outcome != AuthOutcome::Ok {
-            warn!(
-                outcome = ?outcome,
-                path = %request.uri().path(),
-                "rejected: bearer token"
-            );
-            let body = serde_json::json!({
-                "error": "unauthorized",
-                "reason": outcome.reason(),
-            });
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(WWW_AUTHENTICATE, "Bearer")],
-                Json(body),
-            )
-                .into_response();
+    // ---------------------------------------------------------------------
+    // The device.
+    // ---------------------------------------------------------------------
+    let cookies = headers
+        .get(COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(parse_cookies)
+        .unwrap_or_default();
+    let sent_device = cookies
+        .get(&state.enforcer.config.session.device_cookie)
+        .cloned();
+    let device_cookie_is_new = sent_device.is_none();
+    let device_cookie = sent_device.unwrap_or_else(|| random_hex(32));
+    let user_agent = headers
+        .get(USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let accept_language = headers
+        .get(ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let device_hash = compute_device_hash(&device_cookie, user_agent, accept_language);
+
+    // ---------------------------------------------------------------------
+    // The session.
+    // ---------------------------------------------------------------------
+    let sent_session = cookies
+        .get(&state.enforcer.config.session.session_cookie)
+        .cloned();
+    let lookup = state
+        .enforcer
+        .sessions
+        .lookup(sent_session.as_deref(), &device_hash, unix_now());
+    let session_id = match &lookup {
+        SessionLookup::Active(claims) => Some(claims.id.clone()),
+        _ => None,
+    };
+    let session_expires_in = match &lookup {
+        SessionLookup::Active(claims) => Some(claims.expires_in_secs(unix_now())),
+        _ => None,
+    };
+
+    // ---------------------------------------------------------------------
+    // The credential.
+    // ---------------------------------------------------------------------
+    // With no token configured the guard is in its local mode: nothing is
+    // required. With a token configured — and a routable bind always has
+    // one — a caller has to present either that token or a live session.
+    let bearer_ok = match access.token() {
+        Some(expected) => {
+            let header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
+            check_bearer(header, expected) == AuthOutcome::Ok
         }
+        None => true,
+    };
+
+    if path != SESSION_ROUTE && !bearer_ok && session_id.is_none() {
+        let reason = match &lookup {
+            SessionLookup::WrongDevice => "this session belongs to another device",
+            SessionLookup::Expired => "this session has expired",
+            SessionLookup::Invalid => "this session is not valid",
+            _ => "no session",
+        };
+        warn!(path = %path, reason = %reason, "rejected: no credential");
+        let body = serde_json::json!({
+            "error": "session_required",
+            "reason": reason,
+            "hint": "POST /api/session to get one",
+        });
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(WWW_AUTHENTICATE, "Bearer")],
+            Json(body),
+        )
+            .into_response();
     }
 
+    // ---------------------------------------------------------------------
+    // The backstop rate limit.
+    // ---------------------------------------------------------------------
     let mut decision = None;
     if let Some(limiter) = state.enforcer.limiter.as_ref() {
         let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
         let key = client_key(Some(peer), forwarded, access.trust_proxy);
-        let verdict = limiter.check(&key, std::time::Instant::now());
+        let verdict = limiter.check(&key, Instant::now());
         if !verdict.allowed {
             debug!(client = %key, limit = verdict.limit, "rejected: rate limit");
             let body = serde_json::json!({
@@ -4385,7 +4486,32 @@ async fn access_guard(
         decision = Some(verdict);
     }
 
+    // ---------------------------------------------------------------------
+    // Hand the session to the handler.
+    // ---------------------------------------------------------------------
+    request.extensions_mut().insert(SessionContext {
+        session_id,
+        session_expires_in,
+        device_hash,
+        device_cookie: device_cookie.clone(),
+        device_cookie_is_new,
+        ip: client_key(Some(peer), None, false),
+    });
+
     let mut response = next.run(request).await;
+
+    if device_cookie_is_new {
+        let header = set_cookie(
+            &state.enforcer.config.session.device_cookie,
+            &device_cookie,
+            crate::session::DEVICE_COOKIE_MAX_AGE_SECS,
+            state.enforcer.config.session.cookie_secure,
+        );
+        if let Ok(value) = HeaderValue::from_str(&header) {
+            response.headers_mut().append(SET_COOKIE, value);
+        }
+    }
+
     if let Some(verdict) = decision {
         let headers = response.headers_mut();
         if let Ok(value) = HeaderValue::from_str(&verdict.limit.to_string()) {
@@ -4396,6 +4522,27 @@ async fn access_guard(
         }
     }
     response
+}
+
+/// The route that mints a session.
+const SESSION_ROUTE: &str = "/api/session";
+
+/// What the access layer worked out about the caller.
+#[derive(Clone, Debug)]
+pub struct SessionContext {
+    /// The live session id, when there is one.
+    pub session_id: Option<String>,
+    /// How many seconds the live session has left, when there is one.
+    pub session_expires_in: Option<u64>,
+    /// The device hash the session is bound to.
+    pub device_hash: String,
+    /// The device cookie value in play — the one the client sent, or the
+    /// fresh one the server just minted.
+    pub device_cookie: String,
+    /// Whether the device cookie is new and has to be sent back.
+    pub device_cookie_is_new: bool,
+    /// The client address.
+    pub ip: String,
 }
 
 #[derive(Clone)]
@@ -4910,6 +5057,71 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
+/// Report the caller's session.
+///
+/// This never fails: a caller with no session gets `active: false` rather
+/// than a 401, because the site asks this question to find out whether it
+/// needs to mint one.
+async fn session_status(
+    State(state): State<EnforcerState>,
+    Extension(context): Extension<SessionContext>,
+) -> Json<serde_json::Value> {
+    let sessions = &state.enforcer.sessions;
+    Json(serde_json::json!({
+        "active": context.session_id.is_some(),
+        "session_id": context.session_id,
+        "expires_in": context.session_expires_in,
+        "sessions_enabled": sessions.enabled(),
+        // The guard keeps no session table, so there is no count of live
+        // sessions to report — only the ones it has explicitly revoked.
+        "revoked_sessions": sessions.revoked_count(),
+        "device_bound": true,
+    }))
+}
+
+/// Mint a session for this device.
+///
+/// This is the admission step, and it is deliberately frictionless: there
+/// is no account, no sign-in and nothing about the visitor is recorded.
+/// The session is bound to the device cookie and the user-agent, so it
+/// cannot be lifted into another browser on its own.
+async fn session_issue(
+    State(state): State<EnforcerState>,
+    Extension(context): Extension<SessionContext>,
+) -> Response {
+    if !state.enforcer.sessions.enabled() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "sessions_disabled",
+                "reason": "this deployment takes the bearer token only",
+            })),
+        )
+            .into_response();
+    }
+
+    let issued = state.enforcer.sessions.issue(&context.device_hash);
+    let ttl = state.enforcer.config.session.ttl.as_secs();
+    let cookie = set_cookie(
+        &state.enforcer.config.session.session_cookie,
+        &issued.cookie_value,
+        ttl,
+        state.enforcer.config.session.cookie_secure,
+    );
+    let body = serde_json::json!({
+        "active": true,
+        "session_id": issued.claims.id,
+        "expires_in": ttl,
+        "device_bound": true,
+    });
+
+    let mut response = (StatusCode::OK, Json(body)).into_response();
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(SET_COOKIE, value);
+    }
+    response
+}
+
 /// Record one human label for an intercepted call.
 ///
 /// The label is appended to the calibration file as one JSON line. A label that
@@ -5196,6 +5408,7 @@ use qwen_clef_repe_guard::enforcer_proxy::{
     default_questions, EngineInfo, EngineSpec, Enforcer, EnforcerConfig, EnforcementMode,
     PromptEncoder, ToolCallProbe,
 };
+use qwen_clef_repe_guard::session::SessionConfig;
 use qwen_clef_repe_guard::zero_shot_loader::UniversalModelRuntime;
 use std::path::PathBuf;
 
@@ -5306,6 +5519,35 @@ struct Args {
     /// Enable this only when a reverse proxy you control sits in front.
     #[arg(long, default_value_t = false)]
     trust_proxy: bool,
+    /// How long a device-bound session lives.
+    #[arg(long, default_value_t = 3600)]
+    session_ttl_secs: u64,
+    /// The file holding the session-signing secret.
+    ///
+    /// A random secret is generated per process when this is absent, which
+    /// means sessions do not survive a restart. Supply a stable file for a
+    /// long-lived deployment.
+    #[arg(long)]
+    session_secret_file: Option<PathBuf>,
+    /// Refuse to mint sessions.
+    ///
+    /// With this on, the bearer token is the only way in — the posture for
+    /// a private deployment.
+    #[arg(long, default_value_t = false)]
+    no_sessions: bool,
+    /// The cookie carrying the signed session id.
+    #[arg(long, default_value = "zcode_sid")]
+    session_cookie_name: String,
+    /// The cookie carrying the device binding value.
+    #[arg(long, default_value = "zcode_dev")]
+    device_cookie_name: String,
+    /// Whether the session cookies carry the `Secure` attribute.
+    ///
+    /// True by default, because the public deployment is behind TLS.
+    /// Browsers accept `Secure` cookies on `http://localhost`, so a local
+    /// run does not need to turn it off.
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    session_cookie_secure: bool,
 }
 
 fn main() -> Result<()> {
@@ -5368,6 +5610,32 @@ fn main() -> Result<()> {
         rate_limit_per_minute: rate_limit_rpm,
         trust_proxy: args.trust_proxy,
     };
+
+    // ---------------------------------------------------------------------
+    // Device-bound sessions.
+    //
+    // The session is the public visitor's credential: no account, no
+    // sign-in, nothing about who they is. It is bound to a device-only
+    // cookie and the user-agent, so it cannot be lifted into another
+    // browser on its own.
+    // ---------------------------------------------------------------------
+    let session_secret = resolve_session_secret(
+        args.session_secret_file.as_ref(),
+    )?;
+    let session = SessionConfig {
+        session_cookie: args.session_cookie_name.clone(),
+        device_cookie: args.device_cookie_name.clone(),
+        ttl: std::time::Duration::from_secs(args.session_ttl_secs),
+        secret: session_secret,
+        enabled: !args.no_sessions,
+        cookie_secure: args.session_cookie_secure,
+    };
+    tracing::info!(
+        enabled = session.enabled,
+        ttl_secs = session.ttl.as_secs(),
+        cookie_secure = session.cookie_secure,
+        "device-bound sessions enabled"
+    );
     if access.is_enabled() {
         tracing::info!(
             token = access.token().is_some(),
@@ -5384,6 +5652,7 @@ fn main() -> Result<()> {
         clamp_threshold: 0.45,
         clem_temperature: 1.0,
         access,
+        session,
     };
 
     // ---------------------------------------------------------------------
@@ -5618,6 +5887,34 @@ fn resolve_auth_token(
         return Ok(Some(token));
     }
     Ok(None)
+}
+
+/// Where the session-signing secret comes from, in order of precedence: the
+/// `--session-secret-file` flag, the `ZCODE_SESSION_SECRET_FILE` environment
+/// variable, then the `ZCODE_SESSION_SECRET` environment variable. With
+/// none of them a random secret is generated, which means the sessions do
+/// not survive a restart.
+fn resolve_session_secret(file: Option<&PathBuf>) -> Result<Vec<u8>> {
+    let path = file
+        .cloned()
+        .or_else(|| std::env::var("ZCODE_SESSION_SECRET_FILE").ok().map(PathBuf::from));
+    if let Some(path) = path {
+        let raw = std::fs::read_to_string(&path).with_context(|| {
+            format!("reading the session secret from {}", path.display())
+        })?;
+        let secret = raw.trim().to_string();
+        if secret.is_empty() {
+            anyhow::bail!("the session secret in {} is empty", path.display());
+        }
+        return Ok(secret.into_bytes());
+    }
+    if let Ok(secret) = std::env::var("ZCODE_SESSION_SECRET") {
+        let secret = secret.trim().to_string();
+        if !secret.is_empty() {
+            return Ok(secret.into_bytes());
+        }
+    }
+    Ok(qwen_clef_repe_guard::session::random_hex(32).into_bytes())
 }
 
 /// Whether `host` only accepts connections from this machine.
@@ -19004,6 +19301,651 @@ mod tests {
     }
 }
 ACCESS
+
+# ------------------------------------------------------------------------------
+# 39. src/session.rs
+# ------------------------------------------------------------------------------
+cat << 'SESSION' > "$PROJ/src/session.rs"
+//! Device-bound sessions for the guard's public surface.
+//!
+//! A session here is **not an identity**. Nobody signs in, there is no
+//! account, no email and no personal data — the guard learns nothing about
+//! who the visitor is. A session is a server-issued capability that says
+//! "this device was admitted to the demo", and it is bound to the device in
+//! two ways:
+//!
+//! * the cookie carries the device hash and is signed with an HMAC over a
+//!   server secret, so it cannot be forged, edited, or pointed at
+//!   somebody else's session;
+//! * the device hash mixes a second, device-only cookie with the
+//!   request's user-agent, so a session cookie copied into another browser
+//!   does not work on its own — the pair has to travel together, from the
+//!   same browser.
+//!
+//! The session is **stateless**. The cookie carries its own claims
+//! (id, device hash, issue time, expiry) and the signature over them, so
+//! the guard keeps no session table and a restart does not end every
+//! session. Revocation is therefore coarse: rotating the signing secret
+//! ends every session at once, and `SessionIssuer::revoke` ends one.
+//!
+//! What this defends against: a shared or replayed cookie, a session
+//! aimed at another visitor's record, and a client that never went through
+//! the admission step at all.
+//!
+//! What this does **not** defend against: an attacker who holds both
+//! cookies and presents the same user-agent, or an attacker who drives a
+//! real browser themselves. It is an admission step and an accounting
+//! mechanism, not an identity system.
+//!
+//! The rate limiting that protects a public deployment lives at the edge —
+//! at Caddy, keyed by client IP. See `deploy/README.md`.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use ring::hmac;
+use ring::rand::{SecureRandom, SystemRandom};
+
+/// The cookie that carries the signed session.
+pub const DEFAULT_SESSION_COOKIE: &str = "zcode_sid";
+
+/// The cookie that carries the device binding value.
+pub const DEFAULT_DEVICE_COOKIE: &str = "zcode_dev";
+
+/// How long a device cookie lives. Long on purpose: it is the device
+/// half of the binding, and it is not a credential by itself.
+pub const DEVICE_COOKIE_MAX_AGE_SECS: u64 = 60 * 60 * 24 * 365;
+
+/// How the session machinery is configured.
+#[derive(Debug, Clone)]
+pub struct SessionConfig {
+    /// The cookie carrying the signed session.
+    pub session_cookie: String,
+    /// The cookie carrying the device binding value.
+    pub device_cookie: String,
+    /// How long a session lives.
+    pub ttl: Duration,
+    /// The HMAC key. Sessions only survive a restart when this is stable,
+    /// which is why it can be supplied from a file.
+    pub secret: Vec<u8>,
+    /// Whether sessions can be minted at all. When this is off, the
+    /// bearer token is the only way in — which is the private-deployment
+    /// posture.
+    pub enabled: bool,
+    /// Whether the cookies carry the `Secure` attribute.
+    ///
+    /// True by default: the public deployment is behind TLS. Browsers
+    /// accept `Secure` cookies on `http://localhost`, so a local run does
+    /// not need to turn it off.
+    pub cookie_secure: bool,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            session_cookie: DEFAULT_SESSION_COOKIE.to_string(),
+            device_cookie: DEFAULT_DEVICE_COOKIE.to_string(),
+            ttl: Duration::from_secs(3600),
+            secret: random_bytes(32),
+            enabled: true,
+            cookie_secure: true,
+        }
+    }
+}
+
+/// What a session cookie says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionClaims {
+    /// A random id. It identifies the session; it is not a secret on its
+    /// own.
+    pub id: String,
+    /// The device hash this session is bound to.
+    pub device_hash: String,
+    /// When the session was minted, in Unix seconds.
+    pub issued_at: u64,
+    /// When the session expires, in Unix seconds.
+    pub expires_at: u64,
+}
+
+impl SessionClaims {
+    /// How many seconds are left, as of `now`.
+    pub fn expires_in_secs(&self, now: u64) -> u64 {
+        self.expires_at.saturating_sub(now)
+    }
+}
+
+/// The outcome of resolving a session cookie.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionLookup {
+    /// The session is live and the device matches.
+    Active(SessionClaims),
+    /// No session cookie was presented.
+    Missing,
+    /// The cookie was malformed, the signature did not match, or the
+    /// session was revoked.
+    Invalid,
+    /// The signature was good but the device does not match — the cookie
+    /// was replayed into a different browser.
+    WrongDevice,
+    /// The session was real but has expired.
+    Expired,
+}
+
+/// A freshly minted session, ready to be handed to the client.
+#[derive(Debug, Clone)]
+pub struct IssuedSession {
+    /// The claims the cookie carries.
+    pub claims: SessionClaims,
+    /// The signed cookie value.
+    pub cookie_value: String,
+}
+
+/// Mints and verifies sessions.
+///
+/// The session table is only a list of revoked ids — the sessions
+/// themselves live in their own signed cookies.
+#[derive(Debug)]
+pub struct SessionIssuer {
+    config: SessionConfig,
+    revoked: Mutex<HashSet<String>>,
+}
+
+impl SessionIssuer {
+    /// An issuer with the given configuration.
+    pub fn new(config: SessionConfig) -> Self {
+        Self {
+            config,
+            revoked: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// The configuration in force.
+    pub fn config(&self) -> &SessionConfig {
+        &self.config
+    }
+
+    /// Whether sessions can be minted.
+    pub fn enabled(&self) -> bool {
+        self.config.enabled
+    }
+
+    /// Mint a session bound to `device_hash`.
+    pub fn issue(&self, device_hash: &str) -> IssuedSession {
+        let now = unix_now();
+        let claims = SessionClaims {
+            id: random_hex(16),
+            device_hash: device_hash.to_string(),
+            issued_at: now,
+            expires_at: now + self.config.ttl.as_secs(),
+        };
+        let cookie_value = format!(
+            "{}.{}.{}.{}.{}",
+            claims.id,
+            claims.device_hash,
+            claims.issued_at,
+            claims.expires_at,
+            sign(&self.config.secret, &claims)
+        );
+        IssuedSession {
+            claims,
+            cookie_value,
+        }
+    }
+
+    /// Resolve a session cookie against the device that presented it.
+    pub fn lookup(
+        &self,
+        cookie_value: Option<&str>,
+        device_hash: &str,
+        now: u64,
+    ) -> SessionLookup {
+        let Some(raw) = cookie_value else {
+            return SessionLookup::Missing;
+        };
+        let parts: Vec<&str> = raw.split('.').collect();
+        if parts.len() != 5 {
+            return SessionLookup::Invalid;
+        }
+        let (id, stored_hash, issued_at, expires_at, signature) =
+            (parts[0], parts[1], parts[2], parts[3], parts[4]);
+
+        let (Ok(issued_at), Ok(expires_at)) =
+            (issued_at.parse::<u64>(), expires_at.parse::<u64>())
+        else {
+            return SessionLookup::Invalid;
+        };
+        if id.is_empty() || stored_hash.is_empty() {
+            return SessionLookup::Invalid;
+        }
+
+        let claims = SessionClaims {
+            id: id.to_string(),
+            device_hash: stored_hash.to_string(),
+            issued_at,
+            expires_at,
+        };
+
+        // The signature covers the device hash, so a cookie minted for one
+        // device cannot be re-pointed at another. Verify it against the
+        // hash the cookie carries, then compare that hash with the one
+        // recomputed from this request — that way a genuine cookie used on
+        // the wrong browser is reported as such rather than as forged.
+        if !verify(&self.config.secret, &claims, signature) {
+            return SessionLookup::Invalid;
+        }
+        if self.is_revoked(id) {
+            return SessionLookup::Invalid;
+        }
+        if claims.expires_at <= now {
+            return SessionLookup::Expired;
+        }
+        if claims.device_hash != device_hash {
+            return SessionLookup::WrongDevice;
+        }
+        SessionLookup::Active(claims)
+    }
+
+    /// End one session.
+    pub fn revoke(&self, id: &str) {
+        let mut revoked = self.revoked.lock().unwrap_or_else(|e| e.into_inner());
+        revoked.insert(id.to_string());
+    }
+
+    /// How many sessions have been revoked.
+    pub fn revoked_count(&self) -> usize {
+        self.revoked.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Whether a session id has been revoked.
+    fn is_revoked(&self, id: &str) -> bool {
+        self.revoked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(id)
+    }
+}
+
+/// The hash that ties a session to a device.
+///
+/// It mixes the device cookie with the request's user-agent and
+/// accept-language. The device cookie is the server's own random value,
+/// so two browsers on the same machine still get different bindings; the
+/// user-agent means the same cookie replayed from a different client does
+/// not line up either.
+pub fn device_hash(device_cookie: &str, user_agent: &str, accept_language: &str) -> String {
+    let mut buf =
+        Vec::with_capacity(device_cookie.len() + user_agent.len() + accept_language.len() + 2);
+    buf.extend_from_slice(device_cookie.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(user_agent.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(accept_language.as_bytes());
+    hex(&sha256(&buf))
+}
+
+/// Sign a set of claims.
+fn sign(secret: &[u8], claims: &SessionClaims) -> String {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
+    hex(hmac::sign(&key, &claims_bytes(claims)).as_ref())
+}
+
+/// Check a signature over a set of claims.
+fn verify(secret: &[u8], claims: &SessionClaims, signature: &str) -> bool {
+    let Some(signature) = hex_decode(signature) else {
+        return false;
+    };
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
+    hmac::verify(&key, &claims_bytes(claims), &signature).is_ok()
+}
+
+/// The bytes the signature covers.
+fn claims_bytes(claims: &SessionClaims) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(claims.id.len() + claims.device_hash.len() + 32);
+    buf.extend_from_slice(claims.id.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(claims.device_hash.as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(claims.issued_at.to_string().as_bytes());
+    buf.push(0);
+    buf.extend_from_slice(claims.expires_at.to_string().as_bytes());
+    buf
+}
+
+/// The current time in Unix seconds.
+pub fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A SHA-256 digest.
+fn sha256(data: &[u8]) -> Vec<u8> {
+    ring::digest::digest(&ring::digest::SHA256, data).as_ref().to_vec()
+}
+
+/// Cryptographically random bytes.
+fn random_bytes(n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    let rng = SystemRandom::new();
+    // `SystemRandom::fill` only fails if the OS RNG is broken, in which
+    // case there is nothing sensible to do but refuse to continue.
+    rng.fill(&mut buf).expect("the OS random number generator failed");
+    buf
+}
+
+/// Random bytes as lowercase hex.
+pub fn random_hex(n_bytes: usize) -> String {
+    hex(&random_bytes(n_bytes))
+}
+
+/// Lowercase hex.
+pub fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Decode lowercase or uppercase hex.
+pub fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(text.len() / 2);
+    for pair in bytes.chunks(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Some(out)
+}
+
+/// Parse a `Cookie` header into its name/value pairs.
+///
+/// A tiny hand-rolled parser: the header is a flat list of `name=value`
+/// pairs separated by `;`, and adding a dependency for it would be
+/// silly.
+pub fn parse_cookies(header: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for part in header.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = part.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        out.insert(name.to_string(), value.trim().to_string());
+    }
+    out
+}
+
+/// Build a `Set-Cookie` header value.
+pub fn set_cookie(name: &str, value: &str, max_age_secs: u64, secure: bool) -> String {
+    let mut out =
+        format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age_secs}");
+    if secure {
+        out.push_str("; Secure");
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issuer() -> SessionIssuer {
+        SessionIssuer::new(SessionConfig {
+            secret: b"a-test-secret-that-is-long-enough".to_vec(),
+            ..SessionConfig::default()
+        })
+    }
+
+    #[test]
+    fn a_minted_session_resolves_for_its_own_device() {
+        let issuer = issuer();
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let issued = issuer.issue(&hash);
+        match issuer.lookup(Some(&issued.cookie_value), &hash, unix_now()) {
+            SessionLookup::Active(claims) => {
+                assert_eq!(claims.id, issued.claims.id);
+                assert_eq!(claims.device_hash, hash);
+            }
+            other => panic!("expected an active session, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_session_replayed_into_another_device_is_refused() {
+        let issuer = issuer();
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let issued = issuer.issue(&hash);
+        let other = device_hash("dev-2", "Mozilla/5.0", "en");
+        assert_eq!(
+            issuer.lookup(Some(&issued.cookie_value), &other, unix_now()),
+            SessionLookup::WrongDevice
+        );
+    }
+
+    #[test]
+    fn a_session_replayed_with_another_user_agent_is_refused() {
+        let issuer = issuer();
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let issued = issuer.issue(&hash);
+        let other = device_hash("dev-1", "curl/8.0", "en");
+        assert_eq!(
+            issuer.lookup(Some(&issued.cookie_value), &other, unix_now()),
+            SessionLookup::WrongDevice
+        );
+    }
+
+    #[test]
+    fn a_forged_cookie_is_refused() {
+        let issuer = issuer();
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let forged = format!("{}.{}.{}.{}.{}", "a".repeat(32), hash, 0, 0, "00".repeat(32));
+        assert_eq!(
+            issuer.lookup(Some(&forged), &hash, unix_now()),
+            SessionLookup::Invalid
+        );
+        // A real session id with a mangled signature.
+        let issued = issuer.issue(&hash);
+        let mangled = issued
+            .cookie_value
+            .split('.')
+            .enumerate()
+            .map(|(i, part)| {
+                if i == 4 {
+                    "ff".repeat(32)
+                } else {
+                    part.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(".");
+        assert_eq!(
+            issuer.lookup(Some(&mangled), &hash, unix_now()),
+            SessionLookup::Invalid
+        );
+        assert_eq!(
+            issuer.lookup(Some("not-a-cookie"), &hash, unix_now()),
+            SessionLookup::Invalid
+        );
+        assert_eq!(
+            issuer.lookup(None, &hash, unix_now()),
+            SessionLookup::Missing
+        );
+    }
+
+    #[test]
+    fn a_signature_does_not_transfer_to_another_session_id() {
+        let issuer = issuer();
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let first = issuer.issue(&hash);
+        let second = issuer.issue(&hash);
+        let parts: Vec<&str> = first.cookie_value.split('.').collect();
+        let swapped = format!(
+            "{}.{}.{}.{}.{}",
+            second.claims.id, parts[1], parts[2], parts[3], parts[4]
+        );
+        assert_eq!(
+            issuer.lookup(Some(&swapped), &hash, unix_now()),
+            SessionLookup::Invalid
+        );
+    }
+
+    #[test]
+    fn a_signature_does_not_transfer_to_another_device_hash() {
+        let issuer = issuer();
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let other = device_hash("dev-2", "Mozilla/5.0", "en");
+        let issued = issuer.issue(&hash);
+        let parts: Vec<&str> = issued.cookie_value.split('.').collect();
+        let swapped = format!(
+            "{}.{}.{}.{}.{}",
+            parts[0], other, parts[2], parts[3], parts[4]
+        );
+        assert_eq!(
+            issuer.lookup(Some(&swapped), &other, unix_now()),
+            SessionLookup::Invalid
+        );
+    }
+
+    #[test]
+    fn an_expired_session_is_refused() {
+        let issuer = issuer();
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let issued = issuer.issue(&hash);
+        let later = issued.claims.expires_at + 1;
+        assert_eq!(
+            issuer.lookup(Some(&issued.cookie_value), &hash, later),
+            SessionLookup::Expired
+        );
+    }
+
+    #[test]
+    fn a_revoked_session_is_refused() {
+        let issuer = issuer();
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let issued = issuer.issue(&hash);
+        issuer.revoke(&issued.claims.id);
+        assert_eq!(
+            issuer.lookup(Some(&issued.cookie_value), &hash, unix_now()),
+            SessionLookup::Invalid
+        );
+        assert_eq!(issuer.revoked_count(), 1);
+    }
+
+    #[test]
+    fn a_session_survives_a_restart_when_the_secret_is_stable() {
+        // Two issuers with the same secret are what a restart looks like:
+        // the second knows nothing about the first's sessions, so the
+        // session has to be self-describing.
+        let config = SessionConfig {
+            secret: b"stable".to_vec(),
+            ..SessionConfig::default()
+        };
+        let before = SessionIssuer::new(config.clone());
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let issued = before.issue(&hash);
+
+        let after = SessionIssuer::new(config);
+        assert!(matches!(
+            after.lookup(Some(&issued.cookie_value), &hash, unix_now()),
+            SessionLookup::Active(_)
+        ));
+    }
+
+    #[test]
+    fn a_session_does_not_survive_a_restart_that_rotates_the_secret() {
+        let before = SessionIssuer::new(SessionConfig {
+            secret: b"old".to_vec(),
+            ..SessionConfig::default()
+        });
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let issued = before.issue(&hash);
+
+        let after = SessionIssuer::new(SessionConfig {
+            secret: b"new".to_vec(),
+            ..SessionConfig::default()
+        });
+        assert_eq!(
+            after.lookup(Some(&issued.cookie_value), &hash, unix_now()),
+            SessionLookup::Invalid
+        );
+    }
+
+    #[test]
+    fn the_device_hash_separates_devices_and_browsers() {
+        let a = device_hash("dev-1", "Mozilla/5.0", "en");
+        let b = device_hash("dev-2", "Mozilla/5.0", "en");
+        let c = device_hash("dev-1", "curl/8.0", "en");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a, device_hash("dev-1", "Mozilla/5.0", "en"));
+    }
+
+    #[test]
+    fn cookies_are_parsed() {
+        let parsed = parse_cookies("zcode_sid=abc.def; zcode_dev=1234; other=");
+        assert_eq!(parsed.get("zcode_sid").map(String::as_str), Some("abc.def"));
+        assert_eq!(parsed.get("zcode_dev").map(String::as_str), Some("1234"));
+        assert_eq!(parsed.get("other").map(String::as_str), Some(""));
+        assert!(parse_cookies("").is_empty());
+        assert!(parse_cookies("garbage").is_empty());
+    }
+
+    #[test]
+    fn hex_round_trips() {
+        let bytes = vec![0u8, 1, 15, 16, 255];
+        let text = hex(&bytes);
+        assert_eq!(text, "00010f10ff");
+        assert_eq!(hex_decode(&text).unwrap(), bytes);
+        assert!(hex_decode("xyz").is_none());
+        assert!(hex_decode("abc").is_none());
+    }
+
+    #[test]
+    fn the_set_cookie_header_carries_the_right_flags() {
+        let header = set_cookie("zcode_sid", "abc", 60, true);
+        assert!(header.starts_with("zcode_sid=abc"));
+        assert!(header.contains("HttpOnly"));
+        assert!(header.contains("SameSite=Lax"));
+        assert!(header.contains("Max-Age=60"));
+        assert!(header.contains("Secure"));
+        let insecure = set_cookie("zcode_sid", "abc", 60, false);
+        assert!(!insecure.contains("Secure"));
+    }
+
+    #[test]
+    fn two_issuers_with_different_secrets_do_not_accept_each_other_sessions() {
+        let a = SessionIssuer::new(SessionConfig {
+            secret: b"secret-a".to_vec(),
+            ..SessionConfig::default()
+        });
+        let b = SessionIssuer::new(SessionConfig {
+            secret: b"secret-b".to_vec(),
+            ..SessionConfig::default()
+        });
+        let hash = device_hash("dev-1", "Mozilla/5.0", "en");
+        let issued = a.issue(&hash);
+        assert_eq!(
+            b.lookup(Some(&issued.cookie_value), &hash, unix_now()),
+            SessionLookup::Invalid
+        );
+    }
+}
+SESSION
 
 # ------------------------------------------------------------------------------
 # 24. Archive — sources only; the Cargo build cache is never packaged.

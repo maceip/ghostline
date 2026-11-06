@@ -112,6 +112,7 @@ EXTRA_SECTIONS = [
     ("src/bin/rollback_probe.rs", "ROLLBACK_PROBE",
      "src/bin/rollback_probe.rs", "src/bin/rollback_probe.rs"),
     ("src/access.rs", "ACCESS", "src/access.rs", "src/access.rs"),
+    ("src/session.rs", "SESSION", "src/session.rs", "src/session.rs"),
 ]
 
 ARCHIVE_ANCHOR = "# 24. Archive"

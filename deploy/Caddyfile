@@ -16,10 +16,16 @@
 #  reads this file, so one Caddyfile works on every box:
 #
 #    CLEF_DOMAIN   public hostname, e.g. clef.example.com   (required)
-#    GUARD_TOKEN   the bearer token the guard expects          (required)
 #    GUARD_PORT    local port the guard listens on   (default 8090)
 #    SITE_ROOT     directory holding the static site (default /opt/zcode/site)
 #    ACME_EMAIL    contact address for the ACME account        (required)
+#
+#  There is deliberately NO token in this file.  The guard's bearer token
+#  is the operator's credential — direct clients on the box send it
+#  themselves — and the public path uses a device-bound session cookie
+#  instead.  Injecting the operator token here would make the guard unable
+#  to tell a visitor from the operator, and the session gate would be
+#  decorative.  See the handle block below.
 #
 #  VALIDATE BEFORE YOU RELOAD.  A bad Caddyfile must never reach the
 #  running server:
@@ -60,7 +66,7 @@
 #  ---------------------------------------------------------------------------
 #
 #  The variables marked "required" above have NO default on purpose.  An
-#  unset CLEF_DOMAIN or GUARD_TOKEN has to fail loudly at parse time rather
+#  unset CLEF_DOMAIN or ACME_EMAIL has to fail loudly at parse time rather
 #  than quietly serve the wrong thing.
 # ===========================================================================
 
@@ -136,12 +142,23 @@
 
 	handle @guard {
 		reverse_proxy 127.0.0.1:{$GUARD_PORT:8090} {
-			# The bearer token is added HERE, on the server.  The browser
-			# never receives it and never sends it, so it cannot leak by
-			# reading the page or the network tab.  This also REPLACES any
-			# Authorization header the client sent — a client cannot
-			# override the token by sending its own.
-			header_up Authorization "Bearer {$GUARD_TOKEN}"
+			# NO Authorization header is injected here, and that is deliberate.
+			#
+			# The guard accepts two credentials: the operator's bearer token,
+			# and a device-bound session cookie that a visitor gets from
+			# POST /api/session.  If this proxy injected the operator token
+			# on every request, the guard could not tell a visitor from the
+			# operator, and the session gate would be decorative.
+			#
+			# So the operator's token stays on the box — direct clients send
+			# it themselves — and the public path carries a session.
+			#
+			# The proxy passes cookies through untouched, which is what makes
+			# the session work: the browser sends zcode_sid and zcode_dev,
+			# and the guard checks that the pair belongs together.
+			#
+			# Cookies also have to survive the redirect from http to https,
+			# so do not strip them.
 
 			# REPLACE the client-supplied X-Forwarded-For with the address
 			# this proxy actually saw on the socket.  Without this a client

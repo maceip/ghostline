@@ -11,16 +11,15 @@ macOS box; this file is what you read when something is wrong.
 
 | Piece | Where | What it does |
 |---|---|---|
-| **Caddy** | `/opt/zcode/caddy/Caddyfile` | Terminates TLS, serves the static site at `/`, forwards the API to the guard, injects the bearer token. |
-| **Caddy environment** | `/opt/zcode/caddy/caddy.env` | The `KEY=VALUE` file the Caddy service loads with `--envfile`. Holds the token. |
+| **Caddy** | `/opt/zcode/caddy/Caddyfile` | Terminates TLS, serves the static site at `/`, forwards the API to the guard. Holds no secret. |
+| **Caddy environment** | `/opt/zcode/caddy/caddy.env` | The `KEY=VALUE` file the Caddy service loads with `--envfile`. Domain, ports, paths and the ACME contact — no token. |
 | **The guard** | `com.zcode.guard` (launchd daemon) | The Rust binary from `qwen-clef-repe-guard/`. Scores tool calls against the calibrated RepE vectors and refuses the harmful ones. Listens on `127.0.0.1:8090`. |
 | **The upstream** | `com.zcode.upstream` (launchd daemon) | `mlx_lm.server` with `Qwen/Qwen2.5-0.5B-Instruct`. Listens on `127.0.0.1:8123`. |
 | **The static site** | `/opt/zcode/site` | A copy of `clef-site/` from the repository. |
-| **The token** | `/opt/zcode/guard.token` | The bearer token, mode `0640`, owned by the `zcode` service user. |
+| **The token** | `/opt/zcode/guard.token` | The operator's bearer token, mode `0640`, owned by the `zcode` service user. **Only the guard reads it** — Caddy never sees it. |
 
 The guard and the upstream both listen on loopback only. **Caddy is the only
-thing the internet can reach**, and it is the only thing that holds the token
-in a request.
+thing the internet can reach**, and it holds no secret at all.
 
 ### How Caddy is started
 
@@ -45,13 +44,41 @@ system/com.zcode.caddy`) or the two will fight over the ports.
 ```
 browser ──https──> Caddy ──http──> guard (127.0.0.1:8090) ──http──> mlx_lm (127.0.0.1:8123)
                     │
-                    └── Authorization: Bearer <token>   ← added here, server-side
+                    └── Cookie: zcode_sid + zcode_dev   ← a device-bound session
 ```
 
-The browser never receives the token and never sends it. It cannot leak it by
-reading the page, the source, or the network tab, and it cannot override it by
-sending its own `Authorization` header — Caddy replaces that header on the way
-through.
+There are **two** credentials, and they belong to different callers:
+
+| Credential | Who has it | Where it is used |
+|---|---|---|
+| **The bearer token** | The operator. Direct clients on the box — the ZoonCode integration, a script. | `Authorization: Bearer <token>` against the guard's own port. It never goes through Caddy. |
+| **The session cookie** | A visitor. Nobody signs in, and nothing about them is recorded. | Issued by `POST /api/session`, then sent automatically by the browser. |
+
+**Caddy injects nothing**, and that is deliberate. If the proxy added the
+operator's token to every request, the guard could not tell a visitor from the
+operator, and the session gate would be decorative. The proxy passes cookies
+through untouched, which is what lets the session work.
+
+The browser never sees the operator's token, and the operator's token never
+travels over the public network.
+
+### The session, in one paragraph
+
+A visitor calls `POST /api/session` once and gets two `HttpOnly` cookies:
+`zcode_sid` (the session — its claims, id, device hash, issue time and
+expiry, signed with an HMAC over a server secret) and `zcode_dev` (a random
+value that binds the session to this browser). The guard refuses a session
+whose device cookie and user-agent do not match the ones it was minted with,
+so the cookie cannot be lifted into another browser on its own. There is no
+account, no sign-in and no personal data — the session expires on its own
+and nothing about the visitor is kept. It is an admission step and an
+accounting mechanism, not an identity system.
+
+**The session is stateless.** The cookie carries its own claims, so the
+guard keeps no session table: a restart does not end every session, and the
+guard's memory does not grow with the number of visitors. What a restart
+*can* end is the session secret, so a stable secret file is what makes
+sessions durable across a deploy.
 
 ### What is deliberately NOT here
 
@@ -69,17 +96,15 @@ path never starts it.
 | Variable | Meaning | Example |
 |---|---|---|
 | `CLEF_DOMAIN` | The public hostname this site serves. **Required** — no default, so a missing value fails loudly at parse time. | `clef.example.com` |
-| `GUARD_TOKEN` | The bearer token Caddy sends to the guard. **Required.** | `9f2c…` (64 hex chars) |
 | `GUARD_PORT` | The port the guard listens on. | `8090` (default) |
 | `SITE_ROOT` | The directory holding the static site. | `/opt/zcode/site` (default) |
 | `ACME_EMAIL` | The contact address for the ACME account. **Required.** | `ops@example.com` |
 
-The same names are read by the guard as `ZCODE_GUARD_TOKEN`,
-`ZCODE_GUARD_TOKEN_FILE` and `ZCODE_GUARD_RATE_LIMIT_RPM`.
-
-The token is written to **two** places on purpose, and they must agree:
-`/opt/zcode/guard.token` is what the guard reads, and `GUARD_TOKEN` in
-`caddy.env` is what Caddy sends. The rotation procedure below changes both.
+**There is no token in `caddy.env`.** The guard's bearer token is the
+operator's credential and only the guard reads it, from
+`/opt/zcode/guard.token`. The guard picks up its own settings from the
+environment too: `ZCODE_GUARD_TOKEN_FILE`, `ZCODE_GUARD_RATE_LIMIT_RPM` and
+`ZCODE_SESSION_SECRET_FILE`.
 
 ---
 
@@ -121,12 +146,11 @@ sudo tail -f /var/log/zcode/caddy.log
 
 ## Rotating the token
 
-The token is the guard's front door. Rotate it if it leaks, if someone had
+The token is the operator's front door. Rotate it if it leaks, if someone had
 access to the box, or on a schedule you decided on.
 
-**Both processes have to change.** The guard reads the token from a file, and
-Caddy holds it in its environment; a restart — not a reload — is what makes
-each of them pick up a new value.
+**Only the guard has to change.** Caddy never held the token — it does not
+inject one — so a token rotation is a file write and a guard restart.
 
 ```bash
 # 1. a new token
@@ -136,27 +160,87 @@ NEW=$(openssl rand -hex 32)
 sudo sh -c "umask 077; printf '%s\n' '$NEW' > /tmp/guard.token"
 sudo install -m 0640 -o zcode -g zcode /tmp/guard.token /opt/zcode/guard.token
 
-# 3. what Caddy will send
-sudo sed -i '' "s|^GUARD_TOKEN=.*|GUARD_TOKEN=$NEW|" /opt/zcode/caddy/caddy.env
-
-# 4. restart BOTH — a reload is not enough for Caddy, it reads the
-#    environment when the process starts
+# 3. restart the guard — it reads the token when it starts
 sudo launchctl kickstart -k system/com.zcode.guard
-sudo launchctl kickstart -k system/com.zcode.caddy
 
-# 5. verify
+# 4. verify
 sudo cat /opt/zcode/guard.token
 curl -sS -H "Authorization: Bearer $(sudo cat /opt/zcode/guard.token)" \
      http://127.0.0.1:8090/api/info
 ```
 
 The demo site keeps working through a rotation — the browser never had the
-token. Only direct API clients that cached the old one are affected.
+token, it has a session. Only direct API clients that cached the old one are
+affected, and they get a `401` until they pick up the new value.
 
-`sudo caddy reload --config /opt/zcode/caddy/Caddyfile` is the right command
-for an ordinary configuration change, but it re-reads the Caddyfile in the
-**running process**, so it still uses the environment the process started
-with. That is why a token change needs a restart.
+### Rotating the session secret
+
+The session secret signs the session cookies. It is a different secret from
+the bearer token, and it lives in its own file:
+
+```bash
+sudo sh -c "umask 077; printf '%s\n' \"$(openssl rand -hex 32)\" > /tmp/session.secret"
+sudo install -m 0640 -o zcode -g zcode /tmp/session.secret /opt/zcode/session.secret
+sudo launchctl kickstart -k system/com.zcode.guard
+```
+
+Rotating it invalidates every live session at once — each visitor's next
+request gets a `401` and the site mints a new session automatically, so the
+demo carries on. That is also the way to end every session at once.
+
+---
+
+## The device-bound session
+
+A visitor of the public demo is admitted by a session, not by an account.
+There is no sign-in, no email and nothing about the visitor is kept.
+
+**How it works:**
+
+1. The page asks the guard for a session: `POST /api/session`.
+2. The guard answers `200` and sets two `HttpOnly` cookies:
+   - `zcode_sid` — the session: its claims (id, device hash, issue time,
+     expiry) under an HMAC over the server secret, so the cookie describes
+     itself and the guard has to keep no session table;
+   - `zcode_dev` — a random value that binds the session to this browser.
+3. The browser sends both cookies on every later request. The guard checks
+   that the pair belongs together and that the user-agent matches the one
+   the session was minted with.
+4. The session expires by itself (`--session-ttl-secs`, one hour by
+   default). The site notices the `401`, mints a new one and carries on.
+
+Because the session is stateless, **a restart does not end it** — the cookie
+still carries its own claims, and the secret file is what keeps the
+signature valid. Rotating the secret is how every session is ended at once.
+
+**What it defends against:** a session cookie copied into another browser on
+its own, a cookie edited to point at somebody else's session, and a client
+that never went through the admission step at all.
+
+**What it does not defend against:** an attacker who holds both cookies and
+presents the same user-agent, or an attacker who drives a real browser. It is
+an admission step and an accounting mechanism, not an identity system.
+
+**Checking it:**
+
+```bash
+# mint a session and keep the cookies
+curl -sS -X POST http://127.0.0.1:8090/api/session -D /tmp/jar.headers
+
+# the guard now accepts it
+curl -sS -H "Cookie: $(grep -i zcode_sid /tmp/jar.headers | cut -d' ' -f2 | tr -d '\r')" \
+     http://127.0.0.1:8090/api/info
+
+# ...and refuses it without the session
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/api/info
+```
+
+The cookies are marked `Secure`, so a plain-`http` client such as `curl` will
+not send them back on its own — that is why the example passes them
+explicitly. Browsers accept them on `http://localhost`.
+
+**Turning sessions off.** `--no-sessions` refuses to mint any, which makes
+the bearer token the only way in — the posture for a private deployment.
 
 ---
 

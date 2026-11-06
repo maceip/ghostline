@@ -1,6 +1,10 @@
 use crate::access::{AccessConfig, AuthOutcome, RateLimiter, check_bearer, client_key};
 use crate::clef_head::{ClefDecision, ClefQuestion, ClefSchemaHead};
 use crate::mlx_loader::{QwenLoadedLayer, ShardedModelLoader};
+use crate::session::{
+    SessionConfig, SessionIssuer, SessionLookup, device_hash as compute_device_hash, parse_cookies,
+    random_hex, set_cookie, unix_now,
+};
 use crate::qwen_hook::{GuardableEngine, HookedQwenClefEngine};
 use crate::repe_sensor::{
     render_reference_tool_call_turn, render_tool_call_turn, render_user_turn, tool_call_span_prefix,
@@ -10,10 +14,12 @@ use crate::trajectory::ExcessTrajectory;
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::{Request, State, connect_info::ConnectInfo},
+    extract::{Extension, Request, State, connect_info::ConnectInfo},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        header::{
+            ACCEPT_LANGUAGE, AUTHORIZATION, COOKIE, SET_COOKIE, USER_AGENT, WWW_AUTHENTICATE,
+        },
     },
     middleware::{self, Next},
     response::{
@@ -33,6 +39,7 @@ use mlx_rs::{Array, ops::*};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::time::Instant;
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
@@ -271,6 +278,8 @@ pub struct EnforcerConfig {
     ///
     /// Both are off by default, so a local run is unchanged.
     pub access: AccessConfig,
+    /// Device-bound sessions for the public surface.
+    pub session: SessionConfig,
 }
 
 /// How the engine inside the worker thread should be built.
@@ -743,6 +752,12 @@ pub struct Enforcer {
     /// `None` when no ceiling is configured — an unlimited guard must not
     /// pay for a map it never uses.
     limiter: Option<Arc<RateLimiter>>,
+    /// The session issuer, shared by every request.
+    ///
+    /// Sessions are stateless: the cookie carries its own signed claims,
+    /// so this holds the signing secret and the revocation list, not a
+    /// table of live sessions.
+    pub sessions: Arc<SessionIssuer>,
 }
 
 impl Enforcer {
@@ -764,6 +779,7 @@ impl Enforcer {
             .access
             .rate_limit_per_minute
             .map(|rpm| Arc::new(RateLimiter::new(rpm)));
+        let sessions = Arc::new(SessionIssuer::new(config.session.clone()));
         std::thread::Builder::new()
             .name("mlx-engine".to_string())
             .spawn(move || {
@@ -847,6 +863,7 @@ impl Enforcer {
             events,
             info,
             limiter,
+            sessions,
         })
     }
 
@@ -888,6 +905,10 @@ impl Enforcer {
             .route("/v1/guard/tool-call", post(guard_tool_call))
             .route("/v1/chat/completions", post(proxy_chat_completions))
             .route("/api/label", post(record_label))
+            .route(
+                "/api/session",
+                get(session_status).post(session_issue),
+            )
             .route_layer(middleware::from_fn_with_state(
                 state.clone(),
                 access_guard,
@@ -898,52 +919,124 @@ impl Enforcer {
 
 /// The access-control layer.
 ///
-/// Authentication and rate limiting are both opt-in: with no token and no
-/// ceiling configured, the guard behaves exactly as it did before, which
-/// keeps the local workflow and the benchmark harnesses unchanged.
+/// Three things happen here, in this order:
 ///
-/// `/health` is exempt from both. It is the liveness probe the supervisor
-/// polls, and it exposes nothing but the service name.
+/// 1. **The device is identified.** A second, device-only cookie is
+///    required alongside the session cookie, and the session is bound to
+///    it together with the request's user-agent. A session cookie copied
+///    into another browser does not work on its own.
+/// 2. **The caller is admitted.** A bearer token (the operator's
+///    credential) or a live session. When no token is configured — the
+///    local case — nothing is required, so the local workflow and the
+///    benchmark harnesses behave exactly as they always have.
+/// 3. **The caller is rate limited.** The per-IP backstop. The limit that
+///    protects a public deployment lives at the edge, at Caddy, keyed by
+///    client IP.
+///
+/// `/health` is exempt from all three: it is the liveness probe the
+/// supervisor polls, and it exposes nothing but the service name.
+/// `/api/session` is exempt from the credential check — it is the
+/// admission step, so it has to be reachable by somebody who does not
+/// have a session yet.
 async fn access_guard(
     State(state): State<EnforcerState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let access = &state.enforcer.config.access;
+    let path = request.uri().path().to_string();
 
-    if request.uri().path() == "/health" {
+    if path == "/health" {
         return next.run(request).await;
     }
 
-    if let Some(expected) = access.token() {
-        let header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
-        let outcome = check_bearer(header, expected);
-        if outcome != AuthOutcome::Ok {
-            warn!(
-                outcome = ?outcome,
-                path = %request.uri().path(),
-                "rejected: bearer token"
-            );
-            let body = serde_json::json!({
-                "error": "unauthorized",
-                "reason": outcome.reason(),
-            });
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(WWW_AUTHENTICATE, "Bearer")],
-                Json(body),
-            )
-                .into_response();
+    // ---------------------------------------------------------------------
+    // The device.
+    // ---------------------------------------------------------------------
+    let cookies = headers
+        .get(COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(parse_cookies)
+        .unwrap_or_default();
+    let sent_device = cookies
+        .get(&state.enforcer.config.session.device_cookie)
+        .cloned();
+    let device_cookie_is_new = sent_device.is_none();
+    let device_cookie = sent_device.unwrap_or_else(|| random_hex(32));
+    let user_agent = headers
+        .get(USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let accept_language = headers
+        .get(ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let device_hash = compute_device_hash(&device_cookie, user_agent, accept_language);
+
+    // ---------------------------------------------------------------------
+    // The session.
+    // ---------------------------------------------------------------------
+    let sent_session = cookies
+        .get(&state.enforcer.config.session.session_cookie)
+        .cloned();
+    let lookup = state
+        .enforcer
+        .sessions
+        .lookup(sent_session.as_deref(), &device_hash, unix_now());
+    let session_id = match &lookup {
+        SessionLookup::Active(claims) => Some(claims.id.clone()),
+        _ => None,
+    };
+    let session_expires_in = match &lookup {
+        SessionLookup::Active(claims) => Some(claims.expires_in_secs(unix_now())),
+        _ => None,
+    };
+
+    // ---------------------------------------------------------------------
+    // The credential.
+    // ---------------------------------------------------------------------
+    // With no token configured the guard is in its local mode: nothing is
+    // required. With a token configured — and a routable bind always has
+    // one — a caller has to present either that token or a live session.
+    let bearer_ok = match access.token() {
+        Some(expected) => {
+            let header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
+            check_bearer(header, expected) == AuthOutcome::Ok
         }
+        None => true,
+    };
+
+    if path != SESSION_ROUTE && !bearer_ok && session_id.is_none() {
+        let reason = match &lookup {
+            SessionLookup::WrongDevice => "this session belongs to another device",
+            SessionLookup::Expired => "this session has expired",
+            SessionLookup::Invalid => "this session is not valid",
+            _ => "no session",
+        };
+        warn!(path = %path, reason = %reason, "rejected: no credential");
+        let body = serde_json::json!({
+            "error": "session_required",
+            "reason": reason,
+            "hint": "POST /api/session to get one",
+        });
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(WWW_AUTHENTICATE, "Bearer")],
+            Json(body),
+        )
+            .into_response();
     }
 
+    // ---------------------------------------------------------------------
+    // The backstop rate limit.
+    // ---------------------------------------------------------------------
     let mut decision = None;
     if let Some(limiter) = state.enforcer.limiter.as_ref() {
         let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
         let key = client_key(Some(peer), forwarded, access.trust_proxy);
-        let verdict = limiter.check(&key, std::time::Instant::now());
+        let verdict = limiter.check(&key, Instant::now());
         if !verdict.allowed {
             debug!(client = %key, limit = verdict.limit, "rejected: rate limit");
             let body = serde_json::json!({
@@ -961,7 +1054,32 @@ async fn access_guard(
         decision = Some(verdict);
     }
 
+    // ---------------------------------------------------------------------
+    // Hand the session to the handler.
+    // ---------------------------------------------------------------------
+    request.extensions_mut().insert(SessionContext {
+        session_id,
+        session_expires_in,
+        device_hash,
+        device_cookie: device_cookie.clone(),
+        device_cookie_is_new,
+        ip: client_key(Some(peer), None, false),
+    });
+
     let mut response = next.run(request).await;
+
+    if device_cookie_is_new {
+        let header = set_cookie(
+            &state.enforcer.config.session.device_cookie,
+            &device_cookie,
+            crate::session::DEVICE_COOKIE_MAX_AGE_SECS,
+            state.enforcer.config.session.cookie_secure,
+        );
+        if let Ok(value) = HeaderValue::from_str(&header) {
+            response.headers_mut().append(SET_COOKIE, value);
+        }
+    }
+
     if let Some(verdict) = decision {
         let headers = response.headers_mut();
         if let Ok(value) = HeaderValue::from_str(&verdict.limit.to_string()) {
@@ -972,6 +1090,27 @@ async fn access_guard(
         }
     }
     response
+}
+
+/// The route that mints a session.
+const SESSION_ROUTE: &str = "/api/session";
+
+/// What the access layer worked out about the caller.
+#[derive(Clone, Debug)]
+pub struct SessionContext {
+    /// The live session id, when there is one.
+    pub session_id: Option<String>,
+    /// How many seconds the live session has left, when there is one.
+    pub session_expires_in: Option<u64>,
+    /// The device hash the session is bound to.
+    pub device_hash: String,
+    /// The device cookie value in play — the one the client sent, or the
+    /// fresh one the server just minted.
+    pub device_cookie: String,
+    /// Whether the device cookie is new and has to be sent back.
+    pub device_cookie_is_new: bool,
+    /// The client address.
+    pub ip: String,
 }
 
 #[derive(Clone)]
@@ -1484,6 +1623,71 @@ async fn health() -> Json<serde_json::Value> {
         "status": "ok",
         "service": "qwen-clef-repe-guard",
     }))
+}
+
+/// Report the caller's session.
+///
+/// This never fails: a caller with no session gets `active: false` rather
+/// than a 401, because the site asks this question to find out whether it
+/// needs to mint one.
+async fn session_status(
+    State(state): State<EnforcerState>,
+    Extension(context): Extension<SessionContext>,
+) -> Json<serde_json::Value> {
+    let sessions = &state.enforcer.sessions;
+    Json(serde_json::json!({
+        "active": context.session_id.is_some(),
+        "session_id": context.session_id,
+        "expires_in": context.session_expires_in,
+        "sessions_enabled": sessions.enabled(),
+        // The guard keeps no session table, so there is no count of live
+        // sessions to report — only the ones it has explicitly revoked.
+        "revoked_sessions": sessions.revoked_count(),
+        "device_bound": true,
+    }))
+}
+
+/// Mint a session for this device.
+///
+/// This is the admission step, and it is deliberately frictionless: there
+/// is no account, no sign-in and nothing about the visitor is recorded.
+/// The session is bound to the device cookie and the user-agent, so it
+/// cannot be lifted into another browser on its own.
+async fn session_issue(
+    State(state): State<EnforcerState>,
+    Extension(context): Extension<SessionContext>,
+) -> Response {
+    if !state.enforcer.sessions.enabled() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "sessions_disabled",
+                "reason": "this deployment takes the bearer token only",
+            })),
+        )
+            .into_response();
+    }
+
+    let issued = state.enforcer.sessions.issue(&context.device_hash);
+    let ttl = state.enforcer.config.session.ttl.as_secs();
+    let cookie = set_cookie(
+        &state.enforcer.config.session.session_cookie,
+        &issued.cookie_value,
+        ttl,
+        state.enforcer.config.session.cookie_secure,
+    );
+    let body = serde_json::json!({
+        "active": true,
+        "session_id": issued.claims.id,
+        "expires_in": ttl,
+        "device_bound": true,
+    });
+
+    let mut response = (StatusCode::OK, Json(body)).into_response();
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(SET_COOKIE, value);
+    }
+    response
 }
 
 /// Record one human label for an intercepted call.

@@ -12,6 +12,12 @@ KEEP="$(mktemp -d)"
 # rebuild resolve fresh versions, so the build would no longer be the build
 # that was measured. It is preserved like the build cache.
 [ -f "$PROJ/Cargo.lock" ] && cp "$PROJ/Cargo.lock" "$KEEP/Cargo.lock" 2>/dev/null || true
+# The parity fixtures are checked-in reference data, but they live inside the
+# project directory and the wipe below takes the whole directory with it. They
+# are regenerated deterministically by tools/joint_head_reference.py, so losing
+# them silently means every rebuild shows them as deleted in git — a change
+# nobody made and nobody meant. They are preserved like the rest.
+[ -d "$PROJ/tools/fixtures" ] && mkdir -p "$KEEP/fixtures" && cp -R "$PROJ/tools/fixtures/." "$KEEP/fixtures/" 2>/dev/null || true
 
 rm -rf "$PROJ" "${PROJ}.zip"
 mkdir -p "$PROJ/src/bin" "$PROJ/artifacts" "$PROJ/tools"
@@ -19,6 +25,7 @@ mkdir -p "$PROJ/src/bin" "$PROJ/artifacts" "$PROJ/tools"
 [ -d "$KEEP/target" ] && mv "$KEEP/target" "$PROJ/target" 2>/dev/null || true
 [ -d "$KEEP/artifacts" ] && cp -R "$KEEP/artifacts/." "$PROJ/artifacts/" 2>/dev/null || true
 [ -f "$KEEP/Cargo.lock" ] && cp "$KEEP/Cargo.lock" "$PROJ/Cargo.lock" 2>/dev/null || true
+[ -d "$KEEP/fixtures" ] && mkdir -p "$PROJ/tools/fixtures" && cp -R "$KEEP/fixtures/." "$PROJ/tools/fixtures/" 2>/dev/null || true
 rm -rf "$KEEP"
 # ------------------------------------------------------------------------------
 # 1. Cargo.toml
