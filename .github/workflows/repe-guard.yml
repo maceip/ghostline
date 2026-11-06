@@ -17,6 +17,7 @@ on:
       - "repe-compose.py"
       - "upgrade_generic_viz.sh"
       - "evals/**"
+      - "deploy/**"
       - ".github/workflows/repe-guard.yml"
   pull_request:
     paths:
@@ -24,6 +25,7 @@ on:
       - "repe-compose.py"
       - "upgrade_generic_viz.sh"
       - "evals/**"
+      - "deploy/**"
       - ".github/workflows/repe-guard.yml"
 
 jobs:
@@ -89,6 +91,25 @@ jobs:
           EOF
           cd /tmp/session_test && cargo test --quiet
 
+      # The public edge config must actually LOAD, and it must load only
+      # on a Caddy that has the rate_limit module.  A Caddyfile that
+      # refuses to start is a deploy that cannot happen, so this builds
+      # that binary and runs the edge check against the SHIPPED
+      # deploy/Caddyfile: it must validate, a stock Caddy must refuse it,
+      # and the limit must shed load before the backend sees it.
+      - name: the Caddy edge config loads and rate limits by IP
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          mkdir -p /tmp/caddy-rl
+          "$(go env GOPATH)/bin/xcaddy" build --with github.com/mholt/caddy-ratelimit --output /tmp/caddy-rl/caddy
+          # A stock Caddy, to prove the shipped config genuinely needs the
+          # module rather than quietly working without it.
+          curl -fsSL -o /tmp/caddy-stock.tar.gz \
+            "https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_linux_amd64.tar.gz"
+          tar -xzf /tmp/caddy-stock.tar.gz -C /tmp caddy
+          ZCODE_CADDY_BIN=/tmp/caddy-rl/caddy ZCODE_CADDY_STOCK=/tmp/caddy \
+            python3 evals/caddy_edge.py
+
       # The Python extractor's LSE pooling must agree with the Rust one to
       # within float32 round-off. The reference implementation recomputes the
       # statistic independently and compares.
@@ -97,4 +118,4 @@ jobs:
 
       - name: evaluation scripts parse
         run: |
-          python3 -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ['evals/canonical_40.py','evals/real_upstream_20.py','evals/access_control.py','evals/session_guard.py']]; print('eval scripts parse')"
+          python3 -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ['evals/canonical_40.py','evals/real_upstream_20.py','evals/access_control.py','evals/session_guard.py','evals/caddy_edge.py']]; print('eval scripts parse')"

@@ -8,8 +8,8 @@
 #    2. Serves the static demo site (clef-site/) from the SAME ORIGIN as the
 #       API, so the browser never makes a cross-origin request and the
 #       guard never has to relax CORS.
-#    3. Forwards /api/*, /v1/* and /health to the local guard process and
-#       injects the bearer token SERVER-SIDE.
+#    3. Rate limits by client IP, and forwards /api/*, /v1/* and /health to
+#       the local guard process.
 #
 #  Everything that differs per machine lives in the ENVIRONMENT, not in this
 #  file.  The service loads /opt/zcode/caddy/caddy.env (KEY=VALUE) before it
@@ -19,6 +19,7 @@
 #    GUARD_PORT    local port the guard listens on   (default 8090)
 #    SITE_ROOT     directory holding the static site (default /opt/zcode/site)
 #    ACME_EMAIL    contact address for the ACME account        (required)
+#    RL_*          the edge rate limits (see the header below)
 #
 #  There is deliberately NO token in this file.  The guard's bearer token
 #  is the operator's credential — direct clients on the box send it
@@ -34,11 +35,9 @@
 #                       --envfile /opt/zcode/caddy/caddy.env
 #
 #  ---------------------------------------------------------------------------
-#  RATE LIMITING IS NOT IN THIS FILE — AND THAT IS A REQUIREMENT, NOT AN
-#  OVERSIGHT.
+#  RATE LIMITING BELONGS HERE, AT THE EDGE, KEYED BY CLIENT IP.
 #
-#  The public deployment must rate limit HERE, at the edge, keyed by client
-#  IP.  Two reasons:
+#  Two reasons:
 #
 #    * It sheds load before it costs anything.  The expensive part of this
 #      system is the model forward pass behind /v1/*.  A limit inside the
@@ -46,11 +45,13 @@
 #    * It is keyed on the address this proxy saw on the socket.  The guard's
 #      own limiter has to trust X-Forwarded-For because it sits behind a
 #      proxy; this one trusts no header at all, so there is nothing to
-#      forge.
+#      forge.  (Measured: a client that sends its own X-Forwarded-For has it
+#      REPLACED with the address Caddy saw — see the note on the
+#      X-Real-IP header below.)
 #
-#  The reason the zone is not written out below is that `rate_limit` is NOT a
-#  directive in the standard Caddy build.  It comes from the community
-#  module github.com/mholt/caddy-ratelimit and has to be compiled in:
+#  The zone below uses the `rate_limit` directive, which is NOT part of the
+#  standard Caddy build.  It comes from the community module
+#  github.com/mholt/caddy-ratelimit and has to be compiled in:
 #
 #    xcaddy build --with github.com/mholt/caddy-ratelimit \
 #                 --output /opt/zcode/bin/caddy
@@ -58,18 +59,22 @@
 #  A Caddyfile that contains `rate_limit` on a binary WITHOUT the module is
 #  a parse error — Caddy refuses to load it rather than quietly serving an
 #  unprotected site.  So if this config refuses to load with
-#  "unrecognized directive: rate_limit", the fix is the BINARY.
+#  "unrecognized directive: rate_limit", the fix is the BINARY, not this
+#  file.  scripts/bootstrap_cloud_metal.sh builds that binary for you.
 #
-#  The zone configuration to paste, the xcaddy build, and how to verify it
-#  are all in deploy/README.md — "Rate limiting belongs at THIS layer, keyed
-#  by IP".  Read that section before the first public deploy.
+#  The limits are in the ENVIRONMENT, like everything else that differs per
+#  machine, so an operator can tune them without touching this file:
+#
+#    RL_TOOL_CALL_EVENTS   /v1/* per IP per window   (default 10)
+#    RL_TOOL_CALL_WINDOW   /v1/* window              (default 1m)
+#    RL_API_EVENTS         /api/* per IP per window  (default 60)
+#    RL_API_WINDOW         /api/* window             (default 1m)
 #  ---------------------------------------------------------------------------
 #
 #  The variables marked "required" above have NO default on purpose.  An
 #  unset CLEF_DOMAIN or ACME_EMAIL has to fail loudly at parse time rather
 #  than quietly serve the wrong thing.
 # ===========================================================================
-
 {
 	# Contact address for the ACME account.  Caddy uses it for expiry
 	# warnings; it never appears in a certificate.
@@ -78,7 +83,7 @@
 	# Keep the certificates and the ACME account in a predictable place
 	# instead of the root user's home directory, so a backup or a rebuild
 	# knows where to look.
-	storage file_system /var/lib/caddy
+	storage file_system {$CADDY_STORAGE:/var/lib/caddy}
 }
 
 # The site address.  Caddy binds :443 and :80 and redirects plain HTTP to
@@ -96,8 +101,8 @@
 
 	# The API accepts small JSON tool-call probes — it is not an upload
 	# endpoint.  Anything bigger is refused with 413 before a handler runs.
-	# (request_body needs Caddy v2.10 or newer; the Homebrew build is new
-	# enough.)
+	# (request_body needs Caddy v2.10 or newer; the build this file needs
+	# is far newer than that.)
 	request_body {
 		max_size 1MB
 	}
@@ -121,7 +126,7 @@
 	# limiter is doing.  Delete this block if you ship the access log
 	# somewhere else.
 	log {
-		output file /var/log/zcode/caddy-access.log {
+		output file {$CADDY_ACCESS_LOG:/var/log/zcode/caddy-access.log} {
 			roll_size 10MiB
 			roll_keep 5
 		}
@@ -136,11 +141,49 @@
 	#
 	# Everything here is expensive enough to need an edge rate limit keyed
 	# by client IP.  See the header of this file and deploy/README.md —
-	# "Rate limiting belongs at THIS layer, keyed by IP".  The zone goes
-	# ABOVE these handle blocks, not inside them.
+	# "Rate limiting belongs at THIS layer, keyed by IP".  The zones live
+	# INSIDE the handle block below, so they apply to the guarded routes
+	# and to nothing else: the static site is served outside it.
 	@guard path /api/* /v1/* /health
 
 	handle @guard {
+		# The edge rate limit, keyed by the address Caddy saw on the
+		# socket.  {remote_host} is that address — it is not a header, so
+		# a client cannot choose its own bucket by sending one.
+		#
+		# Two zones because the two halves cost very different amounts:
+		# /v1/* runs the model, /api/* is JSON and an event stream.  The
+		# static site and /health are in NEITHER zone, so a visitor
+		# loading the page is never throttled and the liveness probe is
+		# never throttled.
+		#
+		# ipv6_prefix 64 puts every address in an IPv6 /64 into ONE
+		# bucket, because a /64 is what an ISP hands to a household and
+		# cycling addresses inside it is free.  There is deliberately NO
+		# ipv4_prefix: masking IPv4 to a /24 would put an entire
+		# university or office NAT into one bucket and throttle every
+		# student behind it.
+		rate_limit {
+			zone tool_call {
+				match {
+					path /v1/*
+				}
+				key {remote_host}
+				window {$RL_TOOL_CALL_WINDOW:1m}
+				events {$RL_TOOL_CALL_EVENTS:10}
+				ipv6_prefix 64
+			}
+			zone api {
+				match {
+					path /api/*
+				}
+				key {remote_host}
+				window {$RL_API_WINDOW:1m}
+				events {$RL_API_EVENTS:60}
+				ipv6_prefix 64
+			}
+		}
+
 		reverse_proxy 127.0.0.1:{$GUARD_PORT:8090} {
 			# NO Authorization header is injected here, and that is deliberate.
 			#
@@ -160,12 +203,17 @@
 			# Cookies also have to survive the redirect from http to https,
 			# so do not strip them.
 
-			# REPLACE the client-supplied X-Forwarded-For with the address
-			# this proxy actually saw on the socket.  Without this a client
-			# could forge the header and choose its own rate-limit bucket.
-			# The guard runs with --trust-proxy, so it reads exactly this
-			# value.
-			header_up X-Forwarded-For {remote_host}
+			# X-Forwarded-For is NOT set here on purpose.  Caddy already
+			# replaces it with the address it saw on the socket, so a
+			# client that sends its own X-Forwarded-For gets it discarded
+			# rather than appended — which is exactly what the guard's
+			# right-most-XFF rule depends on.  Setting it here as well
+			# would be a second copy of the same value and Caddy warns
+			# about it.
+			#
+			# X-Real-IP is NOT a Caddy default, so this one earns its
+			# place: the guard reads it to key its own backstop limiter,
+			# and --trust-proxy makes it believe it.
 			header_up X-Real-IP {remote_host}
 
 			# Stream the response through, unbuffered, so the SSE endpoint

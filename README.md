@@ -414,7 +414,8 @@ scripts/repe_checkpoint.sh --no-push    # local only
 ```
 
 The full end-to-end verification (build, unit tests, the canonical and
-real-upstream benchmarks, the render / GDN / joint-head parity suites) needs
+real-upstream benchmarks, the render / GDN / joint-head parity suites, the
+access-control and session checks, and the Caddy edge check) needs
 Apple Silicon, so it runs locally:
 
 ```bash
@@ -423,7 +424,10 @@ bash evals/verify_all.sh
 
 The pure-arithmetic parts — the Ledoit-Wolf whitening, the cross-turn
 trajectory — have no MLX dependency and are also checked in CI on every push
-(`.github/workflows/repe-guard.yml`).
+(`.github/workflows/repe-guard.yml`). CI additionally builds a Caddy with the
+rate-limit module and runs `evals/caddy_edge.py` against the shipped
+`deploy/Caddyfile`, so a config that would refuse to start on the box cannot
+be committed.
 
 The calibrated vectors under `qwen-clef-repe-guard/artifacts/` are committed
 on purpose: they are the measured operating point, not a derived file, and
@@ -479,15 +483,29 @@ in the guard. The edge limit sheds load before the model forward pass ever
 starts, and it keys on the address Caddy saw on the socket, so there is no
 forwarded header to forge.
 
+The zone is **already in `deploy/Caddyfile`** — two of them, one for the
+expensive `/v1/*` path and one for `/api/*`, with the static site and
+`/health` in neither so a visitor is never throttled for loading a page.
+The limits are environment variables (`RL_TOOL_CALL_EVENTS` and friends), so
+they can be tuned without editing the file.
+
 One thing to know before the first deploy: **`rate_limit` is not a Caddyfile
 directive in the standard build.** It comes from the community module
-`github.com/mholt/caddy-ratelimit` and has to be compiled in with `xcaddy`.
-A Caddyfile containing `rate_limit` on a binary without the module is a
-parse error, so Caddy refuses to load it — it fails loudly rather than
-quietly serving an unprotected site. The exact build command, the zone
-configuration to paste, the IPv6-prefix caveat and a three-step verification
-are in `deploy/README.md`, under *Rate limiting belongs at THIS layer, keyed
-by IP*.
+`github.com/mholt/caddy-ratelimit` and has to be compiled in. A Caddyfile
+containing `rate_limit` on a binary without the module is a parse error, so
+Caddy refuses to load it — it fails loudly rather than quietly serving an
+unprotected site. `scripts/bootstrap_cloud_metal.sh` builds that binary
+(`/opt/zcode/bin/caddy`) and points the launchd daemon at it, so the config
+that is validated is the config that is served. Note that `xcaddy` is not a
+Homebrew formula — it installs with `go install`.
+
+`python3 evals/caddy_edge.py` proves all of it against the **shipped**
+Caddyfile: it must load, a stock Caddy must refuse it, a forged
+`X-Forwarded-For` must be replaced with the real address, and the limit must
+shed load *before* the backend sees the request. The same check runs in CI,
+so a Caddyfile that would refuse to start on the box cannot be committed.
+The build command, the IPv6-prefix caveat and the tuning table are in
+`deploy/README.md`, under *Rate limiting belongs at THIS layer, keyed by IP*.
 
 The guard's own `--rate-limit-rpm` remains as a **backstop** for direct or
 misconfigured clients — not as the public deployment's limit.

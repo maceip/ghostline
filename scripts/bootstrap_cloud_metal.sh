@@ -13,30 +13,34 @@
 #   1. Identifies the machine (hw.model, architecture, EC2 instance metadata)
 #      and refuses to continue on anything that is not an Apple Silicon Mac
 #      with Metal.
-#   2. Makes sure Homebrew, Caddy, uv and cargo are present.
+#   2. Makes sure Homebrew, Go, xcaddy, uv and cargo are present.
 #   3. Creates the service account and the /opt/zcode layout.
 #   4. Clones the repository, builds the guard, downloads the model, writes
 #      the bearer token.
 #   5. Copies the static site to /opt/zcode/site.
-#   6. Writes deploy/Caddyfile to /opt/zcode/caddy/Caddyfile and materialises
+#   6. BUILDS CADDY WITH THE RATE-LIMIT MODULE into /opt/zcode/bin/caddy.
+#      The shipped Caddyfile uses the `rate_limit` directive, which stock
+#      Caddy does not have — a config with it on a stock binary is a PARSE
+#      ERROR, so the box would refuse to start rather than serve an
+#      unprotected site.  This script builds the right binary so you never
+#      hit that.
+#   7. Writes deploy/Caddyfile to /opt/zcode/caddy/Caddyfile and materialises
 #      the environment into /opt/zcode/caddy/caddy.env.
-#   7. VALIDATES the Caddy config with `caddy validate` and only then loads
+#   8. VALIDATES the Caddy config with `caddy validate` and only then loads
 #      it — a broken config never reaches the running server.
-#   8. Installs three launchd daemons (system-wide, so they survive a
+#   9. Installs three launchd daemons (system-wide, so they survive a
 #      reboot): com.zcode.upstream, com.zcode.guard, com.zcode.caddy.
-#   9. Waits for the upstream and the guard, then prints the DNS/TLS steps
+#  10. Waits for the upstream and the guard, then prints the DNS/TLS steps
 #      the operator still has to do.
 #
-# ONE THING THIS SCRIPT CANNOT DO FOR YOU
-# ---------------------------------------
-#   The public deployment must rate limit at Caddy, keyed by client IP, and
-#   stock Caddy has no rate limiter: `rate_limit` is a community module
-#   (github.com/mholt/caddy-ratelimit) that has to be compiled in with
-#   xcaddy.  This script installs the Homebrew build, so it checks for the
-#   module and tells you how to build one, but the zone configuration and
-#   the xcaddy build are yours to do.
-#
-#   See deploy/README.md — "Rate limiting belongs at THIS layer, keyed by IP".
+# THE RATE LIMIT IS NOT OPTIONAL HERE
+# -----------------------------------
+#   The public deployment must rate limit at Caddy, keyed by client IP.
+#   `rate_limit` is a community module (github.com/mholt/caddy-ratelimit)
+#   that has to be compiled in with xcaddy, so this script installs Go and
+#   xcaddy and builds the binary itself.  The zone lives in deploy/Caddyfile
+#   and the limits are tunable in caddy.env — see deploy/README.md,
+#   "Rate limiting belongs at THIS layer, keyed by IP".
 #
 # sudo IS USED — and only for the things that genuinely need it: the
 # /opt/zcode tree, the /Library/LaunchDaemons plists, the service account,
@@ -65,6 +69,14 @@ ACME_EMAIL="${ZCODE_ACME_EMAIL:-}"
 GUARD_PORT="${ZCODE_GUARD_PORT:-8090}"
 UPSTREAM_PORT="${ZCODE_UPSTREAM_PORT:-8123}"
 RATE_LIMIT="${ZCODE_RATE_LIMIT:-30}"
+# The edge rate limit, in caddy.env.  /v1/* is the expensive path (it runs
+# the model); /api/* is JSON and the event stream.  The static site and
+# /health are in neither zone, so a visitor is never throttled for loading
+# a page and the liveness probe is never throttled.
+RL_TOOL_CALL_EVENTS="${ZCODE_RL_TOOL_CALL_EVENTS:-10}"
+RL_TOOL_CALL_WINDOW="${ZCODE_RL_TOOL_CALL_WINDOW:-1m}"
+RL_API_EVENTS="${ZCODE_RL_API_EVENTS:-60}"
+RL_API_WINDOW="${ZCODE_RL_API_WINDOW:-1m}"
 MODE="${ZCODE_GUARD_MODE:-enforce}"
 THRESHOLD="${ZCODE_GUARD_THRESHOLD:-0.45}"
 MODEL_REPO="Qwen/Qwen2.5-0.5B-Instruct"
@@ -214,10 +226,37 @@ fi
 CLOUD_KIND="none"
 CLOUD_INSTANCE_ID=""
 CLOUD_INSTANCE_TYPE=""
-if curl -fsS --max-time 3 "http://169.254.169.254/latest/meta-data/instance-id" >/dev/null 2>&1; then
+
+# EC2 instance metadata, IMDSv2 first.
+#
+# IMDSv2 requires a session token: you PUT to /latest/api/token and send
+# the token back on every read.  A plain GET is IMDSv1, which an account
+# with IMDSv2 enforced will refuse — so without this the script would
+# report "not an EC2 instance" on a box that is one, and the operator
+# would never learn the instance id or type.  Try v2, fall back to v1, and
+# treat "neither worked" as "not EC2" without making a fuss about it.
+IMDS_TOKEN=""
+if command -v curl >/dev/null 2>&1; then
+    IMDS_TOKEN="$(curl -fsS --max-time 3 -X PUT \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+        "http://169.254.169.254/latest/api/token" 2>/dev/null || true)"
+fi
+
+imds_get() {
+    # imds_get <path> — print the value, or nothing.
+    local path="$1"
+    if [ -n "$IMDS_TOKEN" ]; then
+        curl -fsS --max-time 3 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+            "http://169.254.169.254$path" 2>/dev/null || true
+    else
+        curl -fsS --max-time 3 "http://169.254.169.254$path" 2>/dev/null || true
+    fi
+}
+
+CLOUD_INSTANCE_ID="$(imds_get "/latest/meta-data/instance-id")"
+if [ -n "$CLOUD_INSTANCE_ID" ]; then
     CLOUD_KIND="ec2"
-    CLOUD_INSTANCE_ID="$(curl -fsS --max-time 3 "http://169.254.169.254/latest/meta-data/instance-id" 2>/dev/null || true)"
-    CLOUD_INSTANCE_TYPE="$(curl -fsS --max-time 3 "http://169.254.169.254/latest/meta-data/instance-type" 2>/dev/null || true)"
+    CLOUD_INSTANCE_TYPE="$(imds_get "/latest/meta-data/instance-type")"
 fi
 
 printf '    %s\n' "────────────────────────────────────────────────────────────"
@@ -248,36 +287,61 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 ok "brew   $(brew --prefix)"
 
-CADDY_BIN="$(brew --prefix)/bin/caddy"
-if [ -x "$CADDY_BIN" ]; then
-    ok "caddy  $CADDY_BIN"
+CADDY_BIN="$OPT_ROOT/bin/caddy"
+
+# Go and xcaddy are needed to build the rate-limited Caddy.  xcaddy is not
+# in Homebrew, but `go install` puts it in $GOPATH/bin, which is a normal
+# thing to do on a machine that already has Homebrew.
+if ! command -v go >/dev/null 2>&1 && [ ! -x /usr/local/go/bin/go ]; then
+    info "installing go (needed to build Caddy with the rate-limit module)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        plan "brew install go"
+    else
+        brew install go || die "brew install go failed"
+    fi
+fi
+GO_BIN="$(command -v go 2>/dev/null || printf '%s' /usr/local/go/bin/go)"
+[ -x "$GO_BIN" ] || GO_BIN=""
+if [ -n "$GO_BIN" ]; then
+    ok "go     $($GO_BIN version 2>/dev/null | awk '{print $3}')"
+fi
+
+XCADDY_BIN="${ZCODE_XCADDY_BIN:-}"
+if [ -z "$XCADDY_BIN" ]; then
+    for candidate in "$(command -v xcaddy 2>/dev/null || true)" "$HOME/go/bin/xcaddy" "/usr/local/bin/xcaddy"; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            XCADDY_BIN="$candidate"
+            break
+        fi
+    done
+fi
+if [ -z "$XCADDY_BIN" ] && [ -n "$GO_BIN" ]; then
+    info "installing xcaddy (it builds Caddy with the rate-limit module)"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        plan "go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest"
+    else
+        GOBIN="$HOME/go/bin" "$GO_BIN" install github.com/caddyserver/xcaddy/cmd/xcaddy@latest \
+            || die "could not install xcaddy — it is needed to build Caddy with the rate-limit module"
+        [ -x "$HOME/go/bin/xcaddy" ] && XCADDY_BIN="$HOME/go/bin/xcaddy"
+    fi
+fi
+[ -n "$XCADDY_BIN" ] || XCADDY_BIN=""
+if [ -n "$XCADDY_BIN" ]; then
+    ok "xcaddy $XCADDY_BIN"
+fi
+
+# The Homebrew build of Caddy is still useful as a CLI (fmt, adapt, list-modules),
+# but it CANNOT serve the shipped config: `rate_limit` is not a directive it
+# knows, and a Caddyfile that uses it is a parse error.  The binary that
+# actually runs the box is built below, with the module compiled in.
+if [ -x "$(brew --prefix)/bin/caddy" ]; then
+    ok "caddy  $(brew --prefix)/bin/caddy (stock — CLI use only)"
 else
-    info "installing caddy"
+    info "installing caddy (the CLI; the serving binary is built separately)"
     if [ "$DRY_RUN" -eq 1 ]; then
         plan "brew install caddy"
     else
-        brew install caddy || die "brew install caddy failed"
-        [ -x "$CADDY_BIN" ] || die "caddy was installed but $CADDY_BIN is not there"
-        ok "caddy  $CADDY_BIN"
-    fi
-fi
-
-# The Homebrew build of Caddy has NO rate limiter: `rate_limit` is a
-# community module (github.com/mholt/caddy-ratelimit) that has to be
-# compiled in with xcaddy.  The public deployment is supposed to rate limit
-# at this layer, keyed by client IP, so say so out loud rather than letting
-# the operator discover it from the traffic.  See deploy/README.md —
-# "Rate limiting belongs at THIS layer, keyed by IP".
-if [ "$DRY_RUN" -eq 0 ] && [ -x "$CADDY_BIN" ]; then
-    if "$CADDY_BIN" list-modules 2>/dev/null | grep -q "http.handlers.rate_limit"; then
-        ok "caddy has the rate_limit module"
-    else
-        warn "this Caddy has NO rate_limit module (stock Homebrew build)"
-        warn "the public deployment must rate limit at this layer, keyed by client IP."
-        warn "build it with:  xcaddy build --with github.com/mholt/caddy-ratelimit \\"
-        warn "                  --output /opt/zcode/bin/caddy"
-        warn "then point the ${CADDY_LABEL} launchd daemon at that binary."
-        warn "full instructions: deploy/README.md"
+        brew install caddy || warn "brew install caddy failed — the serving binary is built from source anyway"
     fi
 fi
 
@@ -500,6 +564,62 @@ find_caddyfile() {
 }
 
 log "8. caddy"
+
+# 8a. BUILD the serving binary.
+#
+# The shipped Caddyfile uses the `rate_limit` directive.  Stock Caddy does
+# not know it, and a Caddyfile that uses it on a stock binary is a PARSE
+# ERROR — Caddy refuses to load rather than quietly serving an unprotected
+# site.  So the box needs a Caddy with the module compiled in, and that is
+# what this builds.  Everything below — the validation and the launchd
+# daemon — uses THIS binary, not the Homebrew one.
+#
+# The build is skipped if the binary is already there and already has the
+# module, so a re-run does not recompile Caddy from scratch every time.
+if [ "$DRY_RUN" -eq 1 ]; then
+    plan "build Caddy with the rate_limit module -> $CADDY_BIN"
+    plan "  xcaddy build --with github.com/mholt/caddy-ratelimit --output $CADDY_BIN"
+else
+    need_build=1
+    if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" list-modules 2>/dev/null | grep -q "http.handlers.rate_limit"; then
+        ok "caddy (with the rate_limit module) is already built at $CADDY_BIN"
+        need_build=0
+    fi
+    if [ "$need_build" -eq 1 ]; then
+        [ -n "$XCADDY_BIN" ] || die "xcaddy is not available, so Caddy cannot be built with the
+       rate_limit module.  The shipped Caddyfile needs it.  Install Go and run:
+         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest"
+        info "building Caddy with the rate_limit module (a few minutes)"
+        # Build as the OPERATOR, in a scratch directory.  xcaddy compiles Go
+        # and drops a buildenv_* directory in the working directory, so it
+        # must not run in the repository.  Building as root would also
+        # leave root-owned files in the operator's Go cache and break
+        # their next build; only the install needs root.
+        build_dir="$(mktemp -d)"
+        ( cd "$build_dir" && "$XCADDY_BIN" build \
+            --with github.com/mholt/caddy-ratelimit \
+            --output "$build_dir/caddy" ) || die "the Caddy build failed
+       (scratch directory left at $build_dir — it is safe to delete)"
+        [ -x "$build_dir/caddy" ] || die "the Caddy build reported success but produced no binary
+       (scratch directory left at $build_dir — it is safe to delete)"
+        as_root install -d -m 0755 -o root -g wheel "$(dirname "$CADDY_BIN")"
+        as_root install -m 0755 -o root -g wheel "$build_dir/caddy" "$CADDY_BIN"
+        # Clean up the scratch directory precisely — no recursive delete.
+        rm -f "$build_dir/caddy"
+        rmdir "$build_dir" 2>/dev/null || true
+        [ -x "$CADDY_BIN" ] || die "the Caddy build reported success but $CADDY_BIN is not there"
+    fi
+    # Belt and braces: the config is validated with this binary, so a
+    # missing module is a loud failure here rather than a silent one at
+    # three in the morning.
+    if ! "$CADDY_BIN" list-modules 2>/dev/null | grep -q "http.handlers.rate_limit"; then
+        die "$CADDY_BIN has no rate_limit module.  The shipped Caddyfile uses the
+       rate_limit directive and would be a parse error without it.  Rebuild with:
+         xcaddy build --with github.com/mholt/caddy-ratelimit --output $CADDY_BIN"
+    fi
+    ok "caddy  $CADDY_BIN (with the rate_limit module)"
+fi
+
 if CADDYFILE_SRC="$(find_caddyfile)"; then
     info "Caddyfile: $CADDYFILE_SRC"
 else
@@ -512,7 +632,7 @@ CADDY_CONFIG="$CADDY_DIR/Caddyfile"
 
 if [ "$DRY_RUN" -eq 1 ]; then
     plan "write $CADDY_CONFIG (from $CADDYFILE_SRC, mode 0644)"
-    plan "write $CADDY_ENV    (CLEF_DOMAIN, GUARD_PORT, SITE_ROOT, ACME_EMAIL; mode 0640)"
+    plan "write $CADDY_ENV    (CLEF_DOMAIN, GUARD_PORT, SITE_ROOT, ACME_EMAIL, RL_*; mode 0640)"
     plan "caddy validate --config $CADDY_CONFIG --envfile $CADDY_ENV"
     plan "launchctl bootstrap system $LAUNCHD_DIR/$CADDY_LABEL.plist ; launchctl kickstart -k system/$CADDY_LABEL"
 else
@@ -534,6 +654,13 @@ else
         printf 'GUARD_PORT=%s\n' "$GUARD_PORT"
         printf 'SITE_ROOT=%s\n' "$SITE_ROOT"
         printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
+        # The edge rate limit.  /v1/* runs the model and is the expensive
+        # one; /api/* is JSON and an event stream.  Both are keyed by the
+        # client IP, at the Caddy layer, as required.
+        printf 'RL_TOOL_CALL_EVENTS=%s\n' "$RL_TOOL_CALL_EVENTS"
+        printf 'RL_TOOL_CALL_WINDOW=%s\n' "$RL_TOOL_CALL_WINDOW"
+        printf 'RL_API_EVENTS=%s\n' "$RL_API_EVENTS"
+        printf 'RL_API_WINDOW=%s\n' "$RL_API_WINDOW"
     } > /tmp/zcode-caddy.env
     as_root install -m 0640 -o root -g wheel /tmp/zcode-caddy.env "$CADDY_ENV"
     ok "$CADDY_CONFIG and $CADDY_ENV"

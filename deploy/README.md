@@ -23,21 +23,27 @@ thing the internet can reach**, and it holds no secret at all.
 
 ### How Caddy is started
 
-Caddy is installed with `brew install caddy` and run by a **system launchd
-daemon**, `/Library/LaunchDaemons/com.zcode.caddy.plist`:
+Caddy is **built from source with the rate-limit module compiled in** and
+run by a **system launchd daemon**,
+`/Library/LaunchDaemons/com.zcode.caddy.plist`:
 
 ```
-/opt/homebrew/bin/caddy run --config /opt/zcode/caddy/Caddyfile \
-                            --envfile /opt/zcode/caddy/caddy.env
+/opt/zcode/bin/caddy run --config /opt/zcode/caddy/Caddyfile \
+                          --envfile /opt/zcode/caddy/caddy.env
 ```
+
+It is `/opt/zcode/bin/caddy` and not the Homebrew build because the shipped
+Caddyfile uses the `rate_limit` directive, which the Homebrew build does
+not have — see *Rate limiting belongs at THIS layer, keyed by IP* below.
+`scripts/bootstrap_cloud_metal.sh` builds it.
 
 It runs as `root` because it has to bind ports 80 and 443, which are
 privileged on macOS.  Its own launchd daemon — rather than
 `brew services start caddy` — is what makes the `--envfile` flag possible:
 Homebrew's generated service plist has no such flag, so it could not load
-the canonical `caddy.env` that holds the token.  If you prefer to manage
-Caddy through Homebrew, stop the daemon first (`sudo launchctl bootout
-system/com.zcode.caddy`) or the two will fight over the ports.
+the canonical `caddy.env` that holds the environment.  If you prefer to
+manage Caddy through Homebrew, stop the daemon first (`sudo launchctl
+bootout system/com.zcode.caddy`) or the two will fight over the ports.
 
 ### The request path
 
@@ -271,8 +277,10 @@ from the community module
 [`github.com/mholt/caddy-ratelimit`](https://github.com/mholt/caddy-ratelimit),
 which has to be compiled in.
 
-A Caddy installed with `brew install caddy` — which is what
-`scripts/bootstrap_cloud_metal.sh` does — **does not have it**.
+The zone is **already in `deploy/Caddyfile`** — you do not paste anything — and
+it is written in terms of that module. So the binary that serves the site
+*must* have the module. `scripts/bootstrap_cloud_metal.sh` builds it into
+`/opt/zcode/bin/caddy` and points the launchd daemon at that binary.
 
 This fails loudly, which is the good way to fail: a Caddyfile containing
 `rate_limit` on a binary without the module is a parse error, so Caddy
@@ -287,59 +295,68 @@ If you see that, the fix is the **binary**, not the Caddyfile.
 
 ### Build Caddy with the module
 
+`xcaddy` is **not** a Homebrew formula — `brew install xcaddy` does not
+exist. It is a Go program, so it installs with `go install`:
+
 ```bash
-brew install xcaddy
+brew install go
+go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 mkdir -p /opt/zcode/bin
-xcaddy build --with github.com/mholt/caddy-ratelimit --output /opt/zcode/bin/caddy
+"$(go env GOPATH)/bin/xcaddy" build \
+    --with github.com/mholt/caddy-ratelimit \
+    --output /opt/zcode/bin/caddy
 
 # the module must be in the build
 /opt/zcode/bin/caddy list-modules | grep rate
 #   http.handlers.rate_limit
 ```
 
-Then point the launchd daemon at that binary instead of the Homebrew one.
-In `/Library/LaunchDaemons/com.zcode.caddy.plist`, change the
-`ProgramArguments` entry to `/opt/zcode/bin/caddy`, then:
+The bootstrap does exactly this, and skips the rebuild when the binary is
+already there and already has the module. It then uses that binary for both
+`caddy validate` and the launchd daemon — so the config that is validated is
+the config that is served.
 
-```bash
-sudo launchctl bootout system/com.zcode.caddy
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.zcode.caddy.plist
-sudo launchctl kickstart -k system/com.zcode.caddy
-```
+### The zone
 
-### The configuration to paste
-
-Put this inside the `{$CLEF_DOMAIN}` site block, **above** the `handle`
-blocks — a `rate_limit` directive placed after a `handle` would only apply
-to the route it is written in, and these routes are the ones you want
-protected.
+`deploy/Caddyfile` carries two zones inside the `handle @guard` block:
 
 ```caddyfile
 rate_limit {
-	# The expensive routes: the model forward pass. Tight.
-	zone guard_inference {
+	zone tool_call {
 		match {
 			path /v1/*
 		}
-		key    {remote_host}
-		events 10
-		window 1m
+		key          {remote_host}
+		window       {$RL_TOOL_CALL_WINDOW:1m}
+		events       {$RL_TOOL_CALL_EVENTS:10}
+		ipv6_prefix  64
 	}
-
-	# Everything else that reaches the guard: the session endpoint, the
-	# info endpoint, the label endpoint. Looser, but still bounded.
-	zone guard_api {
+	zone api {
 		match {
 			path /api/*
 		}
-		key    {remote_host}
-		events 30
-		window 1m
+		key          {remote_host}
+		window       {$RL_API_WINDOW:1m}
+		events       {$RL_API_EVENTS:60}
+		ipv6_prefix  64
 	}
-
-	log_key
 }
 ```
+
+Two zones because the two halves cost very different amounts: `/v1/*` runs
+the model, `/api/*` is JSON and the event stream. The **static site and
+`/health` are in neither zone** — a visitor is never throttled for loading a
+page, and the liveness probe is never throttled.
+
+The limits live in the environment, so an operator can tune them without
+editing the file. The bootstrap writes them into `/opt/zcode/caddy/caddy.env`:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RL_TOOL_CALL_EVENTS` | `10` | `/v1/*` requests per IP per window |
+| `RL_TOOL_CALL_WINDOW` | `1m` | the window for `/v1/*` |
+| `RL_API_EVENTS` | `60` | `/api/*` requests per IP per window |
+| `RL_API_WINDOW` | `1m` | the window for `/api/*` |
 
 Notes on that configuration:
 
@@ -348,41 +365,47 @@ Notes on that configuration:
 - **The module uses a sliding window**, so `events 10 / window 1m` means ten
   requests in *any* sixty-second span, not ten per clock minute.
 - **Over the limit the module answers `429` and sets `Retry-After` itself**,
-  before the request is proxied to the guard.
-- **`ipv6_prefix` matters.** A client with a `/64` can cycle through
+  before the request is proxied to the guard. The rejected request never
+  reaches the model — that is the whole point of limiting at the edge.
+- **`ipv6_prefix 64` matters.** A client with a `/64` can cycle through
   billions of IPv6 addresses and walk straight past a per-address limit.
-  Group the prefix so the whole network shares one bucket:
-
-  ```caddyfile
-  rate_limit {
-      zone guard_inference {
-          match {
-              path /v1/*
-          }
-          key         {remote_host}
-          events      10
-          window      1m
-          ipv4_prefix 24
-          ipv6_prefix 64
-      }
-  }
-  ```
-
+  Grouping the prefix puts the whole network in one bucket.
+- **There is deliberately no `ipv4_prefix`.** Masking IPv4 to a `/24` would
+  put an entire university or office NAT into one bucket and throttle every
+  student behind it. An IPv4 client gets its own bucket.
 - **`match` takes Caddy request matchers** (`path`, `method`, `header`, …).
-  Match the expensive paths specifically rather than the whole site, so the
-  static assets are not charged against the API budget.
+  The expensive paths are matched specifically rather than the whole site, so
+  the static assets are not charged against the API budget.
 
 ### Verify it is actually limiting
 
+There is a script for this, and it checks the shipped file rather than a
+copy:
+
 ```bash
-# 1. the module is in the binary
-sudo /opt/zcode/bin/caddy list-modules | grep rate_limit
+# Build the binary once (see above), then:
+ZCODE_CADDY_BIN=/opt/zcode/bin/caddy python3 evals/caddy_edge.py
+```
 
-# 2. the configuration loads
-sudo caddy validate --config /opt/zcode/caddy/Caddyfile \
-                     --envfile /opt/zcode/caddy/caddy.env
+It runs `deploy/Caddyfile` — unmodified — against a real Caddy and a real
+HTTP backend, and asserts that:
 
-# 3. it limits, from outside
+1. the shipped configuration loads on a Caddy with the module;
+2. a **stock** Caddy *refuses* the same file, so a mis-provisioned box
+   fails loudly instead of serving unprotected;
+3. the file is `caddy fmt` clean;
+4. a client that sends its own `X-Forwarded-For` has it **replaced** with
+   the address Caddy saw, so it cannot choose its own bucket;
+5. the limit sheds load **before** the backend — the refused requests never
+   arrive, and the `429` carries a `Retry-After`;
+6. the static site and `/health` are in no zone and are never throttled.
+
+The same script runs in CI, so a Caddyfile that would refuse to start on the
+box cannot be committed.
+
+From outside, on a live deployment:
+
+```bash
 for i in $(seq 1 40); do
     curl -s -o /dev/null -w '%{http_code} %{time_total}s\n' \
         -X POST https://clef.example.com/v1/guard/tool-call \
@@ -391,17 +414,15 @@ done
 #   the first ten answer 200, the rest answer 429
 ```
 
-If step 1 prints nothing, the binary has no limiter and the site is
-unprotected at the edge — fix that before anything else.
-
 ### If you cannot build the module
 
-If you are stuck with the stock Homebrew binary, then the **guard's own
-limiter is the only limit there is**. Set `--rate-limit-rpm` tight (the
-bootstrap defaults to 30), and treat the deployment as *not* edge-limited.
-That is a weaker posture: the request has already been accepted and routed
-before the guard refuses it, and the identity it trusts is a forwarded
-header rather than a socket address.
+There is no fallback, and that is deliberate. The shipped Caddyfile uses
+`rate_limit`, so a stock binary **cannot load it at all** — the deployment
+stops rather than running unprotected.
+
+The guard's own limiter (`--rate-limit-rpm`, the bootstrap defaults to 30)
+is the backstop for direct clients on the box, not a substitute for the edge
+limit. See the section below.
 
 ---
 
