@@ -588,6 +588,27 @@ than absent.
 client whose socket peer is a LAN address cannot buy extra budget by
 rotating the header, and the opt-in does restore it.
 
+### Using the guard from a native bridge
+
+The demo site is one client of the guard. The other one that matters is a
+**native bridge** — the sidecar that spawns `claude -p` / `codex exec` and
+therefore runs the agent's shell and write tools. Before such a tool runs,
+the bridge asks the guard whether it should:
+
+```
+POST http://127.0.0.1:8090/v1/guard/tool-call
+{"prompt": "…", "tool_name": "bash", "tool_args": {"cmd": "…"}}
+```
+
+`allowed: false` means the bridge must not run the tool, and it should hand
+`reason` back to the model so the model can pick another route. The full
+contract, with a real answer from the running guard, is in
+[`BRIDGE.md`](BRIDGE.md) — “Guarding a bridge's tool calls”.
+
+The webview's own tools (`list_files`, `read_file`, `get_diff`, `search`)
+are read-only by design, so the guard has nothing to judge there; the
+judging belongs where the commands are.
+
 ### Device-bound sessions
 
 A visitor of the public demo is admitted by a **session**, not by an
