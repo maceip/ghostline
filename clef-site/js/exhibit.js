@@ -193,7 +193,7 @@ function lockDashboard() {
 
 /* ---------- live SSE stream (/api/events) ---------- */
 function connectLiveSse() {
-  if (sseSource || typeof EventSource === "undefined" || !window.ENABLE_CLEF_SSE) return;
+  if (sseSource || typeof EventSource === "undefined") return;
   mintSession()
     .catch(() => false)
     .then(() => {

@@ -338,12 +338,6 @@
     <p class="label">RepE + CLEF LIVE RESIDUAL STREAM TELEMETRY · READ-ONLY TRACE MODE</p>
   </footer>
 
-  <!-- The live trace stream (/api/events) is an EventSource, and an
-       EventSource cannot send an Authorization header — so the stream only
-       works because the guard admits the browser with a device-bound
-       session cookie. The flag has to be set here, before the module that
-       reads it runs. -->
-  <script>window.ENABLE_CLEF_SSE = true;</script>
   <script type="module" src="./js/exhibit.js"></script>
 </body>
 </html>
