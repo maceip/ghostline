@@ -598,7 +598,14 @@ function renderDetail(rec) {
 async function runLiveProbe() {
   const inputEl = $("ex-input");
   const cmd = inputEl ? inputEl.value.trim() : "";
-  if (!cmd) return;
+  if (!cmd) {
+    // Say something.  Returning silently made the button look dead: the
+    // visitor pressed it and nothing happened at all, with no way to tell
+    // that apart from a broken page.
+    status("TYPE A COMMAND TO TRACE — THE FIELD IS EMPTY", "blocked");
+    if (inputEl) inputEl.focus();
+    return;
+  }
 
   const btn = $("ex-play-btn");
   if (btn) {

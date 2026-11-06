@@ -114,8 +114,23 @@ struct Args {
     /// entry instead of the socket peer.
     ///
     /// Enable this only when a reverse proxy you control sits in front.
+    ///
+    /// The forwarded header is honoured only when the immediate peer is on
+    /// this machine — a proxy on the same box, which is the shape of the
+    /// real deployment.  A header from the network is not evidence: a
+    /// client that can set `X-Forwarded-For` can walk around the rate
+    /// limit by rotating it.  Use --trust-proxy-any-peer if the proxy is
+    /// on another host and you know it rewrites the header.
     #[arg(long, default_value_t = false)]
     trust_proxy: bool,
+    /// Trust `X-Forwarded-For` from a peer that is not on this machine.
+    ///
+    /// Only for a reverse proxy on another host that rewrites the header
+    /// itself.  When this is off, a non-loopback peer's forwarded header
+    /// is ignored and the rate limit keys on the peer's address, so every
+    /// client through that proxy shares one bucket.
+    #[arg(long, default_value_t = false)]
+    trust_proxy_any_peer: bool,
     /// How long a device-bound session lives.
     #[arg(long, default_value_t = 3600)]
     session_ttl_secs: u64,
@@ -206,6 +221,7 @@ fn main() -> Result<()> {
         token: auth_token,
         rate_limit_per_minute: rate_limit_rpm,
         trust_proxy: args.trust_proxy,
+        trust_any_peer: args.trust_proxy_any_peer,
     };
 
     // ---------------------------------------------------------------------

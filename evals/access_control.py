@@ -4,15 +4,20 @@
 Every assertion below is a live HTTP call against a real guard process
 started by this script, or a real process exit code. Nothing is mocked.
 
-It checks four things:
+It checks six things:
 
   1. Authentication — every route except `/health` refuses a request
      without the right bearer token.
   2. Rate limiting — a per-client ceiling that is enforced.
   3. Proxy trust — the client identity comes from the right-most
      `X-Forwarded-For` entry, so a forged entry cannot buy extra budget.
-  4. The safety rail — the guard refuses to bind a routable address
+  4. No ceiling — `--rate-limit-rpm 0` means unlimited, not one request
+     a minute.
+  5. The safety rail — the guard refuses to bind a routable address
      without a token.
+  6. Header provenance — a forwarded header from a peer that is not on
+     this machine is not evidence of anything, so it cannot buy budget;
+     and the explicit `--trust-proxy-any-peer` opt-in does restore it.
 
 Usage:
     python3 evals/access_control.py
@@ -53,17 +58,60 @@ def check(ok: bool, name: str, detail: str = "") -> bool:
     return ok
 
 
+def skip(name: str, detail: str = "") -> None:
+    """Something this machine cannot check. Loud, but not a failure.
+
+    A machine with no non-loopback address cannot produce the peer a
+    network client would look like, so that check cannot run here.  That
+    is a limitation of the host, not a defect in the guard, so it is
+    reported rather than counted as a pass or a failure.
+    """
+    print(f"  [SKIP] {name}" + (f"  — {detail}" if detail else ""))
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
 
 
+def free_port_any() -> int:
+    """A port free on every interface, for a guard that binds 0.0.0.0."""
+    with socket.socket() as sock:
+        sock.bind(("0.0.0.0", 0))
+        return sock.getsockname()[1]
+
+
+def local_address() -> str | None:
+    """This machine's own non-loopback address.
+
+    A guard that is reachable from the network sees a peer that is not on
+    loopback.  To reproduce that in a test, the client binds this address
+    as its source, so the guard's socket peer is the machine's LAN address
+    rather than 127.0.0.1.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 53))
+        addr = sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+    if addr.startswith("127."):
+        return None
+    return addr
+
+
 def request(port: int, path: str, token: str | None = None,
             forwarded_for: str | None = None, method: str = "GET",
-            body: dict | None = None) -> tuple[int, dict[str, str]]:
+            body: dict | None = None, host: str = "127.0.0.1",
+            source_address: str | None = None) -> tuple[int, dict[str, str]]:
     """One HTTP request. Returns the status and the response headers."""
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    if isinstance(source_address, str):
+        source_address = (source_address, 0)
+    conn = http.client.HTTPConnection(
+        host, port, timeout=30, source_address=source_address)
     headers = {}
     if token is not None:
         headers["Authorization"] = f"Bearer {token}"
@@ -82,10 +130,11 @@ def request(port: int, path: str, token: str | None = None,
         conn.close()
 
 
-def start_guard(port: int, token_file: str, extra: list[str]) -> subprocess.Popen:
+def start_guard(port: int, token_file: str, extra: list[str],
+                host: str = "127.0.0.1") -> subprocess.Popen:
     cmd = [
         str(PROJ / "target/debug/qwen-clef-repe-guard"),
-        "--host", "127.0.0.1",
+        "--host", host,
         "--port", str(port),
         "--upstream", "http://127.0.0.1:8123",
         "--model", MODEL,
@@ -225,6 +274,76 @@ def main() -> int:
               "the refusal explains itself",
               (proc.stderr + proc.stdout).strip().splitlines()[-1][:90]
               if (proc.stderr + proc.stdout).strip() else "")
+
+        # ------------------------------------------------------------------
+        # 6. A forwarded header is only evidence when it comes from a proxy
+        #    this guard can vouch for.
+        # ------------------------------------------------------------------
+        print("\n6. a forwarded header from the network is not evidence")
+        lan = local_address()
+        if lan is None:
+            skip("a forwarded header from the network is not evidence",
+                 "this machine has no non-loopback address to test with")
+        else:
+            net_port = free_port_any()
+            opt_port = free_port_any()
+            print(f"  (the client will look like {lan} to the guard)")
+            net_proc = start_guard(
+                net_port, str(token_file),
+                ["--rate-limit-rpm", "3", "--trust-proxy"],
+                host="0.0.0.0")
+            opt_proc = start_guard(
+                opt_port, str(token_file),
+                ["--rate-limit-rpm", "3", "--trust-proxy",
+                 "--trust-proxy-any-peer"],
+                host="0.0.0.0")
+            try:
+                if not wait_for_health(net_port):
+                    print("  the network-facing guard never became healthy",
+                          file=sys.stderr)
+                    return 2
+                if not wait_for_health(opt_port):
+                    print("  the opted-in guard never became healthy",
+                          file=sys.stderr)
+                    return 2
+
+                def net_request(port: int, forwarded: str | None = None) -> int:
+                    return request(port, "/api/info", token=TOKEN,
+                                   forwarded_for=forwarded, host=lan,
+                                   source_address=lan)[0]
+
+                codes = [net_request(net_port, "6.6.6.6") for _ in range(3)]
+                check(codes == [200, 200, 200],
+                      "a network client gets its own budget", f"codes={codes}")
+                status = net_request(net_port, "6.6.6.6")
+                check(status == 429, "that budget runs out", f"status={status}")
+                status = net_request(net_port, "9.9.9.9")
+                check(status == 429,
+                      "rotating the forwarded header buys no new budget",
+                      f"status={status}")
+                status = net_request(net_port, "203.0.113.200")
+                check(status == 429,
+                      "a third forwarded address is still the same bucket",
+                      f"status={status}")
+
+                # The explicit opt-in is what a proxy on another host needs.
+                codes = [net_request(opt_port, "6.6.6.6") for _ in range(3)]
+                check(codes == [200, 200, 200],
+                      "--trust-proxy-any-peer lets the header speak",
+                      f"codes={codes}")
+                status = net_request(opt_port, "6.6.6.6")
+                check(status == 429, "that budget runs out too", f"status={status}")
+                status = net_request(opt_port, "9.9.9.9")
+                check(status == 200,
+                      "and then a rotated header does move the bucket",
+                      f"status={status}")
+            finally:
+                for proc in (net_proc, opt_proc):
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
     finally:
         for proc in (auth_proc, limit_proc, open_proc):
             proc.terminate()

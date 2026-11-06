@@ -291,7 +291,14 @@ async function runCustomTimelineProbe() {
   const inputEl = $("tl-custom-input");
   const btn = $("tl-custom-btn");
   const cmd = inputEl ? inputEl.value.trim() : "";
-  if (!cmd) return;
+  if (!cmd) {
+    // A button that does nothing at all looks broken.  Say what is
+    // missing on the button itself, and leave it there until the visitor
+    // types something — a message that flashes away is barely read.
+    if (btn) btn.textContent = "TYPE A COMMAND FIRST";
+    if (inputEl) inputEl.focus();
+    return;
+  }
 
   const seq = ++activeProbeSeq;
   if (btn) {
@@ -399,6 +406,13 @@ const customInput = $("tl-custom-input");
 if (customInput) {
   customInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") runCustomTimelineProbe();
+  });
+  // Once there is something to press the button with, put the button
+  // back to what it says normally.
+  customInput.addEventListener("input", () => {
+    if (customBtn && customBtn.textContent.trim() === "TYPE A COMMAND FIRST") {
+      customBtn.innerHTML = `<span class="live-dot live-dot-btn" aria-hidden="true"></span> PROBE LAYER 16 →`;
+    }
   });
 }
 

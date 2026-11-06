@@ -92,14 +92,14 @@ step "7/10 parity suites"
 (cd "$ROOT" && timeout 900 uv run --python 3.12 --with mlx-lm python3 check_render_parity.py | tail -2)
 record "7/10 render parity" $?
 (cd "$PROJ" && timeout 1800 cargo run --release --quiet --bin gdn_probe -- "$CLEF" artifacts/gdn_probe >/dev/null 2>&1 \
-  && timeout 900 uv run --python 3.12 --with mlx-lm python3 tools/compare_gdn.py | grep -E "layer 0|max_abs =|PASS|FAIL" | tail -4)
+  && timeout 900 uv run --python 3.12 --with mlx-lm python3 tools/compare_gdn.py | grep -E "layer 0|max_abs =|relative error|PASS|FAIL" | tail -6)
 record "7/10 GDN parity" $?
 (cd "$PROJ" && timeout 1800 uv run --python 3.12 --with torch --with mlx-lm python3 tools/joint_head_reference.py >/dev/null 2>&1 \
   && timeout 600 cargo run --quiet --bin joint_head_probe -- --input tools/fixtures/input --output tools/fixtures/rust >/dev/null 2>&1 \
   && timeout 900 uv run --python 3.12 --with torch --with mlx-lm python3 tools/joint_head_reference.py | tail -3)
 record "7/10 joint head parity" $?
 
-step "8/10 access control (auth, rate limit, proxy trust, safety rail)"
+step "8/10 access control (auth, rate limit, proxy trust, header provenance, safety rail)"
 python3 "$ROOT/evals/access_control.py"
 record "8/10 access control" $?
 

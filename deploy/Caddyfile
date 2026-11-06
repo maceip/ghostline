@@ -212,8 +212,11 @@
 			# about it.
 			#
 			# X-Real-IP is NOT a Caddy default, so this one earns its
-			# place: the guard reads it to key its own backstop limiter,
-			# and --trust-proxy makes it believe it.
+			# place: it is the address Caddy saw on the socket, which
+			# is what the access log and anything else downstream
+			# reads.  The guard does NOT read it — the guard keys its
+			# own backstop limiter on the right-most X-Forwarded-For
+			# entry above, which Caddy fills with the same address.
 			header_up X-Real-IP {remote_host}
 
 			# Stream the response through, unbuffered, so the SSE endpoint

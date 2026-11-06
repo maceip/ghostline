@@ -487,6 +487,17 @@ nearest proxy observed — and Caddy overwrites that header with the address it
 actually saw. A client therefore cannot forge its way into somebody else's
 budget.
 
+The header is only trusted when it comes from a peer the guard can vouch
+for. `--trust-proxy` honours it **only from a peer on this machine**, which
+is the shape of this deployment: the guard binds `127.0.0.1` and Caddy on
+the same box forwards to it. A forwarded header arriving from the network is
+not evidence — anyone can set it — so it is ignored and the client is keyed
+on the socket peer instead, which is the safe direction to fail: every
+client through such a proxy shares one bucket, so the limit is stricter
+than intended rather than absent. If you put a proxy on *another* host, add
+`--trust-proxy-any-peer`, and only then, if that proxy rewrites the header
+itself.
+
 Allowed responses carry the budget:
 
 ```

@@ -1035,7 +1035,12 @@ async fn access_guard(
     let mut decision = None;
     if let Some(limiter) = state.enforcer.limiter.as_ref() {
         let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
-        let key = client_key(Some(peer), forwarded, access.trust_proxy);
+        let key = client_key(
+            Some(peer),
+            forwarded,
+            access.trust_proxy,
+            access.trust_any_peer,
+        );
         let verdict = limiter.check(&key, Instant::now());
         if !verdict.allowed {
             debug!(client = %key, limit = verdict.limit, "rejected: rate limit");
@@ -1063,7 +1068,9 @@ async fn access_guard(
         device_hash,
         device_cookie: device_cookie.clone(),
         device_cookie_is_new,
-        ip: client_key(Some(peer), None, false),
+        // The socket peer, never a forwarded header: this is the address the
+        // guard itself saw, which is the only one it can vouch for.
+        ip: client_key(Some(peer), None, false, false),
     });
 
     let mut response = next.run(request).await;

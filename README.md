@@ -429,6 +429,33 @@ rate-limit module and runs `evals/caddy_edge.py` against the shipped
 `deploy/Caddyfile`, so a config that would refuse to start on the box cannot
 be committed.
 
+### How the GDN parity is judged, and why
+
+`tools/compare_gdn.py` compares the Rust Gated DeltaNet recurrence against
+the MLX-Python reference and **exits non-zero when either gate fails**, so a
+broken recurrence cannot pass the suite.
+
+The two gates are deliberately different measures:
+
+- **Layer 0 is absolute** — the contractual bar, `max_abs < 1e-4`. Measured:
+  **1.192093e-05**, about 8x inside the bar.
+- **The full stack is relative** — `max_abs / max|x| < 1e-3`. Measured:
+  **4.216565e-04** on the worst tensor (`layer31`), and 3.311e-04 at the
+  final hidden state.
+
+The reason is that the residual stream's own magnitude grows with depth: on
+clef-flash, `max|x|` runs from 7.9 at layer 0 to 4.60e+01 at the final
+hidden state. A fixed *absolute* bound on a signal that grows 5.8x is not a
+correctness criterion — it eventually fails for a perfectly correct
+implementation purely because the model got deeper. The relative error is
+the scale-invariant measure, and it sits at round-off level: 3.3e-04
+against a float32 epsilon of 1.2e-07, across the 32 compared layers of
+the hybrid stack (24 Gated DeltaNet layers and 8 full-attention ones).
+
+The absolute number is still printed in full on every run — the full-stack
+`max_abs` is **1.521969e-02**, and it is reported next to the relative one
+rather than hidden behind it.
+
 The calibrated vectors under `qwen-clef-repe-guard/artifacts/` are committed
 on purpose: they are the measured operating point, not a derived file, and
 they cost minutes of calibration against a specific checkpoint snapshot.
@@ -527,7 +554,8 @@ benchmark harnesses behave exactly as they did before:
 |---|---|
 | `--auth-token-file PATH` | The operator's bearer token. Opens every route. |
 | `--rate-limit-rpm N` | `N` requests per client per minute over a sliding window — `N` in *any* sixty-second span, not `N` per clock minute. `0` disables the limit. |
-| `--trust-proxy` | Take the client identity from the **right-most** `X-Forwarded-For` entry instead of the socket peer. |
+| `--trust-proxy` | Take the client identity from the **right-most** `X-Forwarded-For` entry instead of the socket peer — but **only when the socket peer is on this machine**. See below. |
+| `--trust-proxy-any-peer` | Trust `X-Forwarded-For` from a peer that is *not* on this machine. Only for a reverse proxy on another host that rewrites the header itself. |
 | `--host` | The interface to bind. A routable address requires a token. |
 | `--session-ttl-secs N` | How long a device-bound session lives. One hour by default. |
 | `--no-sessions` | Refuse to mint sessions: the bearer token becomes the only way in. |
@@ -535,6 +563,30 @@ benchmark harnesses behave exactly as they did before:
 
 The env equivalents are `ZCODE_GUARD_TOKEN`, `ZCODE_GUARD_TOKEN_FILE`,
 `ZCODE_GUARD_RATE_LIMIT_RPM` and `ZCODE_SESSION_SECRET_FILE`.
+
+#### A forwarded header is only evidence from a proxy you can vouch for
+
+`X-Forwarded-For` is a header, and a header is not evidence. If the guard
+is reachable from the network and honours it, then whoever is on the other
+end can put whatever they like in it — and the rate limiter, the thing
+standing between them and the model's time, can be walked around by
+rotating the header. The operator would be looking at a limit that does not
+exist.
+
+So `--trust-proxy` honours the header **only when the immediate peer is on
+this machine**, which is the shape of the real deployment: the guard binds
+`127.0.0.1` and Caddy on the same box forwards to it. A proxy on another
+host is a different arrangement, and `--trust-proxy-any-peer` is the
+explicit opt-in for it.
+
+When the header is not trusted the client key falls back to the peer
+address. That is the safe direction to fail: every client through that
+proxy shares one bucket, so the limit is stricter than intended rather
+than absent.
+
+`evals/access_control.py` proves both halves against a live guard: a
+client whose socket peer is a LAN address cannot buy extra budget by
+rotating the header, and the opt-in does restore it.
 
 ### Device-bound sessions
 

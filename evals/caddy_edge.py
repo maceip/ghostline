@@ -30,8 +30,9 @@ Usage:
 
 Environment:
     ZCODE_CADDY_BIN  a Caddy binary that has the rate_limit module.
-                     Defaults to /opt/zcode/bin/caddy, then to `caddy` on
-                     PATH if that build has the module.
+                     Defaults to /opt/zcode/bin/caddy, then to
+                     /tmp/caddy-rl/caddy, then to `caddy` on PATH if that
+                     build has the module.
     ZCODE_CADDY_STOCK  a stock Caddy, used only to prove the refusal.
 """
 from __future__ import annotations
@@ -90,7 +91,10 @@ def find_caddy() -> str | None:
     explicit = os.environ.get("ZCODE_CADDY_BIN")
     if explicit and pathlib.Path(explicit).is_file():
         return explicit
-    for candidate in ("/opt/zcode/bin/caddy", shutil.which("caddy") or ""):
+    # /tmp/caddy-rl/caddy is where this script's own message tells you to
+    # put one, so it has to be somewhere it looks.
+    for candidate in ("/opt/zcode/bin/caddy", "/tmp/caddy-rl/caddy",
+                      shutil.which("caddy") or ""):
         if candidate and pathlib.Path(candidate).is_file() and have_module(candidate):
             return candidate
     return None

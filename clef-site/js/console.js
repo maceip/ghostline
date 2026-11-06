@@ -368,7 +368,21 @@ export class Console {
     if (!input || !btn) return;
     const go = async () => {
       const cmd = input.value.trim();
-      if (!cmd || !this.live) return;
+      if (!cmd) {
+        // Say what is missing instead of doing nothing: a button that
+        // swallows the click looks like a dead page.
+        if (this.roots.judgeNote)
+          this.roots.judgeNote.textContent =
+            "[ TYPE A COMMAND TO JUDGE — THE FIELD IS EMPTY ]";
+        input.focus();
+        return;
+      }
+      if (!this.live) {
+        if (this.roots.judgeNote)
+          this.roots.judgeNote.textContent =
+            "[ REQUIRES LOCAL GUARD · START ONE ON :8090 TO JUDGE NEW COMMANDS ]";
+        return;
+      }
       btn.disabled = true;
       btn.textContent = "JUDGING…";
       const probe = () =>

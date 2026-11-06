@@ -42,6 +42,11 @@ pub struct AccessConfig {
     pub rate_limit_per_minute: Option<u32>,
     /// Whether `X-Forwarded-For` may be used for client identity.
     pub trust_proxy: bool,
+    /// Whether the forwarded header is trusted from a NON-loopback peer too.
+    ///
+    /// Off by default.  See [`client_key`] for why the header is only
+    /// trusted from this machine unless this is turned on.
+    pub trust_any_peer: bool,
 }
 
 impl AccessConfig {
@@ -130,14 +135,42 @@ pub fn check_bearer(header: Option<&str>, expected: &str) -> AuthOutcome {
 /// that is the address the nearest trusted proxy saw. The socket peer is
 /// the fallback; when the proxy did not forward the header, every request
 /// collapses onto the proxy itself, which is the safe direction to fail.
+///
+/// THE FORWARDED HEADER IS ONLY TRUSTED FROM A LOOPBACK PEER
+/// ----------------------------------------------------------
+/// A header is not evidence.  If the guard is reachable from the network
+/// and honours `X-Forwarded-For`, then whoever is on the other end can
+/// put whatever they like in it — and the rate limiter, which is the
+/// thing standing between them and the model's time, can be walked around
+/// by rotating the header.  The operator would be looking at a limit that
+/// does not exist.
+///
+/// So the header is honoured only when the immediate peer is on this
+/// machine, which is the shape of the real deployment: the guard binds
+/// 127.0.0.1 and Caddy on the same box forwards to it.  A proxy on
+/// another host is a different arrangement, and `trust_any_peer` is the
+/// explicit opt-in for it.
+///
+/// When the header is not trusted the key falls back to the peer address.
+/// That is the safe direction to fail: every client through that proxy
+/// shares one bucket, so the limit is stricter than intended rather than
+/// absent.
 pub fn client_key(
     peer: Option<SocketAddr>,
     forwarded_for: Option<&str>,
     trust_proxy: bool,
+    trust_any_peer: bool,
 ) -> String {
     if trust_proxy {
-        if let Some(observed) = rightmost_forwarded_for(forwarded_for) {
-            return observed;
+        let from_a_trusted_peer = match peer {
+            Some(addr) => trust_any_peer || addr.ip().is_loopback(),
+            // An unknown peer is not a trusted one.
+            None => false,
+        };
+        if from_a_trusted_peer {
+            if let Some(observed) = rightmost_forwarded_for(forwarded_for) {
+                return observed;
+            }
         }
     }
     match peer {
@@ -347,21 +380,43 @@ mod tests {
     #[test]
     fn the_client_key_uses_the_right_most_forwarded_entry() {
         // A client that prepends a forged address cannot move its bucket.
-        let key = client_key(peer("127.0.0.1"), Some("6.6.6.6, 203.0.113.9"), true);
+        let key = client_key(peer("127.0.0.1"), Some("6.6.6.6, 203.0.113.9"), true, false);
         assert_eq!(key, "203.0.113.9");
         // Without the proxy flag the header is ignored entirely.
-        let key = client_key(peer("127.0.0.1"), Some("6.6.6.6, 203.0.113.9"), false);
+        let key = client_key(peer("127.0.0.1"), Some("6.6.6.6, 203.0.113.9"), false, false);
         assert_eq!(key, "127.0.0.1");
         // A trusted proxy that forwards nothing falls back to the peer.
-        let key = client_key(peer("127.0.0.1"), None, true);
+        let key = client_key(peer("127.0.0.1"), None, true, false);
         assert_eq!(key, "127.0.0.1");
-        let key = client_key(peer("127.0.0.1"), Some("  "), true);
+        let key = client_key(peer("127.0.0.1"), Some("  "), true, false);
         assert_eq!(key, "127.0.0.1");
     }
 
     #[test]
+    fn the_forwarded_header_is_ignored_from_a_peer_that_is_not_on_this_machine() {
+        // A guard reachable from the network must not take a client's word
+        // for who it is: the header is only honoured from a loopback peer.
+        let key = client_key(peer("203.0.113.7"), Some("6.6.6.6"), true, false);
+        assert_eq!(key, "203.0.113.7");
+        // A client that rotates the header does not move its bucket.
+        let a = client_key(peer("203.0.113.7"), Some("6.6.6.6"), true, false);
+        let b = client_key(peer("203.0.113.7"), Some("9.9.9.9"), true, false);
+        assert_eq!(a, b);
+        // The explicit opt-in for a proxy on another host restores it.
+        let key = client_key(peer("203.0.113.7"), Some("6.6.6.6"), true, true);
+        assert_eq!(key, "6.6.6.6");
+    }
+
+    #[test]
+    fn an_unknown_peer_is_not_a_trusted_one() {
+        // No peer means no evidence that the header came from a proxy.
+        let key = client_key(None, Some("6.6.6.6"), true, false);
+        assert_eq!(key, "unknown");
+    }
+
+    #[test]
     fn the_client_key_survives_a_missing_peer() {
-        let key = client_key(None, None, false);
+        let key = client_key(None, None, false, false);
         assert_eq!(key, "unknown");
     }
 }
