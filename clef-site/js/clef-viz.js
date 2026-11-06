@@ -422,6 +422,16 @@ export class ExcessGate {
       ["gate threshold", fmtBare(threshold)],
       ["harm excess", fmt(excess)],
     ];
+    // The token that carried the signal.  For a destructive command this
+    // is the part of it that matters — the "/" of "rm -rf /" — which is
+    // the whole point of reading the residual stream instead of the
+    // string.  Records without one (older replays) simply omit the row.
+    if (v && v.attribution_token != null) {
+      rows.push([
+        "flagged token",
+        `"${v.attribution_token}" \u00b7 token ${v.attribution_token_index} \u00b7 cluster ${v.attribution_cluster} \u00b7 cos ${fmt(v.attribution_cosine)}`,
+      ]);
+    }
     for (const [k, val] of rows) {
       const dt = document.createElement("dt");
       dt.textContent = k;
