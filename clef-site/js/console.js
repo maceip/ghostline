@@ -8,7 +8,10 @@
  */
 import { LayerSpine, ExcessGate, PcaTriad, EventTape } from "./clef-viz.js";
 
-const DEFAULT_BASE = "http://127.0.0.1:8090";
+// Same-origin by default: tools/serve.py proxies the guard on this origin
+// (the guard itself sends no CORS headers). Override with ?base=http://host:port
+// when the site is served next to a remote engine.
+const DEFAULT_BASE = "";
 
 export class Console {
   constructor(roots) {
@@ -108,7 +111,9 @@ export class Console {
   _applyFilter() {
     const c = this.state.cluster;
     this.filtered =
-      c === "all" ? this.records.slice() : this.records.filter((r) => r.cluster_id === Number(c));
+      c === "all"
+        ? this.records.slice()
+        : this.records.filter((r) => r.cluster_id === Number(c));
   }
 
   /* ---------------- judging ---------------- */
@@ -124,14 +129,18 @@ export class Console {
     let blocked = 0;
     let harmful = 0;
     let benignWrong = 0;
+    let benign = 0;
     const rows = [];
     for (const rec of this.filtered) {
       const b = this._blocked(rec);
+      // Benchmark tallies use only the labeled corpus; ad-hoc live judgments
+      // appear in the tape and rack but are not part of the capture's rates.
       if (rec.label === "harmful") {
         harmful++;
         if (b) blocked++;
-      } else if (b) {
-        benignWrong++;
+      } else if (rec.label === "benign") {
+        benign++;
+        if (b) benignWrong++;
       }
       rows.push({
         id: rec.id,
@@ -154,9 +163,7 @@ export class Console {
         <span class="count-num">${blocked}/${harmful}</span>
         <span class="count-lab">findings blocked</span>
         <span class="count-sep">·</span>
-        <span class="count-num ${benignWrong ? "is-alarm" : ""}">${benignWrong}/${
-          this.filtered.length - harmful
-        }</span>
+        <span class="count-num ${benignWrong ? "is-alarm" : ""}">${benignWrong}/${benign}</span>
         <span class="count-lab">false positives</span>`;
     }
     this._renderRack();
@@ -172,6 +179,7 @@ export class Console {
       ["0", "DESTROY"],
       ["1", "STEAL"],
       ["2", "EXFIL"],
+      ["-1", "AD-HOC"],
     ];
     for (const [cid, label] of lanes) {
       const recs = this.filtered.filter((r) => String(r.cluster_id) === cid);
@@ -271,7 +279,10 @@ export class Console {
     const chip = this.roots.sourceChip;
     if (!chip) return;
     if (this.live) {
-      chip.textContent = `[ LIVE · ${this.liveBase.replace(/^https?:\/\//, "")} ]`;
+      const where = this.liveBase
+        ? this.liveBase.replace(/^https?:\/\//, "")
+        : (typeof location !== "undefined" ? location.host : "local");
+      chip.textContent = `[ LIVE · ${where} ]`;
       chip.className = "chip chip-live";
     } else {
       chip.textContent = "[ REPLAY · 36 AUDIT EVENTS · 2026-11-06 ]";
@@ -289,6 +300,10 @@ export class Console {
   }
 
   async probeLive(base = DEFAULT_BASE) {
+    if (base === "" && typeof location !== "undefined") {
+      const q = new URLSearchParams(location.search).get("base");
+      if (q) base = q;
+    }
     this.liveBase = base;
     try {
       const ctl = new AbortController();
@@ -346,6 +361,7 @@ export class Console {
           event: null,
         };
         this.records.unshift(rec);
+        this._applyFilter();
         this._rejudgeAll();
         this.select(rec.id);
         input.value = "";
