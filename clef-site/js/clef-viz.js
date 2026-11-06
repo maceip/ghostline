@@ -283,7 +283,7 @@ export class LayerSpine {
 export class ExcessGate {
   constructor(container, opts = {}) {
     this.container = container;
-    this.render(null, { threshold: 0.015, mode: "enforce", baseline: "panel" });
+    this.render(null, { threshold: 0.002, mode: "monitor", baseline: "panel" });
   }
 
   /**
@@ -292,8 +292,8 @@ export class ExcessGate {
    */
   render(rec, state = {}) {
     const C = palette();
-    const threshold = state.threshold ?? 0.015;
-    const mode = state.mode || "enforce";
+    const threshold = state.threshold ?? 0.002;
+    const mode = state.mode || "monitor";
     const useBaseline = state.baseline !== "off";
 
     const v = rec && rec.verdict ? rec.verdict : null;
@@ -302,7 +302,16 @@ export class ExcessGate {
     const baseline = v ? v.harm_baseline : null;
     const shown = useBaseline ? excess : cosine;
     const blocked = shown != null && shown >= threshold;
-    const word = shown == null ? "—" : blocked ? "BLOCKED" : "PASSED";
+    const word =
+      shown == null
+        ? "—"
+        : mode === "monitor"
+          ? blocked
+            ? "HARM FLAGGED"
+            : "BENIGN TRACE"
+          : blocked
+            ? "BLOCKED"
+            : "PASSED";
     const stateColor = shown == null ? C.disabled : blocked ? C.accent : C.success;
 
     const root = document.createElement("div");
@@ -322,11 +331,13 @@ export class ExcessGate {
       badge.className = "gate-state-icon";
       badge.src =
         mode === "monitor"
-          ? "./assets/logo/icon-mint-dormant.png"
+          ? blocked
+            ? "./assets/logo/icon-sky-verified.png"
+            : "./assets/logo/icon-mint-dormant.png"
           : blocked
             ? "./assets/logo/icon-sky-verified.png"
             : "./assets/logo/icon-acid-recompiled.png";
-      badge.alt = mode === "monitor" ? "Monitor state" : blocked ? "Circuit tripped" : "Verified safe";
+      badge.alt = mode === "monitor" ? "Read-only trace state" : blocked ? "Circuit tripped" : "Verified safe";
       badge.width = 28;
       badge.height = 31;
       headerRow.appendChild(badge);
@@ -337,14 +348,14 @@ export class ExcessGate {
     sub.className = "gate-sub";
     sub.textContent =
       shown == null
-        ? "select a tool call to inspect L16 verdict"
+        ? "select a tool call to inspect its layer-16 brain trace"
         : mode === "enforce"
           ? blocked
             ? "ENFORCE · HTTP 403 RETURNED TO AGENT BEFORE EXECUTION"
             : "ENFORCE · VERIFIED SAFE · FORWARDED TO RUNTIME"
           : blocked
-            ? "MONITOR · THRESHOLD EXCEEDED · LOGGED ONLY"
-            : "MONITOR · BELOW THRESHOLD · LOGGED ONLY";
+            ? "READ-ONLY TRACE · HARM SIGNAL FLAGGED AT LAYER 16 (NOT BLOCKING)"
+            : "READ-ONLY TRACE · CALM ACTIVATION BELOW THRESHOLD AT LAYER 16";
     root.appendChild(sub);
 
     // Continuous + Segmented 24-block hardware meter across [-0.15, +0.20]
@@ -522,12 +533,19 @@ export class EventTape {
     const ts = entry.ts_ms
       ? new Date(entry.ts_ms).toISOString().slice(11, 23)
       : entry.id || "--";
+    const statusLabel = entry.readonly
+      ? entry.blocked
+        ? "FLAGGED"
+        : "BENIGN"
+      : entry.blocked
+        ? "BLOCK"
+        : "PASS";
     row.innerHTML = `
       <span class="tape-ts">${ts}</span>
       <span class="tape-tool">${entry.tool_name || "?"}</span>
       <span class="tape-cmd">${escapeHtml(entry.tool_args_preview || "")}</span>
       <span class="tape-x">${fmt(entry.harm_excess)}</span>
-      <span class="tape-v">${entry.blocked ? "BLOCK" : "PASS"}</span>`;
+      <span class="tape-v">${statusLabel}</span>`;
     row.dataset.id = entry.id ?? "";
     this.container.insertBefore(row, this.container.firstChild);
     this.rows.push(row);
