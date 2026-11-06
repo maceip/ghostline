@@ -456,25 +456,33 @@ bash scripts/install_guard.sh --help
 ### Putting it on the internet
 
 The guard binds `127.0.0.1` and **refuses to start** on a routable address
-without a bearer token, so the public face is a reverse proxy that holds the
-token server-side:
+without a bearer token, so the public face is a reverse proxy in front of it:
 
 ```
 browser ──https──> Caddy ──http──> guard (127.0.0.1:8090) ──http──> mlx_lm (127.0.0.1:8123)
                     │
-                    └── Authorization: Bearer <token>   ← added here, server-side
+                    └── rate limit by client IP, before the request is proxied
 ```
 
 `deploy/Caddyfile` terminates TLS with an automatically renewed ACME
 certificate, serves `clef-site/` on the same origin as the API so the browser
-never makes a cross-origin request, injects the token into every proxied
-request, and replaces `X-Forwarded-For` with the address it actually saw — a
-client cannot forge its way into somebody else's rate-limit budget.
+never makes a cross-origin request, and rate limits by the address it saw on
+the socket — a client cannot forge its way into somebody else's budget by
+sending an `X-Forwarded-For`.
 
-`scripts/bootstrap_cloud_metal.sh` provisions a cloud macOS box with that
-front end (Caddy, the site copy, the service account, the launchd daemons,
-and a validated config). `deploy/README.md` is the operator's notes — TLS,
-token rotation, rate-limit checks, troubleshooting.
+**Caddy deliberately injects no bearer token.** The guard admits two
+credentials: the operator's token, which direct clients on the box send
+themselves, and a device-bound session cookie that a visitor gets from
+`POST /api/session`. If the proxy added the operator's token to every
+request, the guard could not tell a visitor from the operator and the
+session gate would be decorative.
+
+`scripts/provision_ec2_mac.sh` gets you an Apple Silicon Mac on EC2 (the
+guard needs Metal on an Apple GPU, so an Intel Mac will not do), and
+`scripts/bootstrap_cloud_metal.sh` provisions the box with that front end
+(Caddy with the rate-limit module, the site copy, the service account, the
+launchd daemons, and a validated config). `deploy/README.md` is the
+operator's notes — TLS, token rotation, rate-limit checks, troubleshooting.
 
 ### Rate limiting belongs at the Caddy layer, by IP
 

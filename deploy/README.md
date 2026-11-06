@@ -7,6 +7,51 @@ macOS box; this file is what you read when something is wrong.
 
 ---
 
+## Getting a box
+
+The bootstrap installs the guard on a box that already exists.  On EC2, the
+box is an **Apple Silicon Mac on a dedicated host**, and
+`scripts/provision_ec2_mac.sh` provisions one:
+
+```bash
+bash scripts/provision_ec2_mac.sh --dry-run          # everything read-only
+bash scripts/provision_ec2_mac.sh --region eu-central-1
+```
+
+The dry run is not a mock: it performs the quota check, the availability-zone
+lookup and the AMI lookup for real, and only skips the two calls that cost
+money.
+
+Three things about it that are easy to get wrong:
+
+- **The unit of billing is the dedicated host, not the instance.** A Mac
+  instance runs on a host that is yours alone, and the host is what you are
+  charged for. One host, one instance, one price.
+- **There is a 24-hour minimum.** Apple's macOS licence requires it, so a
+  host bills for a full day whether you use it for five minutes or a week.
+  The script passes `--auto-release 24:00` so a forgotten box stops billing
+  after the minimum, and AWS refuses a manual release before then
+  (`Client.HostMinAllocationPeriodUnexpired`). At the measured us-east-1
+  rate, `mac2-m2.metal` is $0.878/hour, so the first day is $21.07.
+- **The quota is per region.** `Running Dedicated mac2-m2 Hosts` is a
+  service quota, and it is zero in some regions and not in others — this
+  account has 5.0 in `eu-central-1` and 0.0 in `us-east-1`. When the quota
+  is zero the script says so and scans the other regions for one that has
+  it, rather than leaving you to guess.
+
+An Intel Mac (`mac1.metal`) is refused by the script: the guard runs on
+`mlx-rs`, which needs Metal on an Apple GPU.
+
+Once the machine is up:
+
+```bash
+ssh -i ~/.ssh/<key>.pem ec2-user@<public-dns>
+sudo -u "$USER" bash scripts/bootstrap_cloud_metal.sh \
+    --domain <your-hostname> --email <your-acme-contact>
+```
+
+---
+
 ## The pieces
 
 | Piece | Where | What it does |
