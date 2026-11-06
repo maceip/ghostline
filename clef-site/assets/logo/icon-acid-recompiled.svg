@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240" fill="none">
+  <!-- 02 · ACID · RECOMPILED (#00D66B) -->
+  <g stroke="#00D66B" stroke-width="14" stroke-linejoin="round" stroke-linecap="round">
+    <polygon points="110,20 198,70 198,170 110,220 22,170 22,70"/>
+    <line x1="110" y1="20" x2="110" y2="220"/>
+    <line x1="22" y1="70" x2="198" y2="170"/>
+    <line x1="198" y1="70" x2="22" y2="170"/>
+  </g>
+  <g fill="#00D66B">
+    <circle cx="110" cy="12" r="8"/>
+    <circle cx="205" cy="66" r="8"/>
+    <circle cx="205" cy="174" r="8"/>
+    <circle cx="110" cy="228" r="8"/>
+    <circle cx="15" cy="174" r="8"/>
+    <circle cx="15" cy="66" r="8"/>
+  </g>
+</svg>

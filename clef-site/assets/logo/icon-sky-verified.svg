@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 240" fill="none">
+  <!-- 03 · SKY · VERIFIED (#9ED4F8) -->
+  <g stroke="#9ED4F8" stroke-width="4" stroke-linejoin="round" stroke-linecap="round">
+    <line x1="110" y1="20" x2="110" y2="120"/>
+    <line x1="22" y1="70" x2="198" y2="70"/>
+    <line x1="22" y1="70" x2="110" y2="220"/>
+    <line x1="198" y1="70" x2="110" y2="220"/>
+    <line x1="22" y1="170" x2="110" y2="120"/>
+    <line x1="198" y1="170" x2="110" y2="120"/>
+  </g>
+  <g stroke="#9ED4F8" stroke-width="14" stroke-linejoin="round" stroke-linecap="round">
+    <polygon points="110,20 198,70 198,170 110,220 22,170 22,70"/>
+    <line x1="22" y1="70" x2="110" y2="120"/>
+    <line x1="198" y1="70" x2="110" y2="120"/>
+    <line x1="110" y1="120" x2="110" y2="220"/>
+  </g>
+  <g fill="#9ED4F8">
+    <circle cx="110" cy="12" r="6"/>
+    <circle cx="205" cy="66" r="6"/>
+    <circle cx="205" cy="174" r="6"/>
+    <circle cx="110" cy="228" r="6"/>
+    <circle cx="15" cy="174" r="6"/>
+    <circle cx="15" cy="66" r="6"/>
+    <circle cx="110" cy="70" r="5"/>
+    <circle cx="66" cy="145" r="5"/>
+    <circle cx="154" cy="145" r="5"/>
+  </g>
+</svg>
