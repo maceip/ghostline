@@ -50,9 +50,9 @@ const consoleApp = new Console({
     field.setState({ blocked, harm });
     if (fieldState) {
       fieldState.textContent = blocked
-        ? "REFUSED BEFORE EXECUTION"
+        ? "BLOCKED AT LAYER 16"
         : harm > 0.15
-          ? "SEVERITY CRITICAL"
+          ? "ELEVATED COSINE"
           : "PASSED";
       fieldState.classList.toggle("is-blocked", blocked);
       fieldState.classList.toggle("is-ok", !blocked && harm <= 0.15);
@@ -72,7 +72,7 @@ consoleApp.load().then(() => {
   if (strip) {
     strip.textContent = consoleApp.live
       ? `LIVE ${consoleApp.liveBase || location.host}`
-      : "REPLAY · 36 AUDIT EVENTS";
+      : "REPLAY · 36 CAPTURED CALLS";
   }
 });
 

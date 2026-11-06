@@ -190,7 +190,7 @@ export class ExcessGate {
     sub.className = "gate-sub";
     sub.textContent =
       shown == null
-        ? "select a finding"
+        ? "select a tool call"
         : mode === "enforce"
           ? blocked
             ? "enforce · 403 returned to the agent"

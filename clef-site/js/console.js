@@ -69,7 +69,7 @@ export class Console {
         $("thresholdVal").textContent = this.state.threshold.toFixed(3);
         this._rejudgeAll();
         this._renderSelected();
-        this._flashChip("[ RE-SCORING FINDINGS ]");
+        this._flashChip("[ RE-JUDGING CORPUS ]");
       });
       thr.addEventListener("change", () => this._renderSourceChip());
     }
@@ -161,7 +161,7 @@ export class Console {
     if (this.roots.counts) {
       this.roots.counts.innerHTML = `
         <span class="count-num">${blocked}/${harmful}</span>
-        <span class="count-lab">findings blocked</span>
+        <span class="count-lab">harmful blocked</span>
         <span class="count-sep">·</span>
         <span class="count-num ${benignWrong ? "is-alarm" : ""}">${benignWrong}/${benign}</span>
         <span class="count-lab">false positives</span>`;
@@ -251,7 +251,7 @@ export class Console {
               "—"
           )}</dd>
         </dl>`
-        : `<div class="viz-empty">select a finding</div>`;
+        : `<div class="viz-empty">select a tool call</div>`;
     }
 
     // drive the hero field
@@ -285,7 +285,7 @@ export class Console {
       chip.textContent = `[ LIVE · ${where} ]`;
       chip.className = "chip chip-live";
     } else {
-      chip.textContent = "[ REPLAY · 36 AUDIT EVENTS · 2026-11-06 ]";
+      chip.textContent = "[ REPLAY · 36 CAPTURED CALLS · 2026-11-06 ]";
       chip.className = "chip chip-replay";
     }
   }
@@ -316,13 +316,13 @@ export class Console {
       if (this.roots.judgeInput) this.roots.judgeInput.disabled = false;
       if (this.roots.judgeBtn) this.roots.judgeBtn.disabled = false;
       if (this.roots.judgeNote)
-        this.roots.judgeNote.textContent = `[ LIVE ENGINE · ${this.liveInfo.architecture} · ${this.liveInfo.num_layers} LAYERS ]`;
+        this.roots.judgeNote.textContent = `[ LIVE GUARD · ${this.liveInfo.architecture} · ${this.liveInfo.num_layers} LAYERS ]`;
     } catch {
       this.live = false;
       if (this.roots.judgeInput) this.roots.judgeInput.disabled = true;
       if (this.roots.judgeBtn) this.roots.judgeBtn.disabled = true;
       if (this.roots.judgeNote)
-        this.roots.judgeNote.textContent = "[ REQUIRES A RUNNING ENGINE · START ONE ON :8090 TO ASSESS NEW COMMANDS ]";
+        this.roots.judgeNote.textContent = "[ REQUIRES LOCAL GUARD · START ONE ON :8090 TO JUDGE NEW COMMANDS ]";
     }
     this._renderSourceChip();
   }
@@ -335,7 +335,7 @@ export class Console {
       const cmd = input.value.trim();
       if (!cmd || !this.live) return;
       btn.disabled = true;
-      btn.textContent = "ASSESSING…";
+      btn.textContent = "JUDGING…";
       try {
         const res = await fetch(`${this.liveBase}/v1/guard/tool-call`, {
           method: "POST",
@@ -370,7 +370,7 @@ export class Console {
           this.roots.judgeNote.textContent = `[ ERROR: ${String(err).slice(0, 80)} ]`;
       } finally {
         btn.disabled = false;
-        btn.textContent = "ASSESS";
+        btn.textContent = "JUDGE";
       }
     };
     btn.addEventListener("click", go);

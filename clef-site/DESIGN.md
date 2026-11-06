@@ -16,20 +16,17 @@ residual stream and tells you, before a tool call executes, whether the model
 *means* harm.
 
 - Wordmark: `CLEF` set in Doto (dot-matrix), tracked tight, always uppercase.
-- Category line: **Secure infrastructure for AI-generated code.**
-- Hero statement: **KEEP YOUR ASSET SAFE BEFORE IT RUNS.**
-- Deck: "Clef applies intelligence to agent traces at the moment code becomes
-  execution. It surfaces the most critical patterns in the residual stream —
-  the intent the model already carries — and refuses the call before it runs.
-  No second model. No generation round trip."
-- Voice: the copy is pieced together from the registers of Cloudflare
-  engineering posts (measured throughput language), XBOW docs (assessments,
-  findings, severity, risk score, target protection), Daytona docs (from code
-  to execution, isolation, programmatic access) and Braintrust docs
-  (instrument / observe / evaluate, traces, production visibility). No invented
-  slogans or slang — every rhetorical line originates in those four surfaces.
-- Tone: confident, technical, measured. Peer-to-peer with young agentic
-  developers. Numbers first.
+- Category line: **Residual-stream guard for agent tool calls.**
+- Hero statement: **READ THE RESIDUAL, NOT THE PROMPT.**
+- Deck: "Clef sits between your agent and its tools. Instead of grepping
+  command strings or running a second LLM judge, it reads the model’s residual
+  stream at 68% depth and blocks destructive calls before they execute. Zero
+  generation tokens. One forward pass."
+- Voice: direct, concrete systems engineering prose (matching the Rust/MLX
+  guard documentation). No compliance buzzwords, pentest-scanner jargon
+  ("findings", "assessments", "asset context"), or stitched corporate slogans.
+- Tone: confident, technical, measured. Peer-to-peer with agentic developers.
+  Numbers first.
 
 **The one-sentence pitch a user would repeat:**
 "Clef is a proxy that reads the model's residual stream instead of grepping
@@ -138,26 +135,28 @@ proof link, comparison strip, product surface, FAQ, version stamps. Beaten at
 composition by matching that rhythm; beaten at vibe by the Nothing instrument
 identity + the live console (their site has no interactive equivalent).
 
-1. **Hero · manifesto** — kicker `AUTOMATED ASSESSMENT · ACTIVE OBSERVABILITY`,
-   H1 **WE ASSESS THE TRACE, NOT THE PROMPT.** (accent on the "not" clause),
-   kicker `FROM CODE TO EXECUTION`, deck with the value prop (intelligence on
-   agent traces → most critical patterns in the residual stream → refused before
-   it runs → no second model), CTAs `RUN AN ASSESSMENT` / `INTERPRETING
-   RESULTS`, hero stats, base64 stamp that decodes to the real decision rule,
-   WebGL residual-stream field.
-2. **01 · POSITION** — three pillars as contrast pairs: `TRACES, NOT PROMPTS`
-   (68% depth) · `RISK SCORE INCLUDED` (5 benign calls in the baseline) ·
-   `FROM CODE TO EXECUTION` (1 forward pass).
-3. **02 · IMPACT** — giant proof claim `17/18 findings blocked. 0/18 false
-   positives.` with `*` footnote and (proof) link; CLEF vs LLM-AS-JUDGE
+1. **Hero · manifesto** — kicker `ACTIVATION-LEVEL TOOL-CALL GUARD`,
+   H1 **READ THE RESIDUAL, NOT THE PROMPT.** (accent on the "not" clause),
+   kicker `intercepted at layer 16 · before the shell runs`, deck with the
+   value prop (reads the residual stream at 68% depth → blocks destructive calls
+   before they execute → zero generation tokens → one forward pass), CTAs `OPEN
+   THE CONSOLE` / `HOW IT WORKS`, hero stats, base64 stamp that decodes to the
+   real decision rule, WebGL residual-stream field.
+2. **01 · WHY GEOMETRY** — three pillars as contrast pairs: `TOOL SPAN, NOT
+   PROMPT` (68% depth) · `PER-PROMPT BASELINE` (5 benign calls in the baseline)
+   · `NO SECOND MODEL` (1 forward pass).
+3. **02 · MEASURED** — giant proof claim `17/18 harmful calls blocked. 0/18
+   false positives.` with `*` footnote and console link; CLEF vs LLM-AS-JUDGE
    comparison strip; benchmark rows (31/40, 7/8, 896).
-4. **03 · ATTACK SURFACE** — the gaming argument, two real capture rows
-   (string vs geometry), three vulnerability classifications.
+4. **03 · WHY STRINGS FAIL** — the gaming argument, two real capture rows
+   (hostile prompt + benign call passed vs routine prompt + harmful call
+   blocked), three harm centroids.
 5. **04 · CONSOLE** — the open window (see §8).
-6. **05 · INTERPRETING RESULTS** — five-step assessment + risk-score rule.
-7. **06 · INTEGRATIONS** — API path and CLI path, get-started commands.
-8. **07 · TROUBLESHOOTING ASSESSMENTS** — FAQ accordion, honest limits.
-9. **Footer** — trust-and-safety pledge, reference paths,
+6. **05 · MECHANISM** — five-step judgment pipeline + decision rule.
+7. **06 · WIRING** — direct probe path and enforcing proxy path, get-started
+   commands.
+8. **07 · LIMITS & FAQ** — FAQ accordion, honest limits.
+9. **Footer** — no-mocks pledge, reference paths,
    `CLF.0S1 · VERSION 0.01 · © 2026`.
 
 ## 7. Signature visual — the residual stream field (three.js)
