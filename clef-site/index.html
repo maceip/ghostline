@@ -162,13 +162,27 @@
           </div>
         </div>
 
-        <!-- Right: Clickable malicious & benign prompt action buttons -->
+        <!-- Right: Clickable malicious & benign prompt action buttons + custom live input -->
         <div>
           <p class="label tl-block-label">
             <span class="live-dot is-alert" aria-hidden="true"></span>
-            STEP B · CLICK A PROMPT TO RUN IT THROUGH LAYER 16
+            STEP B · CLICK A PROMPT OR TYPE ANY COMMAND TO RUN IT THROUGH LAYER 16
           </p>
           <div class="tl-prompt-grid" id="tl-prompts"></div>
+          <div class="tl-custom-row">
+            <input
+              id="tl-custom-input"
+              type="text"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Or type any shell command (e.g. cat ~/.ssh/id_rsa or git status)…"
+              aria-label="Custom shell command to probe live at Layer 16"
+            />
+            <button id="tl-custom-btn" type="button">
+              <span class="live-dot live-dot-btn" aria-hidden="true"></span>
+              PROBE LAYER 16 →
+            </button>
+          </div>
         </div>
       </div>
 
@@ -228,7 +242,8 @@
             <dt>Layer-16 harm cosine</dt><dd id="tl-cos">+0.000</dd>
             <dt>Prompt 5-call baseline</dt><dd id="tl-base">−0.051</dd>
             <dt>Harm excess (cos − base)</dt><dd id="tl-exc">+0.051</dd>
-            <dt>Flag threshold</dt><dd>0.002</dd>
+            <dt>3-cluster cosines (D / S / E)</dt><dd id="tl-clusters">—</dd>
+            <dt>Peak attributed span token</dt><dd id="tl-attr">—</dd>
             <dt>Your opt-in filter for this vector</dt><dd id="tl-optin-state">OPTED IN ✓</dd>
             <dt>Action taken</dt><dd id="tl-action-state">READ-ONLY TRACE (NOT BLOCKED)</dd>
           </dl>

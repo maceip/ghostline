@@ -256,6 +256,18 @@ function renderTimelineResult(rec) {
   if ($("tl-cos")) $("tl-cos").textContent = fmt(v.harm_cosine);
   if ($("tl-base")) $("tl-base").textContent = fmt(v.harm_baseline);
   if ($("tl-exc")) $("tl-exc").textContent = fmt(excess);
+  if ($("tl-clusters")) {
+    const cs = Array.isArray(v.cluster_scores) && v.cluster_scores.length >= 3
+      ? `${fmt(v.cluster_scores[0])} / ${fmt(v.cluster_scores[1])} / ${fmt(v.cluster_scores[2])}`
+      : "—";
+    $("tl-clusters").textContent = cs;
+  }
+  if ($("tl-attr")) {
+    const tok = v.attribution_token
+      ? `“${v.attribution_token}” (cos ${fmt(v.attribution_cosine)}, ${v.span_tokens ?? "?"} tok)`
+      : "—";
+    $("tl-attr").textContent = tok;
+  }
   if ($("tl-optin-state")) {
     $("tl-optin-state").textContent = filterOn ? "OPTED IN ✓" : "OPTED OUT (UNCHECKED)";
   }
@@ -265,6 +277,78 @@ function renderTimelineResult(rec) {
       : aboveThr && !filterOn
         ? "IGNORED (VECTOR FILTER OFF)"
         : "PASSED IN LIVE TRACE (READ-ONLY)";
+  }
+}
+
+/* ---------- custom live command input on Page 1 ---------- */
+async function runCustomTimelineProbe() {
+  const inputEl = $("tl-custom-input");
+  const btn = $("tl-custom-btn");
+  const cmd = inputEl ? inputEl.value.trim() : "";
+  if (!cmd) return;
+
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "PROBING L16…";
+  }
+
+  for (const b of document.querySelectorAll("#tl-prompts .tl-prompt-btn")) {
+    b.classList.remove("is-active");
+  }
+
+  const steps = Array.from(document.querySelectorAll("#tl-steps .tl-step"));
+  steps.forEach((s, idx) => {
+    s.classList.toggle("is-active", idx === 0);
+    s.classList.remove("is-done", "is-flagged");
+  });
+  await wait(100);
+  steps.forEach((s, idx) => {
+    s.classList.toggle("is-done", idx < 2);
+    s.classList.toggle("is-active", idx === 2);
+  });
+
+  try {
+    const res = await fetch("/v1/guard/tool-call", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "Interactive custom probe from Page 1 brain timeline.",
+        tool_name: "bash",
+        tool_args: { cmd },
+        questions: [],
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const verdict = await res.json();
+    const attrCluster =
+      verdict.attribution_cluster != null ? String(verdict.attribution_cluster) : "0";
+    const customRec = {
+      id: "LIVE",
+      label: verdict.harm_excess >= THRESHOLD ? "harmful" : "benign",
+      cluster_id: Number(attrCluster),
+      prompt: "Interactive custom probe from Page 1 brain timeline.",
+      tool_name: "bash",
+      tool_args: { cmd },
+      call_render: `bash({"cmd": ${JSON.stringify(cmd)}})`,
+      verdict,
+    };
+    selectedRec = customRec;
+    renderTimelineResult(customRec);
+  } catch {
+    // Fallback to matching captured record if offline
+    const match = records.find((r) =>
+      String(r.call_render || "").toLowerCase().includes(cmd.toLowerCase())
+    );
+    if (match) {
+      selectedRec = match;
+      renderTimelineResult(match);
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `<span class="live-dot live-dot-btn" aria-hidden="true"></span> PROBE LAYER 16 →`;
+    }
   }
 }
 
@@ -303,6 +387,15 @@ for (const btn of document.querySelectorAll("#seg-theme .seg-btn")) {
 }
 applyTheme(initialTheme);
 bindOptInFilters();
+
+const customBtn = $("tl-custom-btn");
+if (customBtn) customBtn.addEventListener("click", () => runCustomTimelineProbe());
+const customInput = $("tl-custom-input");
+if (customInput) {
+  customInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") runCustomTimelineProbe();
+  });
+}
 
 (async function boot() {
   try {

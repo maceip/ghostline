@@ -1536,6 +1536,54 @@ img.brand-mark-mobile {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
+.tl-custom-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+.tl-custom-row input {
+  flex: 1;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-visible);
+  border-radius: 6px;
+  color: var(--text-display);
+  font-family: var(--mono);
+  font-size: var(--caption);
+  padding: 10px 14px;
+  outline: none;
+}
+.tl-custom-row input:focus {
+  border-color: var(--text-display);
+}
+.tl-custom-row button {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0 16px;
+  background: var(--accent);
+  color: #ffffff;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tl-custom-row button:hover {
+  background: var(--text-display);
+  color: var(--black);
+}
+.tl-custom-row button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+#tl-prompt-text {
+  margin-top: 10px;
+}
+#tl-result .hero-cta {
+  margin-top: 20px;
+}
 .tl-prompt-btn {
   display: flex;
   flex-direction: column;

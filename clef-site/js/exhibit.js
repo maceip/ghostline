@@ -53,6 +53,7 @@ let live = false;
 let liveInfo = null;
 let latestLiveEvent = null;
 let sseSource = null;
+let animSeq = 0;
 
 const optedInClusters = new Set(["0", "1", "2", "-1"]);
 
@@ -305,10 +306,21 @@ function getScore(rec) {
   return state.baseline === "off" ? v.harm_cosine : v.harm_excess;
 }
 
+function getEffectiveClusterId(rec) {
+  const v = rec.verdict || {};
+  if (rec.cluster_id != null && Number(rec.cluster_id) >= 0) {
+    return String(rec.cluster_id);
+  }
+  if (v.attribution_cluster != null) {
+    return String(v.attribution_cluster);
+  }
+  return "0";
+}
+
 function isFlagged(rec) {
   const s = getScore(rec);
-  const cid = String(rec.cluster_id ?? "0");
-  const clusterEnabled = cid === "-1" || optedInClusters.has(cid);
+  const cid = getEffectiveClusterId(rec);
+  const clusterEnabled = optedInClusters.has(cid);
   return s != null && s >= state.threshold && clusterEnabled;
 }
 
@@ -479,8 +491,8 @@ async function renderSelected(opts = {}) {
   }
 
   setStep(4);
-  const cid = String(rec.cluster_id ?? "0");
-  const filterEnabled = cid === "-1" || optedInClusters.has(cid);
+  const cid = getEffectiveClusterId(rec);
+  const filterEnabled = optedInClusters.has(cid);
   spine.render(ev);
   gate.render(rec, { ...state, filterEnabled });
   renderDetail(rec);
@@ -502,8 +514,8 @@ function renderTimelineBar(rec) {
   const v = rec.verdict || {};
   const score = getScore(rec);
   const aboveThr = score != null && score >= state.threshold;
-  const cid = String(rec.cluster_id ?? "0");
-  const filterOn = cid === "-1" || optedInClusters.has(cid);
+  const cid = getEffectiveClusterId(rec);
+  const filterOn = optedInClusters.has(cid);
   const flagged = aboveThr && filterOn;
 
   const pEl = $("tl-node-prompt");
@@ -554,6 +566,14 @@ function renderDetail(rec) {
   const detailEl = $("detail");
   if (!detailEl) return;
 
+  const clusterTriplet =
+    Array.isArray(v.cluster_scores) && v.cluster_scores.length >= 3
+      ? `${fmt(v.cluster_scores[0])} / ${fmt(v.cluster_scores[1])} / ${fmt(v.cluster_scores[2])}`
+      : "—";
+  const attrText = v.attribution_token
+    ? `“${escapeHtml(v.attribution_token)}” (cos ${fmt(v.attribution_cosine)}, ${v.span_tokens ?? "?"} span tokens)`
+    : "—";
+
   detailEl.innerHTML = `
     <div class="detail-head">
       <span class="detail-tag ${rec.label}">${String(rec.label).toUpperCase()} TRACE</span>
@@ -565,11 +585,23 @@ function renderDetail(rec) {
       <dt>L16 harm cosine</dt><dd>${fmt(v.harm_cosine)}</dd>
       <dt>prompt baseline</dt><dd>${fmt(v.harm_baseline)} <em>(${escapeHtml(v.baseline_mode || "live-panel")})</em></dd>
       <dt>harm excess (Δ)</dt><dd>${fmt(v.harm_excess)}</dd>
+      <dt>3-cluster cosines (D/S/E)</dt><dd>${clusterTriplet}</dd>
+      <dt>peak attributed token</dt><dd>${attrText}</dd>
       <dt>task drift cosine</dt><dd>${fmt(v.drift_cosine)}</dd>
       <dt>LAT PCA energy</dt><dd>${fmtBare(v.pca_subspace_energy)}</dd>
+      ${
+        v.attribution_token != null
+          ? `<dt>peak token in span</dt><dd><code>${escapeHtml(v.attribution_token)}</code> <em>(tok #${v.attribution_token_index ?? "—"}, cos ${fmt(v.attribution_cosine)})</em></dd>`
+          : ""
+      }
+      ${
+        v.span_tokens != null
+          ? `<dt>pooled tool-call span</dt><dd>${v.span_tokens} tokens</dd>`
+          : ""
+      }
       <dt>probe depth</dt><dd>Layer ${ev.probe_layer ?? 16} / ${ev.num_layers ?? 24} (68%)</dd>
       <dt>backbone</dt><dd>${escapeHtml(ev.architecture || liveInfo?.architecture || "Qwen2ForCausalLM")}</dd>
-      <dt>trace reason</dt><dd style="text-align:right">${escapeHtml(v.reason || "read-only trace recorded")}</dd>
+      <dt>trace reason</dt><dd>${escapeHtml(v.reason || "read-only trace recorded")}</dd>
     </dl>`;
 }
 
@@ -611,24 +643,35 @@ async function runLiveProbe() {
     }
 
     const verdict = await res.json();
-    await wait(120);
+    for (let i = 0; i < 12; i++) {
+      if (
+        latestLiveEvent &&
+        latestLiveEvent.harm_cosine != null &&
+        Math.abs(latestLiveEvent.harm_cosine - verdict.harm_cosine) < 1e-4
+      ) {
+        break;
+      }
+      await wait(25);
+    }
 
-    const ev =
+    const matchedLiveEvent =
       latestLiveEvent &&
       latestLiveEvent.harm_cosine != null &&
       Math.abs(latestLiveEvent.harm_cosine - verdict.harm_cosine) < 1e-4
         ? latestLiveEvent
-        : {
-            ts_ms: Date.now(),
-            architecture: liveInfo?.architecture || "Qwen2ForCausalLM",
-            num_layers: liveInfo?.num_layers || 24,
-            probe_layer: 16,
-            harm_cosine: verdict.harm_cosine,
-            harm_baseline: verdict.harm_baseline,
-            harm_excess: verdict.harm_excess,
-            pca_subspace_energy: verdict.pca_subspace_energy,
-            layer_profile: latestLiveEvent?.layer_profile || records[0]?.event?.layer_profile || null,
-          };
+        : null;
+
+    const ev = matchedLiveEvent || {
+      ts_ms: Date.now(),
+      architecture: liveInfo?.architecture || "Qwen2ForCausalLM",
+      num_layers: liveInfo?.num_layers || 24,
+      probe_layer: 16,
+      harm_cosine: verdict.harm_cosine,
+      harm_baseline: verdict.harm_baseline,
+      harm_excess: verdict.harm_excess,
+      pca_subspace_energy: verdict.pca_subspace_energy,
+      layer_profile: null,
+    };
 
     const rec = {
       id: "live-" + String(Date.now()).slice(-4),
