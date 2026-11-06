@@ -52,6 +52,25 @@ jobs:
       - name: whitening module type-checks
         run: rustc --edition 2021 --crate-type lib repe-mods/src/whiten.rs -o /tmp/libwhiten.rlib
 
+      # The access-control module is pure arithmetic too — the bearer
+      # comparison, the sliding rate-limit window and the X-Forwarded-For
+      # rule. It needs `sha2` for the constant-time digest comparison, so it
+      # is built as a tiny standalone crate rather than with rustc alone.
+      - name: access control module tests
+        run: |
+          mkdir -p /tmp/access_test/src
+          cp repe-mods/src/access.rs /tmp/access_test/src/lib.rs
+          cat > /tmp/access_test/Cargo.toml <<'EOF'
+          [package]
+          name = "access_test"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          sha2 = "0.10"
+          EOF
+          cd /tmp/access_test && cargo test --quiet
+
       # The Python extractor's LSE pooling must agree with the Rust one to
       # within float32 round-off. The reference implementation recomputes the
       # statistic independently and compares.
@@ -60,4 +79,4 @@ jobs:
 
       - name: evaluation scripts parse
         run: |
-          python3 -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ['evals/canonical_40.py','evals/real_upstream_20.py']]; print('eval scripts parse')"
+          python3 -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ['evals/canonical_40.py','evals/real_upstream_20.py','evals/access_control.py']]; print('eval scripts parse')"

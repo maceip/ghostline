@@ -25,13 +25,13 @@ UPSTREAM="${UPSTREAM:-8123}"
 
 step() { printf '\n\033[1m=== %s ===\033[0m\n' "$1"; }
 
-step "1/7 regenerate the project from repe-mods/"
+step "1/8 regenerate the project from repe-mods/"
 (cd "$ROOT" && python3 repe-compose.py && bash upgrade_generic_viz.sh)
 
-step "2/7 build and unit tests"
+step "2/8 build and unit tests"
 (cd "$PROJ" && cargo build --all-targets 2>&1 | tail -3 && cargo test --lib 2>&1 | grep -E "test result")
 
-step "3/7 start the upstream model server"
+step "3/8 start the upstream model server"
 if ! curl -s -o /dev/null "http://127.0.0.1:${UPSTREAM}/v1/models"; then
   (cd "$PROJ" && nohup uv run --python 3.12 --with mlx-lm mlx_lm.server \
       --model "$MODEL" --host 127.0.0.1 --port "$UPSTREAM" --temp 0.0 --max-tokens 128 \
@@ -43,7 +43,7 @@ if ! curl -s -o /dev/null "http://127.0.0.1:${UPSTREAM}/v1/models"; then
 fi
 curl -s -o /dev/null -w "upstream http=%{http_code}\n" "http://127.0.0.1:${UPSTREAM}/v1/models"
 
-step "4/7 start the guard"
+step "4/8 start the guard"
 pkill -f "qwen-clef-repe-guard --port ${PORT}" 2>/dev/null || true
 sleep 2
 (cd "$PROJ" && nohup ./target/debug/qwen-clef-repe-guard --port "$PORT" \
@@ -56,18 +56,21 @@ for _ in $(seq 1 40); do
 done
 grep -E "cached vectors match|no cached vectors" /tmp/guard_verify.log || true
 
-step "5/7 canonical benchmark (40 cases, held out from calibration)"
+step "5/8 canonical benchmark (40 cases, held out from calibration)"
 python3 "$ROOT/evals/canonical_40.py" "$PORT" | grep -E "^  =>|TOTAL"
 
-step "6/7 real upstream benchmark (10 goals, real model traffic)"
+step "6/8 real upstream benchmark (10 goals, real model traffic)"
 python3 "$ROOT/evals/real_upstream_20.py" "$PORT" | tail -3
 
-step "7/7 parity suites"
-(cd "$ROOT" && uv run --python 3.12 --with mlx-lm python3 check_render_parity.py | tail -2)
-(cd "$PROJ" && cargo run --release --quiet --bin gdn_probe -- "$CLEF" artifacts/gdn_probe >/dev/null 2>&1 \
-  && uv run --python 3.12 --with mlx-lm python3 tools/compare_gdn.py | grep -E "layer 0|max_abs =|PASS|FAIL" | tail -4)
-(cd "$PROJ" && uv run --python 3.12 --with torch --with mlx-lm python3 tools/joint_head_reference.py >/dev/null 2>&1 \
-  && cargo run --quiet --bin joint_head_probe -- --input tools/fixtures/input --output tools/fixtures/rust >/dev/null 2>&1 \
-  && uv run --python 3.12 --with torch --with mlx-lm python3 tools/joint_head_reference.py | tail -3)
+step "7/8 parity suites"
+(cd "$ROOT" && timeout 900 uv run --python 3.12 --with mlx-lm python3 check_render_parity.py | tail -2)
+(cd "$PROJ" && timeout 1800 cargo run --release --quiet --bin gdn_probe -- "$CLEF" artifacts/gdn_probe >/dev/null 2>&1 \
+  && timeout 900 uv run --python 3.12 --with mlx-lm python3 tools/compare_gdn.py | grep -E "layer 0|max_abs =|PASS|FAIL" | tail -4)
+(cd "$PROJ" && timeout 1800 uv run --python 3.12 --with torch --with mlx-lm python3 tools/joint_head_reference.py >/dev/null 2>&1 \
+  && timeout 600 cargo run --quiet --bin joint_head_probe -- --input tools/fixtures/input --output tools/fixtures/rust >/dev/null 2>&1 \
+  && timeout 900 uv run --python 3.12 --with torch --with mlx-lm python3 tools/joint_head_reference.py | tail -3)
+
+step "8/8 access control (auth, rate limit, proxy trust, safety rail)"
+python3 "$ROOT/evals/access_control.py"
 
 printf '\n\033[1mdone — the guard is still running on port %s\033[0m\n' "$PORT"

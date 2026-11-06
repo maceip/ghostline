@@ -126,17 +126,23 @@ def main() -> int:
 
     auth_port = free_port()
     limit_port = free_port()
-    print(f"starting two guards: auth-only on {auth_port}, rate-limited on {limit_port}")
+    open_port = free_port()
+    print(f"starting three guards: auth-only on {auth_port}, rate-limited on "
+          f"{limit_port}, unlimited on {open_port}")
 
     auth_proc = start_guard(auth_port, str(token_file), [])
     limit_proc = start_guard(limit_port, str(token_file),
                              ["--rate-limit-rpm", "3", "--trust-proxy"])
+    open_proc = start_guard(open_port, str(token_file), ["--rate-limit-rpm", "0"])
     try:
         if not wait_for_health(auth_port):
             print(f"the guard on {auth_port} never became healthy", file=sys.stderr)
             return 2
         if not wait_for_health(limit_port):
             print(f"the guard on {limit_port} never became healthy", file=sys.stderr)
+            return 2
+        if not wait_for_health(open_port):
+            print(f"the guard on {open_port} never became healthy", file=sys.stderr)
             return 2
 
         print("\n1. authentication")
@@ -150,6 +156,8 @@ def main() -> int:
         status, _ = request(auth_port, "/api/info", token=TOKEN)
         check(status == 200, "/api/info accepts the right token", f"status={status}")
         status, _ = request(auth_port, "/")
+        check(status == 401, "the dashboard refuses a missing token", f"status={status}")
+        status, _ = request(auth_port, "/", token=TOKEN)
         check(status == 200, "the dashboard accepts the right token", f"status={status}")
         status, _ = request(
             auth_port, "/v1/guard/tool-call", method="POST",
@@ -194,7 +202,17 @@ def main() -> int:
               "the right-most entry is the bucket, and it is exhausted",
               f"status={status}")
 
-        print("\n4. the safety rail")
+        print("\n4. no ceiling")
+        codes = [request(open_port, "/api/info", token=TOKEN)[0] for _ in range(10)]
+        check(codes == [200] * 10,
+              "--rate-limit-rpm 0 means no ceiling, not one request a minute",
+              f"codes={codes}")
+        status, headers = request(open_port, "/api/info", token=TOKEN)
+        check("x-ratelimit-limit" not in headers,
+              "an unlimited guard reports no limit header",
+              f"headers={sorted(k for k in headers if 'ratelimit' in k)}")
+
+        print("\n5. the safety rail")
         proc = subprocess.run(
             [str(binary), "--host", "0.0.0.0", "--port", str(free_port()),
              "--model", MODEL, "--repe", REPE],
@@ -208,7 +226,7 @@ def main() -> int:
               (proc.stderr + proc.stdout).strip().splitlines()[-1][:90]
               if (proc.stderr + proc.stdout).strip() else "")
     finally:
-        for proc in (auth_proc, limit_proc):
+        for proc in (auth_proc, limit_proc, open_proc):
             proc.terminate()
             try:
                 proc.wait(timeout=10)
