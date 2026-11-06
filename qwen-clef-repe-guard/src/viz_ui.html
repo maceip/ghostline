@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RepE + Clef Live Residual Stream Telemetry</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #121721;
+    --panel-2: #0e131c;
+    --border: #232c3d;
+    --text: #d9e0ee;
+    --muted: #7f8c9f;
+    --accent: #4fd1c5;
+    --warn: #f6ad55;
+    --danger: #fc8181;
+    --ok: #68d391;
+    --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 24px;
+  }
+  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .live {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .dot.off { background: var(--danger); }
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 16px; min-width: 0;
+  }
+  .card h2 {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 10px; display: flex; justify-content: space-between;
+  }
+  .span-8 { grid-column: span 8; }
+  .span-4 { grid-column: span 4; }
+  .span-6 { grid-column: span 6; }
+  .span-12 { grid-column: span 12; }
+  @media (max-width: 900px) { .span-8, .span-4, .span-6 { grid-column: span 12; } }
+  canvas { width: 100%; display: block; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 12px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill {
+    display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px;
+    border: 1px solid currentColor; letter-spacing: 0.04em;
+  }
+  .pill.blocked { color: var(--danger); }
+  .pill.passed { color: var(--ok); }
+  .pill.clamped { color: var(--warn); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--border); }
+  td { padding: 5px 10px 5px 0; border-bottom: 1px solid rgba(35,44,61,0.55); font-variant-numeric: tabular-nums; }
+  td.cmd { color: var(--text); max-width: 260px; overflow-wrap: anywhere; }
+  .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; min-width: 90px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .empty { color: var(--muted); font-size: 12px; padding: 18px 0; text-align: center; }
+  .lbl {
+    background: var(--panel-2); color: var(--muted); border: 1px solid var(--border);
+    border-radius: 4px; font: inherit; font-size: 11px; padding: 1px 7px; cursor: pointer;
+  }
+  .lbl:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+  .lbl:disabled { opacity: 0.4; cursor: default; }
+  .lbl.benign.done { color: var(--ok); border-color: var(--ok); opacity: 1; }
+  .lbl.harmful.done { color: var(--danger); border-color: var(--danger); opacity: 1; }
+  td.label { white-space: nowrap; }
+  td.label .msg { color: var(--muted); font-size: 11px; }
+  td.label .msg.err { color: var(--danger); }
+  .legend { display: flex; gap: 14px; font-size: 11px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RepE + Clef Live Residual Stream Telemetry</h1>
+  <span class="live"><span class="dot" id="dot"></span><span id="conn">connecting</span></span>
+  <span class="sub" id="meta">waiting for events…</span>
+</header>
+
+<div class="grid">
+  <section class="card span-8">
+    <h2><span>Per-layer RepE harm cosine</span><span id="probe-layer"></span></h2>
+    <canvas id="profile" style="height:220px"></canvas>
+    <div class="legend">
+      <span><i style="background:#4fd1c5"></i>harm cosine</span>
+      <span><i style="background:#fc8181"></i>probe layer</span>
+      <span><i style="background:#f6ad55"></i>clamp threshold</span>
+    </div>
+  </section>
+
+  <section class="card span-4">
+    <h2><span>Latest verdict</span><span id="verdict-pill"></span></h2>
+    <dl class="kv" id="verdict">
+      <dt>tool</dt><dd id="v-tool">—</dd>
+      <dt>allowed</dt><dd id="v-allowed">—</dd>
+      <dt>harm cosine</dt><dd id="v-harm">—</dd>
+      <dt>baseline</dt><dd id="v-baseline">—</dd>
+      <dt>attribution</dt><dd id="v-attrib">—</dd>
+      <dt>cluster scores</dt><dd id="v-clusters">—</dd>
+      <dt>drift cosine</dt><dd id="v-drift">—</dd>
+      <dt>PCA energy</dt><dd id="v-energy">—</dd>
+      <dt>clamped</dt><dd id="v-clamped">—</dd>
+      <dt>circuit</dt><dd id="v-circuit">—</dd>
+      <dt>reason</dt><dd id="v-reason" style="text-align:left">—</dd>
+    </dl>
+  </section>
+
+  <section class="card span-4">
+    <h2><span>PCA subspace coordinates</span></h2>
+    <canvas id="pca" style="height:200px"></canvas>
+    <div class="legend">
+      <span><i style="background:#4fd1c5"></i>PC1</span>
+      <span><i style="background:#63b3ed"></i>PC2</span>
+      <span><i style="background:#f687b3"></i>PC3</span>
+    </div>
+  </section>
+
+  <section class="card span-4">
+    <h2><span>Clef noul distribution</span></h2>
+    <canvas id="noul" style="height:200px"></canvas>
+  </section>
+
+  <section class="card span-4">
+    <h2><span>Clef score distribution</span></h2>
+    <canvas id="score" style="height:200px"></canvas>
+  </section>
+
+  <section class="card span-12">
+    <h2><span>Intercepted tool calls</span><span id="count">0</span></h2>
+    <table>
+      <thead><tr><th>time</th><th>tool</th><th>command</th><th>verdict</th><th>harm</th><th>attribution</th><th>drift</th><th>PCA</th><th>clamped</th><th>reason</th><th>label</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="11" class="empty">no tool calls intercepted yet</td></tr></tbody>
+    </table>
+  </section>
+</div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const ACCENT = css("--accent"), DANGER = css("--danger"), WARN = css("--warn"),
+        MUTED = css("--muted"), BORDER = css("--border"), TEXT = css("--text"),
+        BLUE = "#63b3ed", PINK = "#f687b3";
+
+  let events = [];
+  let last = null;
+
+  // Tool-call arguments come from the model. They are inserted into the table
+  // as text, never as markup.
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function fit(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    // Size the backing store from the LAYOUT box. `canvas.height` is the
+    // backing store itself, so scaling it in place would double the canvas
+    // on every redraw — the layout height is pinned in CSS instead.
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = Math.max(1, Math.round(w * dpr));
+    canvas.height = Math.max(1, Math.round(h * dpr));
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    return { ctx, w, h };
+  }
+
+  function drawProfile() {
+    const { ctx, w, h } = fit($("profile"));
+    const ev = last;
+    if (!ev || !ev.layer_profile || !ev.layer_profile.length) {
+      ctx.fillStyle = MUTED; ctx.font = "12px " + css("--mono");
+      ctx.textAlign = "center";
+      ctx.fillText("no layer profile yet", w / 2, h / 2);
+      return;
+    }
+    const p = ev.layer_profile;
+    const n = p.length;
+    const pad = 26;
+    const min = Math.min(-0.05, Math.min.apply(null, p));
+    const max = Math.max(0.05, Math.max.apply(null, p));
+    const sx = (i) => pad + (i * (w - pad * 2)) / Math.max(1, n - 1);
+    const sy = (v) => h - pad - ((v - min) / (max - min || 1)) * (h - pad * 2);
+
+    ctx.strokeStyle = BORDER; ctx.lineWidth = 1;
+    for (let g = 0; g <= 4; g++) {
+      const y = pad + (g * (h - pad * 2)) / 4;
+      ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(w - pad, y); ctx.stroke();
+    }
+    ctx.fillStyle = MUTED; ctx.font = "10px " + css("--mono"); ctx.textAlign = "right";
+    for (let g = 0; g <= 4; g++) {
+      const y = pad + (g * (h - pad * 2)) / 4;
+      const v = max - (g * (max - min)) / 4;
+      ctx.fillText(v.toFixed(2), pad - 5, y + 3);
+    }
+
+    if (ev.clamp_threshold != null) {
+      const y = sy(ev.clamp_threshold);
+      ctx.strokeStyle = WARN; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(w - pad, y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    ctx.strokeStyle = ACCENT; ctx.lineWidth = 1.6; ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = sx(i), y = sy(p[i]);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+
+    if (ev.probe_layer != null && ev.probe_layer < n) {
+      const x = sx(ev.probe_layer);
+      ctx.strokeStyle = DANGER; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, pad); ctx.lineTo(x, h - pad); ctx.stroke();
+    }
+
+    ctx.fillStyle = MUTED; ctx.textAlign = "center"; ctx.font = "10px " + css("--mono");
+    for (let i = 0; i < n; i += Math.max(1, Math.floor(n / 8))) {
+      ctx.fillText(String(i), sx(i), h - pad + 14);
+    }
+    ctx.textAlign = "left";
+    ctx.fillText("layer", pad, h - 2);
+  }
+
+  function drawBars(canvasId, rows, color) {
+    const { ctx, w, h } = fit($(canvasId));
+    if (!rows || !rows.length) {
+      ctx.fillStyle = MUTED; ctx.font = "12px " + css("--mono"); ctx.textAlign = "center";
+      ctx.fillText("no data", w / 2, h / 2);
+      return;
+    }
+    const pad = 10, gap = 4;
+    const bh = (h - pad * 2 - gap * (rows.length - 1)) / rows.length;
+    rows.forEach((r, i) => {
+      const y = pad + i * (bh + gap);
+      const val = Number.isFinite(r.value) ? r.value : 0;
+      const frac = Math.max(0, Math.min(1, val));
+      ctx.fillStyle = "rgba(79,209,197,0.14)";
+      ctx.fillRect(pad, y, w - pad * 2, bh);
+      ctx.fillStyle = color;
+      ctx.fillRect(pad, y, (w - pad * 2) * frac, bh);
+      ctx.fillStyle = TEXT; ctx.font = "10px " + css("--mono"); ctx.textAlign = "left";
+      ctx.fillText(String(r.label == null ? "" : r.label).slice(0, 18), pad + 4, y + bh / 2 + 3);
+      ctx.textAlign = "right";
+      ctx.fillStyle = MUTED;
+      ctx.fillText(r.text != null ? r.text : val.toFixed(3), w - pad - 4, y + bh / 2 + 3);
+    });
+  }
+
+  function drawPca() {
+    const { ctx, w, h } = fit($("pca"));
+    const c = last && last.pca_coords;
+    if (!c) {
+      ctx.fillStyle = MUTED; ctx.font = "12px " + css("--mono"); ctx.textAlign = "center";
+      ctx.fillText("no data", w / 2, h / 2);
+      return;
+    }
+    const pad = 26;
+    const vals = c.map((v) => Math.abs(v));
+    const max = Math.max(0.05, Math.max.apply(null, vals));
+    const labels = ["PC1", "PC2", "PC3"], colors = [ACCENT, BLUE, PINK];
+    const bw = (w - pad * 2) / 3 - 10;
+    c.forEach((v, i) => {
+      const x = pad + i * ((w - pad * 2) / 3);
+      const bh = (Math.abs(v) / max) * (h - pad * 2);
+      ctx.fillStyle = "rgba(79,209,197,0.12)";
+      ctx.fillRect(x, pad, bw, h - pad * 2);
+      ctx.fillStyle = colors[i];
+      const y = v >= 0 ? h - pad - bh : pad;
+      ctx.fillRect(x, y, bw, bh);
+      ctx.fillStyle = MUTED; ctx.font = "10px " + css("--mono"); ctx.textAlign = "center";
+      ctx.fillText(labels[i], x + bw / 2, h - pad + 14);
+      ctx.textAlign = "left";
+      ctx.fillText(v.toFixed(3), x + 2, v >= 0 ? y - 4 : y + bh + 12);
+    });
+  }
+
+  function drawNote(canvasId, text) {
+    const { ctx, w, h } = fit($(canvasId));
+    ctx.fillStyle = MUTED; ctx.font = "11px " + css("--mono"); ctx.textAlign = "center";
+    const words = String(text).split(" ");
+    let line = "", y = h / 2 - 8;
+    ctx.textAlign = "left";
+    const maxW = w - 20;
+    for (const word of words) {
+      const probe = line ? line + " " + word : word;
+      if (ctx.measureText(probe).width > maxW) {
+        ctx.fillText(line, 10, y); y += 15; line = word;
+      } else {
+        line = probe;
+      }
+    }
+    if (line) ctx.fillText(line, 10, y);
+  }
+
+  function render() {
+    drawProfile(); drawPca();
+    // `clef` entries are raw decisions ({id, pick, weighted_score, confidence,
+    // distribution}), NOT the {label, value} shape drawBars() wants. Map them
+    // explicitly — passing them straight through made `r.label.slice` throw
+    // and aborted the rest of render(), leaving the verdict panel blank.
+    const clef = (last && Array.isArray(last.clef)) ? last.clef : [];
+    const dist = (d) => Array.isArray(d.distribution) ? d.distribution : [];
+    const shortId = (d) => String(d.id || "").replace(/^q_/, "");
+    const noul = clef
+      .filter((d) => dist(d).length === 2)
+      .map((d) => {
+        const trueRow = dist(d).find((p) => p[0] === "true");
+        const p = trueRow ? Number(trueRow[1]) : Number(dist(d)[0][1]);
+        return { label: shortId(d) + " → " + (d.pick || "?"), value: p };
+      });
+    const scoreRaw = clef
+      .filter((d) => dist(d).length > 2)
+      .map((d) => ({
+        label: shortId(d),
+        value: Number(d.weighted_score),
+        text: Number(d.weighted_score).toFixed(3),
+      }));
+    // Weighted scores are unbounded, so normalise the bar against the largest
+    // one while still printing the raw score as the row's text.
+    const maxScore = scoreRaw.reduce((m, r) => Math.max(m, Math.abs(r.value)), 1e-6);
+    const score = scoreRaw.map((r) => ({ ...r, value: Math.abs(r.value) / maxScore }));
+    // A Clef head is only loaded when a trained one was supplied for this
+    // backbone. Otherwise the questions were never evaluated — say so instead
+    // of drawing a made-up distribution.
+    const clefLoaded = !last || last.clef_head_calibrated === true;
+    if (clefLoaded) {
+      drawBars("noul", noul, ACCENT);
+      drawBars("score", score, BLUE);
+    } else {
+      const note = "no trained Clef head for this backbone — these questions were not evaluated";
+      drawNote("noul", note);
+      drawNote("score", note);
+    }
+
+    if (!last) return;
+    $("v-tool").textContent = last.tool_name || "—";
+    $("v-allowed").textContent = last.allowed ? "yes" : "no";
+    $("v-harm").textContent = (last.harm_cosine ?? 0).toFixed(4);
+    $("v-drift").textContent = (last.drift_cosine ?? 0).toFixed(4);
+    $("v-energy").textContent = (last.pca_subspace_energy ?? 0).toFixed(4);
+    $("v-clamped").textContent = last.clamped_in_place ? "yes" : "no";
+    $("v-circuit").textContent = last.circuit_broken ? "open" : "closed";
+    $("v-baseline").textContent =
+      (last.baseline_mode || "live-panel") +
+      (last.harm_baseline !== undefined ? " (" + Number(last.harm_baseline).toFixed(4) + ")" : "");
+    // The attribution: which token inside the tool call carried the peak
+    // reading, and which harm cluster it belonged to.
+    const clusterNames = ["destruction", "secrets", "exfiltration"];
+    const attrib = last.attribution_token_index !== undefined && last.attribution_token_index !== null
+      ? "token " + last.attribution_token_index +
+        (last.attribution_token ? " " + JSON.stringify(last.attribution_token) : "") +
+        (last.attribution_cluster !== undefined && last.attribution_cluster !== null
+          ? " · " + (clusterNames[last.attribution_cluster] || ("cluster " + last.attribution_cluster))
+          : "") +
+        " · " + Number(last.attribution_cosine ?? 0).toFixed(4)
+      : "—";
+    $("v-attrib").textContent = attrib;
+    const clusters = last.cluster_scores || [];
+    $("v-clusters").textContent = clusters.length
+      ? clusters.map((s, i) => (clusterNames[i] || ("c" + i)) + " " + Number(s).toFixed(4)).join(" · ")
+      : "—";
+    const advisories = (last.advisories || []).join("; ");
+    $("v-reason").textContent = (last.reason || "—") +
+      (advisories ? "  [advisory: " + advisories + "]" : "");
+    const pill = $("verdict-pill");
+    pill.className = "pill " + (last.allowed ? "passed" : "blocked");
+    pill.textContent = last.allowed ? "passed" : "blocked";
+    $("probe-layer").textContent = "probe layer " + (last.probe_layer ?? "—") + " / " + (last.num_layers ?? "—");
+  }
+
+  // Record one human label for an intercepted call.
+  //
+  // The label goes to the guard's /api/label endpoint, which appends it to
+  // the calibration file. The readings that were measured at interception time
+  // travel with it, so the calibration fits the threshold on what the guard
+  // actually saw rather than on a re-measurement.
+  async function recordLabel(ev, label, cell) {
+    const buttons = cell.querySelectorAll("button");
+    const note = cell.querySelector(".msg");
+    buttons.forEach((b) => { b.disabled = true; });
+    note.className = "msg";
+    note.textContent = "saving…";
+    try {
+      const response = await fetch("/api/label", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tool_name: ev.tool_name || "",
+          tool_args: (ev.tool_args !== undefined && ev.tool_args !== null) ? ev.tool_args : (ev.tool_args_preview || ""),
+          label: label,
+          harm_cosine: Number(ev.harm_cosine ?? 0),
+          harm_baseline: Number(ev.harm_baseline ?? 0),
+          harm_excess: Number(ev.harm_excess ?? 0),
+          baseline_mode: ev.baseline_mode || "live-panel",
+          cluster_scores: Array.isArray(ev.cluster_scores) ? ev.cluster_scores : [],
+          ts_ms: Number(ev.ts_ms ?? Date.now()),
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || ("HTTP " + response.status));
+      const chosen = cell.querySelector('button[data-label="' + label + '"]');
+      if (chosen) {
+        chosen.textContent = label + " ✓";
+        chosen.classList.add("done");
+      }
+      note.textContent = "saved → " + (body.path || "calibration file");
+    } catch (error) {
+      // The label was not recorded, so the choice stands: say so and let the
+      // human try again.
+      note.className = "msg err";
+      note.textContent = "error: " + error.message;
+      buttons.forEach((b) => { b.disabled = false; });
+    }
+  }
+
+  function addRow(ev) {
+    const tbody = $("rows");
+    if (tbody.querySelector(".empty")) tbody.innerHTML = "";
+    const tr = document.createElement("tr");
+    const t = new Date(ev.ts_ms || Date.now()).toLocaleTimeString();
+    tr.innerHTML =
+      "<td>" + t + "</td>" +
+      "<td>" + (ev.tool_name || "—") + "</td>" +
+      "<td class=\"cmd\">" + escapeHtml(ev.tool_args_preview || "—") + "</td>" +
+      '<td><span class="pill ' + (ev.allowed ? "passed" : "blocked") + '">' + (ev.allowed ? "passed" : "blocked") + "</span></td>" +
+      "<td>" + (ev.harm_cosine ?? 0).toFixed(4) + "</td>" +
+      "<td>" + (ev.attribution_token
+        ? escapeHtml(ev.attribution_token) + " (" + Number(ev.attribution_cosine ?? 0).toFixed(3) + ")"
+        : "—") + "</td>" +
+      "<td>" + (ev.drift_cosine ?? 0).toFixed(4) + "</td>" +
+      "<td>" + (ev.pca_subspace_energy ?? 0).toFixed(4) + "</td>" +
+      "<td>" + (ev.clamped_in_place ? "yes" : "no") + "</td>" +
+      "<td>" + (ev.reason || "") +
+        ((ev.advisories && ev.advisories.length)
+          ? ' <span style="color:var(--warn)">(' + ev.advisories.join("; ") + ")</span>"
+          : "") + "</td>" +
+      '<td class="label">' +
+        '<button class="lbl benign" data-label="benign">benign</button> ' +
+        '<button class="lbl harmful" data-label="harmful">harmful</button> ' +
+        '<span class="msg"></span></td>';
+    const labelCell = tr.querySelector("td.label");
+    if (labelCell) {
+      labelCell.querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => recordLabel(ev, button.dataset.label, labelCell));
+      });
+    }
+    tbody.insertBefore(tr, tbody.firstChild);
+    while (tbody.children.length > 60) tbody.removeChild(tbody.lastChild);
+    $("count").textContent = String(events.length);
+  }
+
+  fetch("/api/info")
+    .then((r) => r.json())
+    .then((info) => {
+      $("meta").textContent =
+        (info.architecture || "") + " · " + (info.num_layers || "?") + " layers · d_model " +
+        (info.d_model || "?") + " · " + (info.calibration_mode || "") +
+        " · weights " + (info.weight_quant_summary || "");
+    })
+    .catch(() => { /* the live stream fills this in on the first event */ });
+
+  const src = new EventSource("/api/events");
+  src.onopen = () => { $("dot").className = "dot on"; $("conn").textContent = "live"; };
+  src.onerror = () => { $("dot").className = "dot off"; $("conn").textContent = "disconnected"; };
+  src.onmessage = (m) => {
+    // Only the parse is guarded. A throw inside render() must surface in the
+    // console instead of being swallowed, which previously left the dashboard
+    // half-updated with no visible symptom.
+    let ev;
+    try {
+      ev = JSON.parse(m.data);
+    } catch (e) {
+      return;
+    }
+    events.push(ev); last = ev;
+    addRow(ev);
+    $("meta").textContent =
+      (ev.architecture || "") + " · " + (ev.num_layers || "?") + " layers · d_model " +
+      (ev.d_model || "?") + " · " + (ev.calibration_mode || "");
+    render();
+  };
+
+  window.addEventListener("resize", render);
+  render();
+})();
+</script>
+</body>
+</html>
