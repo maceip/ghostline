@@ -19030,7 +19030,7 @@ cat << 'ACCESS' > "$PROJ/src/access.rs"
 //! the client and can be forged.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -19174,7 +19174,7 @@ pub fn client_key(
 ) -> String {
     if trust_proxy {
         let from_a_trusted_peer = match peer {
-            Some(addr) => trust_any_peer || addr.ip().is_loopback(),
+            Some(addr) => trust_any_peer || is_local_peer(addr),
             // An unknown peer is not a trusted one.
             None => false,
         };
@@ -19187,6 +19187,30 @@ pub fn client_key(
     match peer {
         Some(addr) => addr.ip().to_string(),
         None => "unknown".to_string(),
+    }
+}
+
+/// Whether this peer is on this machine.
+///
+/// `Ipv6Addr::is_loopback` is true only for `::1`, so an IPv4-mapped
+/// address (`::ffff:127.0.0.1`) — what a dual-stack IPv6 socket sees
+/// for an IPv4 client — does not count.  A guard bound to `::` would then
+/// treat a local proxy as a remote one and stop trusting its header, so
+/// every client through it would share one rate-limit bucket.  That is
+/// the safe direction to fail, but it is a silent misconfiguration, so
+/// the mapped form is recognised here.
+fn is_local_peer(addr: SocketAddr) -> bool {
+    match addr.ip() {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return true;
+            }
+            match v6.to_ipv4_mapped() {
+                Some(v4) => v4.is_loopback(),
+                None => false,
+            }
+        }
     }
 }
 
@@ -19288,6 +19312,11 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
+
+    fn peer_v6(ip: &str) -> Option<SocketAddr> {
+        let addr = IpAddr::V6(ip.parse::<std::net::Ipv6Addr>().expect("ipv6"));
+        Some(SocketAddr::new(addr, 443))
+    }
 
     fn peer(ip: &str) -> Option<SocketAddr> {
         let addr = IpAddr::V4(Ipv4Addr::from_str(ip).expect("ipv4"));
@@ -19416,6 +19445,21 @@ mod tests {
         // The explicit opt-in for a proxy on another host restores it.
         let key = client_key(peer("203.0.113.7"), Some("6.6.6.6"), true, true);
         assert_eq!(key, "6.6.6.6");
+    }
+
+    #[test]
+    fn a_local_peer_is_recognised_through_an_ipv4_mapped_address() {
+        // A guard bound to a dual-stack IPv6 socket sees an IPv4 client as
+        // ::ffff:a.b.c.d.  A local proxy there must still be trusted.
+        let key = client_key(peer_v6("::ffff:127.0.0.1"), Some("6.6.6.6"), true, false);
+        assert_eq!(key, "6.6.6.6");
+        // And a remote one must not be: the header is ignored and the
+        // key is the peer address, never the forged one.
+        let key = client_key(peer_v6("::ffff:203.0.113.7"), Some("6.6.6.6"), true, false);
+        assert!(
+            key.contains("203.0.113.7") && !key.contains("6.6.6.6"),
+            "a remote mapped peer keeps its own bucket, got {key}"
+        );
     }
 
     #[test]
