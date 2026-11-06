@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AGENTVECTOR — the exhibit · representation engineering live</title>
+  <meta name="description" content="Walk into the exhibit. Type a filter, hit play, and watch representation engineering read the model's brain on a live tool call." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Doto:wght@100..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./exhibit.css" />
+  <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
+</head>
+<body class="exhibit">
+
+  <header class="ex-head">
+    <a class="ex-brand" href="./index.html">
+      <img id="ex-logo" alt="AgentVector" />
+    </a>
+    <p class="label ex-title">EXHIBIT 01 · REPRESENTATION ENGINEERING</p>
+    <span class="chip chip-replay" id="source-chip">[ REPLAY ]</span>
+    <div class="seg seg-theme" id="seg-theme" role="group" aria-label="Theme">
+      <button type="button" class="seg-btn is-on" data-theme="dark">DARK</button>
+      <button type="button" class="seg-btn" data-theme="light">LIGHT</button>
+    </div>
+  </header>
+
+  <!-- story rail — the path through the exhibit -->
+  <ol class="ex-rail" id="ex-rail">
+    <li class="is-now" data-step="1"><span class="ex-n">01</span> SET A FILTER</li>
+    <li data-step="2"><span class="ex-n">02</span> HIT PLAY</li>
+    <li data-step="3"><span class="ex-n">03</span> WATCH THE BRAIN</li>
+    <li data-step="4"><span class="ex-n">04</span> THE VERDICT</li>
+  </ol>
+
+  <main class="ex-main">
+    <!-- step 1 + 2: the lever -->
+    <section class="ex-console" id="ex-console">
+      <p class="label">A TOOL CALL IS ABOUT TO RUN. MEAN IT?</p>
+      <h1 class="ex-h1">Type what the agent<br />is about to do.</h1>
+      <p class="ex-lede">
+        Don’t trust the prompt. Don’t trust the words. When this hits play,
+        the model’s own residual stream decides — representation engineering,
+        live.
+      </p>
+
+      <div class="ex-play">
+        <input id="ex-input" type="text" spellcheck="false"
+               placeholder='rm -rf /tmp/scratch'
+               list="ex-presets" autocomplete="off" />
+        <button id="ex-play-btn" type="button"><span data-icon="play" data-icon-size="18"></span> PLAY</button>
+      </div>
+      <datalist id="ex-presets"></datalist>
+
+      <div class="ex-chips" id="ex-chips">
+        <p class="label">OR TAKE A SPECIMEN</p>
+        <div class="ex-chip-row" id="ex-chip-row"></div>
+      </div>
+    </section>
+
+    <!-- step 3: the brain -->
+    <section class="ex-brain" id="ex-brain" hidden>
+      <div class="ex-brain-head">
+        <p class="label">READING THE RESIDUAL STREAM</p>
+        <p class="ex-status" id="ex-status">IDLE</p>
+      </div>
+      <div class="ex-brain-grid">
+        <div class="ex-field-wrap">
+          <canvas id="field"></canvas>
+          <p class="label ex-field-cap">24 DECODER LAYERS · PROBE AT 16 · 68% DEPTH</p>
+        </div>
+        <div class="ex-spine-wrap">
+          <div id="spine"></div>
+          <p class="label">HARM COSINE × DEPTH</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- step 4: the verdict -->
+    <section class="ex-verdict" id="ex-verdict" hidden>
+      <div class="panel">
+        <div class="panel-h">
+          <span class="label">THE VERDICT</span>
+          <span class="label" id="gate-mode">ENFORCE</span>
+        </div>
+        <div id="gate"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-h">
+          <span class="label">WHAT THE MODEL MEANT</span>
+        </div>
+        <div id="detail"></div>
+      </div>
+    </section>
+
+    <!-- advanced drawer -->
+    <details class="ex-advanced">
+      <summary class="label">INSTRUMENT PANEL · KNOBS &amp; THE FULL TAPE</summary>
+      <div class="ex-knobs">
+        <div class="knob">
+          <label class="label" for="thr">RISK SCORE THRESHOLD</label>
+          <div class="knob-row">
+            <input type="range" id="thr" min="0" max="0.2" step="0.001" value="0.002" />
+            <output id="thr-val" class="knob-val">0.002</output>
+          </div>
+        </div>
+        <div class="knob">
+          <span class="label">EXECUTION OPTIONS</span>
+          <div class="seg" id="seg-mode">
+            <button type="button" class="seg-btn is-on" data-mode="enforce">ENFORCE</button>
+            <button type="button" class="seg-btn" data-mode="monitor">MONITOR</button>
+          </div>
+        </div>
+        <div class="knob">
+          <span class="label">SCOPE</span>
+          <div class="seg" id="seg-baseline">
+            <button type="button" class="seg-btn is-on" data-baseline="panel">PANEL</button>
+            <button type="button" class="seg-btn" data-baseline="off">OFF</button>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-h"><span class="label">AUDIT EVENTS</span><span class="label">NEWEST FIRST</span></div>
+        <div id="tape"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-h"><span class="label">SPECIMEN RACK</span></div>
+        <div id="rack"></div>
+      </div>
+      <div class="counts" id="counts"></div>
+    </details>
+  </main>
+
+  <footer class="ex-foot">
+    <a class="label" href="./index.html">← BACK TO THE ZOO</a>
+    <p class="label">FROM CODE TO EXECUTION · LIVE HOSTED</p>
+  </footer>
+
+  <script type="module" src="./js/exhibit.js"></script>
+</body>
+</html>

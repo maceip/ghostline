@@ -23,6 +23,7 @@ export const icons = {
   chevronDown: (size = 20) => wrap(`<path d="M6 9l6 6 6-6"/>`, size),
   chevronRight: (size = 20) => wrap(`<path d="M9 6l6 6-6 6"/>`, size),
   arrowDown: (size = 20) => wrap(`<path d="M12 5v14"/><path d="M6 13l6 6 6-6"/>`, size),
+  play: (size = 20) => wrap(`<path d="M8 5l11 7-11 7z"/>`, size),
   plus: (size = 20) => wrap(`<path d="M12 5v14"/><path d="M5 12h14"/>`, size),
   minus: (size = 20) => wrap(`<path d="M5 12h14"/>`, size),
   check: (size = 20) => wrap(`<path d="M5 13l4 4L19 7"/>`, size),

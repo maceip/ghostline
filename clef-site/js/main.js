@@ -1,86 +1,49 @@
 /**
- * main.js — glue between the hero field and the console.
+ * main.js — landing page (the zoo): story, field, theme, logo.
+ * The exhibit lives in demo.html / js/exhibit.js.
  */
 import { ResidualField } from "./field.js";
-import { Console } from "./console.js";
 import { hydrateIcons } from "./icons.js";
 
 hydrateIcons();
 
-/* ---- theme: dark and light are both first-class ---- */
 const stored = localStorage.getItem("clef-theme");
 const initialTheme =
   stored || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
 document.documentElement.setAttribute("data-theme", initialTheme);
 
-const canvas = document.getElementById("field");
-const fieldState = document.getElementById("field-state");
-const field = new ResidualField(canvas, { theme: initialTheme });
+const field = new ResidualField(document.getElementById("field"), {
+  theme: initialTheme,
+});
+// The landing field runs the signature gesture on loop: a harmful call is
+// refused at the probe ring. Every number beside it is a real capture.
+field.setState({ blocked: true, harm: 0.85 });
 field.start();
+
+function setLogo(theme) {
+  const dark = theme !== "light";
+  for (const [id, h] of [["site-logo", 26], ["foot-logo", 36]]) {
+    const img = document.getElementById(id);
+    if (!img) continue;
+    img.src = dark
+      ? "./assets/logo/lockup-dark.png"
+      : "./assets/logo/lockup-light.png";
+    img.style.height = h + "px";
+    img.alt = "AgentVector";
+  }
+}
 
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
   localStorage.setItem("clef-theme", theme);
   field.setTheme(theme);
+  setLogo(theme);
   for (const btn of document.querySelectorAll("#seg-theme .seg-btn")) {
     btn.classList.toggle("is-on", btn.dataset.theme === theme);
   }
-  // re-render the SVG instruments against the new tokens
-  if (consoleApp && consoleApp.selectedId) consoleApp.select(consoleApp.selectedId);
 }
-
-const consoleApp = new Console({
-  spine: document.getElementById("spine"),
-  gate: document.getElementById("gate"),
-  triad: document.getElementById("triad"),
-  tape: document.getElementById("tape"),
-  rack: document.getElementById("rack"),
-  detail: document.getElementById("detail"),
-  counts: document.getElementById("counts"),
-  threshold: document.getElementById("thr"),
-  thresholdVal: document.getElementById("thr-val"),
-  modeButtons: [...document.querySelectorAll("#seg-mode .seg-btn")],
-  baselineButtons: [...document.querySelectorAll("#seg-baseline .seg-btn")],
-  clusterButtons: [...document.querySelectorAll("#seg-cluster .seg-btn")],
-  judgeInput: document.getElementById("judge-input"),
-  judgeBtn: document.getElementById("judge-btn"),
-  judgeNote: document.getElementById("judge-note"),
-  sourceChip: document.getElementById("source-chip"),
-  onSelect: ({ blocked, harm }) => {
-    field.setState({ blocked, harm });
-    if (fieldState) {
-      fieldState.textContent = blocked
-        ? "BLOCKED AT LAYER 16"
-        : harm > 0.15
-          ? "ELEVATED COSINE"
-          : "PASSED";
-      fieldState.classList.toggle("is-blocked", blocked);
-      fieldState.classList.toggle("is-ok", !blocked && harm <= 0.15);
-    }
-    const gm = document.getElementById("gate-mode");
-    if (gm) gm.textContent = consoleApp.state.mode.toUpperCase();
-  },
-});
 
 for (const btn of document.querySelectorAll("#seg-theme .seg-btn")) {
   btn.addEventListener("click", () => applyTheme(btn.dataset.theme));
 }
 applyTheme(initialTheme);
-
-consoleApp.load().then(() => {
-  const strip = document.getElementById("strip-source");
-  if (strip) {
-    strip.textContent = consoleApp.live
-      ? `LIVE ${consoleApp.liveBase || location.host}`
-      : "REPLAY · 36 CAPTURED CALLS";
-  }
-});
-
-// clicking the hero field advances to the next scenario
-canvas.addEventListener("click", () => {
-  const recs = consoleApp.filtered || [];
-  if (!recs.length) return;
-  const idx = recs.findIndex((r) => r.id === consoleApp.selectedId);
-  const next = recs[(idx + 1) % recs.length];
-  consoleApp.select(next.id);
-});
