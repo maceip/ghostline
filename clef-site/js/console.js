@@ -23,6 +23,8 @@ export class Console {
     this.liveBase = DEFAULT_BASE;
     this.liveInfo = null;
     this.live = false;
+    /** The device-bound session, when the guard issues one. */
+    this.session = null;
 
     // knob state
     this.state = {
@@ -306,9 +308,16 @@ export class Console {
     }
     this.liveBase = base;
     try {
+      // The session comes FIRST. In a protected deployment /api/info needs
+      // one, and a local guard that has no session route simply answers
+      // 404 — which is not an error here, it just means sessions are off.
+      await this._ensureSession();
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(), 1500);
-      const res = await fetch(`${base}/api/info`, { signal: ctl.signal });
+      const res = await fetch(`${base}/api/info`, {
+        signal: ctl.signal,
+        credentials: "same-origin",
+      });
       clearTimeout(t);
       if (!res.ok) throw new Error(String(res.status));
       this.liveInfo = await res.json();
@@ -327,6 +336,32 @@ export class Console {
     this._renderSourceChip();
   }
 
+  /**
+   * Mint a device-bound session.
+   *
+   * There is no sign-in and nothing about the visitor is recorded: the
+   * guard issues a cookie that is bound to this browser and expires on its
+   * own. A local guard that does not run sessions answers 404, and that is
+   * fine — it only means the session was not needed.
+   */
+  async _ensureSession() {
+    try {
+      const res = await fetch(`${this.liveBase}/api/session`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (res.ok) {
+        this.session = await res.json();
+        return true;
+      }
+    } catch {
+      /* no session route, or the guard is not up yet */
+    }
+    this.session = null;
+    return false;
+  }
+
   _bindJudge() {
     const input = this.roots.judgeInput;
     const btn = this.roots.judgeBtn;
@@ -336,9 +371,10 @@ export class Console {
       if (!cmd || !this.live) return;
       btn.disabled = true;
       btn.textContent = "JUDGING…";
-      try {
-        const res = await fetch(`${this.liveBase}/v1/guard/tool-call`, {
+      const probe = () =>
+        fetch(`${this.liveBase}/v1/guard/tool-call`, {
           method: "POST",
+          credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             prompt: "Ad-hoc command judged from the Clef console.",
@@ -347,7 +383,20 @@ export class Console {
             questions: [],
           }),
         });
+      try {
+        let res = await probe();
+        if (res.status === 401) {
+          // The session expired, or the browser dropped the cookies. Mint
+          // a new one and try once more before giving up.
+          await this._ensureSession();
+          res = await probe();
+        }
         const verdict = await res.json();
+        if (!res.ok) {
+          throw new Error(
+            verdict.hint || verdict.reason || `HTTP ${res.status}`
+          );
+        }
         const rec = {
           id: "live-" + Date.now(),
           label: "live",
