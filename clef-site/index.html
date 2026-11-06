@@ -3,51 +3,55 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CLEF — assess the trace, not the prompt</title>
-  <meta name="description" content="Clef applies intelligence to agent traces at the moment code becomes execution. Findings with risk scores, refused before they run. No second model." />
+  <title>CLEF — Read the residual stream, not the command string</title>
+  <meta name="description" content="Clef is a tool-call guard that reads a model's residual stream at 68% depth and blocks destructive, secret-reading, and exfiltrating calls before they run. Zero generation tokens, no second model." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Doto:wght@100..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23000'/%3E%3Crect x='7' y='2' width='2' height='12' fill='%23D71921'/%3E%3C/svg%3E" />
+  <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
 </head>
 <body>
 
   <!-- ============ status strip ============ -->
   <div class="strip">
-    <span class="strip-mark">CLEF</span>
+    <span class="strip-mark" data-icon="mark" data-icon-size="14">CLEF</span>
     <span>CLF.0S1</span>
     <span class="strip-sep">·</span>
-    <span>FROM CODE TO EXECUTION</span>
+    <span>RESIDUAL-STREAM GUARD</span>
     <span class="strip-sep">·</span>
     <span id="strip-model">QWEN2.5-0.5B · 24 LAYERS · PROBE 16</span>
     <span class="strip-right" id="strip-source">BOOTING…</span>
+    <div class="seg seg-theme" id="seg-theme" role="group" aria-label="Theme">
+      <button type="button" class="seg-btn is-on" data-theme="dark">DARK</button>
+      <button type="button" class="seg-btn" data-theme="light">LIGHT</button>
+    </div>
   </div>
 
   <!-- ============ hero · manifesto ============ -->
   <header class="hero" id="top">
     <div class="hero-grid">
       <div class="hero-copy">
-        <p class="label hero-eyebrow">AUTOMATED ASSESSMENT · ACTIVE OBSERVABILITY</p>
+        <p class="label hero-eyebrow">ACTIVATION-LEVEL TOOL-CALL GUARD</p>
         <h1 class="hero-title">
-          WE ASSESS<br />
-          THE TRACE,<br />
+          READ THE<br />
+          RESIDUAL,<br />
           <span class="hero-knows">NOT THE PROMPT.</span>
         </h1>
-        <p class="hero-kicker">from code to execution</p>
+        <p class="hero-kicker">intercepted at layer 16 · before the shell runs</p>
         <p class="hero-deck">
-          Clef applies intelligence to agent traces at the moment code becomes
-          execution. It surfaces the most critical patterns in the residual
-          stream — the intent the model already carries — and refuses the call
-          before it runs. No second model. No generation round trip.
+          Clef sits between your agent and its tools. Instead of grepping
+          command strings or running a second LLM judge, it reads the model’s
+          residual stream at 68% depth and blocks destructive calls before they
+          execute. Zero generation tokens. One forward pass.
         </p>
         <div class="hero-cta">
-          <a class="btn btn-primary" href="#console">RUN AN ASSESSMENT</a>
-          <a class="btn btn-ghost" href="#mechanism">INTERPRETING RESULTS</a>
+          <a class="btn btn-primary" href="#console">OPEN THE CONSOLE</a>
+          <a class="btn btn-ghost" href="#mechanism">HOW IT WORKS</a>
         </div>
         <dl class="hero-stats">
           <div><dt>probe</dt><dd>16 / 24</dd></div>
-          <div><dt>findings blocked</dt><dd class="ok">17 / 18</dd></div>
+          <div><dt>harmful blocked</dt><dd class="ok">17 / 18</dd></div>
           <div><dt>false positives</dt><dd class="ok">0 / 18</dd></div>
           <div><dt>generation tokens</dt><dd class="ok">0</dd></div>
         </dl>
@@ -121,7 +125,7 @@
     <p class="proof-foot">
       *36 tool calls assessed on Qwen2.5-0.5B-Instruct, 2026-11-06 — every
       cosine and layer profile recorded from actual forward passes
-      (<a href="#console">proof</a>). The one finding that passed is published
+      (<a href="#console">proof <span data-icon="external" data-icon-size="11"></span></a>). The one finding that passed is published
       below.
     </p>
 
@@ -456,7 +460,7 @@ cargo run -- --port 8090 --model /path/to/checkpoint</pre>
     </div>
     <div class="faq">
       <details class="faq-item" open>
-        <summary>Can Clef still get things wrong?</summary>
+        <summary><span>Can Clef still get things wrong?</span><span class="faq-i"><i data-icon="plus"></i><i data-icon="minus"></i></span></summary>
         <p>
           Yes. Thresholds transfer within a prompt distribution, not across it —
           re-derive them for your own traffic, or run in <code>monitor</code>
@@ -466,7 +470,7 @@ cargo run -- --port 8090 --model /path/to/checkpoint</pre>
         </p>
       </details>
       <details class="faq-item">
-        <summary>Is this just a smaller LLM in the loop?</summary>
+        <summary><span>Is this just a smaller LLM in the loop?</span><span class="faq-i"><i data-icon="plus"></i><i data-icon="minus"></i></span></summary>
         <p>
           No. Clef never generates. The judge is a read of one layer of the
           forward pass already computed to produce the call — 0 generation
@@ -475,7 +479,7 @@ cargo run -- --port 8090 --model /path/to/checkpoint</pre>
         </p>
       </details>
       <details class="faq-item">
-        <summary>What happens when no trained head is supplied?</summary>
+        <summary><span>What happens when no trained head is supplied?</span><span class="faq-i"><i data-icon="plus"></i><i data-icon="minus"></i></span></summary>
         <p>
           The Clef head is optional. With no trained head the questions are not
           evaluated at all — an untrained head cannot judge, and nothing is
@@ -484,7 +488,7 @@ cargo run -- --port 8090 --model /path/to/checkpoint</pre>
         </p>
       </details>
       <details class="faq-item">
-        <summary>How is the reading kept comparable across prompts?</summary>
+        <summary><span>How is the reading kept comparable across prompts?</span><span class="faq-i"><i data-icon="plus"></i><i data-icon="minus"></i></span></summary>
         <p>
           A panel of five benign tool calls is rendered in the same context; the
           worst of them is the baseline. Subtracting it removes the
@@ -494,7 +498,7 @@ cargo run -- --port 8090 --model /path/to/checkpoint</pre>
         </p>
       </details>
       <details class="faq-item">
-        <summary>Where does it sit in my stack?</summary>
+        <summary><span>Where does it sit in my stack?</span><span class="faq-i"><i data-icon="plus"></i><i data-icon="minus"></i></span></summary>
         <p>
           At the point tool specs become executable. Call
           <code>POST /v1/guard/tool-call</code>, or point the agent’s base URL at
@@ -509,7 +513,7 @@ cargo run -- --port 8090 --model /path/to/checkpoint</pre>
   <footer class="foot">
     <div class="foot-grid">
       <div>
-        <p class="foot-mark">CLEF</p>
+        <p class="foot-mark"><span data-icon="mark" data-icon-size="30"></span>CLEF</p>
         <p class="label">SECURE INFRASTRUCTURE FOR AI-GENERATED CODE</p>
         <p class="label foot-stamp">CLF.0S1 · VERSION 0.01 · © 2026</p>
       </div>

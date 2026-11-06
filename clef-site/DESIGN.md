@@ -61,27 +61,48 @@ numbers from real captures and the repo's published benchmarks.
 
 ## 4. Palette + Typography
 
-### Palette (dark mode is the design; OLED)
+### Palette (dark and light are both first-class)
 
-| Token | Hex | Role |
-|---|---|---|
-| `--black` | `#000000` | page background |
-| `--surface` | `#0A0A0A` | panels, console chrome |
-| `--surface-raised` | `#121212` | inset wells, code |
-| `--border` | `#1E1E1E` | structural hairlines |
-| `--border-visible` | `#2C2C2C` | intentional rules, axes |
-| `--text-disabled` | `#5A5A5A` | inactive ticks |
-| `--text-secondary` | `#8C8C8C` | labels, metadata |
-| `--text-primary` | `#E4E4E4` | body |
-| `--text-display` | `#FFFFFF` | headlines, hero numbers |
-| `--accent` | `#D71921` | **the interrupt** — BLOCKED, over-threshold, the word KNOWS in the hero |
-| `--ok` | `#3FA35C` | PASSED / allowed values |
-| `--warn` | `#C9971F` | clamped / advisory |
-| `--info` | `#5B8DEF` | PCA/secondary data series only |
+Tokens live in `styles.css` and match `nothing-design/references/tokens.md`
+exactly. Dark is the OLED instrument panel (`#000` page); light is the printed
+technical manual (`#F5F5F5` page). The theme toggle lives in the status strip
+and persists in `localStorage`; `prefers-color-scheme` seeds the default.
+Status colors are identical across modes.
 
-Data-status rule: color the **value**, never the row or the label. Labels stay
-`--text-secondary`. Red appears only where something is actually blocked or
-over limit.
+| Token | Dark | Light | Role |
+|---|---|---|---|
+| `--black` | `#000000` | `#F5F5F5` | page background |
+| `--surface` | `#111111` | `#FFFFFF` | panels, console chrome |
+| `--surface-raised` | `#1A1A1A` | `#F0F0F0` | inset wells, code |
+| `--border` | `#222222` | `#E8E8E8` | structural hairlines |
+| `--border-visible` | `#333333` | `#CCCCCC` | intentional rules, axes |
+| `--text-disabled` | `#666666` | `#666666` | inactive ticks |
+| `--text-secondary` | `#999999` | `#666666` | labels, metadata |
+| `--text-primary` | `#E8E8E8` | `#1A1A1A` | body |
+| `--text-display` | `#FFFFFF` | `#000000` | headlines, hero numbers |
+| `--accent` | `#D71921` | `#D71921` | **the interrupt** — BLOCKED, over-threshold |
+| `--success` | `#4A9E5C` | `#4A9E5C` | PASSED / allowed values |
+| `--warning` | `#D4A843` | `#D4A843` | clamped / advisory |
+| `--interactive` | `#5B9BF6` | `#007AFF` | PCA/secondary data series only |
+
+The type scale is tokenized (`--display-xl … --label`) and the spacing scale
+(`--space-2xs … --space-4xl`) drives the layout rhythm. Data-status rule:
+color the **value**, never the row or the label.
+
+### Iconography contract
+
+`js/icons.js` — monoline set on a 24×24 viewBox, 1.5px stroke, round
+caps/joins, no fill, `currentColor` inherits. Max 6 strokes per glyph. The one
+color exception is the mark's accent bead. Set: `mark`, `chevronDown`,
+`chevronRight`, `arrowDown`, `plus`, `minus`, `check`, `block`, `external`.
+Hydrated via `data-icon="name"` + `data-icon-size`.
+
+### Logo
+
+`assets/mark.svg` — the product's one real shape: the residual ring with the
+probe interrupt at 68% depth (gap in the ring, accent bead). Used in the
+status strip and footer lockup; `assets/favicon.svg` is the favicon
+derivative. The wordmark is `CLEF` in Doto, tracked tight, always uppercase.
 
 ### Typography (Google Fonts, loaded once)
 

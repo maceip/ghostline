@@ -12,13 +12,33 @@ import * as THREE from "../vendor/three.module.js";
 const RINGS = 24;
 const PROBE = 16;
 
+const PALETTES = {
+  dark: {
+    ring: 0x3a3a3a,
+    probe: 0xd71921,
+    probeBead: 0xff2a2a,
+    stream: 0xf2f2f2,
+    grid: 0x161616,
+    axis: 0xd71921,
+  },
+  light: {
+    ring: 0xcccccc,
+    probe: 0xd71921,
+    probeBead: 0xd71921,
+    stream: 0x1a1a1a,
+    grid: 0xe0e0e0,
+    axis: 0xd71921,
+  },
+};
+
 export class ResidualField {
-  constructor(canvas) {
+  constructor(canvas, opts = {}) {
     this.canvas = canvas;
     this.blocked = false;
     this.harm = 0; // 0..1 harm axis strength
     this.pointer = new THREE.Vector2(0, 0);
     this.targetPointer = new THREE.Vector2(0, 0);
+    this.colors = PALETTES[opts.theme === "light" ? "light" : "dark"];
     this.reduced =
       window.matchMedia &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -74,12 +94,12 @@ export class ResidualField {
 
   _buildRings() {
     const neutral = new THREE.LineBasicMaterial({
-      color: 0x3a3a3a,
+      color: this.colors.ring,
       transparent: true,
       opacity: 0.55,
     });
     const probeMat = new THREE.LineBasicMaterial({
-      color: 0xd71921,
+      color: this.colors.probe,
       transparent: true,
       opacity: 1,
     });
@@ -116,7 +136,7 @@ export class ResidualField {
         this.probeBeads = new THREE.Points(
           tickGeo,
           new THREE.PointsMaterial({
-            color: 0xff2a2a,
+            color: this.colors.probeBead,
             size: 0.05,
             transparent: true,
             opacity: 1,
@@ -133,7 +153,7 @@ export class ResidualField {
         }
         this.haloRing = new THREE.Line(
           new THREE.BufferGeometry().setFromPoints(halo),
-          new THREE.LineBasicMaterial({ color: 0xd71921, transparent: true, opacity: 0.35 })
+          new THREE.LineBasicMaterial({ color: this.colors.probe, transparent: true, opacity: 0.35 })
         );
         this.ringGroup.add(this.haloRing);
       }
@@ -159,7 +179,7 @@ export class ResidualField {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     const mat = new THREE.PointsMaterial({
-      color: 0xf2f2f2,
+      color: this.colors.stream,
       size: 0.03,
       transparent: true,
       opacity: 0.55,
@@ -174,7 +194,7 @@ export class ResidualField {
   _buildAxis() {
     const g = new THREE.Group();
     const mat = new THREE.LineBasicMaterial({
-      color: 0xd71921,
+      color: this.colors.axis,
       transparent: true,
       opacity: 0,
     });
@@ -190,7 +210,7 @@ export class ResidualField {
 
     const head = new THREE.Mesh(
       new THREE.ConeGeometry(0.12, 0.32, 12),
-      new THREE.MeshBasicMaterial({ color: 0xd71921, transparent: true, opacity: 0 })
+      new THREE.MeshBasicMaterial({ color: this.colors.axis, transparent: true, opacity: 0 })
     );
     head.position.set(2.0, 2.05, 0.22);
     head.rotation.z = -Math.PI / 4;
@@ -199,7 +219,7 @@ export class ResidualField {
     // origin dot
     const origin = new THREE.Mesh(
       new THREE.SphereGeometry(0.05, 10, 10),
-      new THREE.MeshBasicMaterial({ color: 0xd71921, transparent: true, opacity: 0 })
+      new THREE.MeshBasicMaterial({ color: this.colors.axis, transparent: true, opacity: 0 })
     );
     origin.position.set(-1.95, -1.65, -0.2);
     g.add(origin);
@@ -222,8 +242,37 @@ export class ResidualField {
     const geo = new THREE.BufferGeometry().setFromPoints(pts);
     return new THREE.LineSegments(
       geo,
-      new THREE.LineBasicMaterial({ color: 0x161616, transparent: true, opacity: 1 })
+      new THREE.LineBasicMaterial({ color: this.colors.grid, transparent: true, opacity: 1 })
     );
+  }
+
+  /** Swap the field palette when the page theme changes. */
+  setTheme(theme) {
+    this.colors = PALETTES[theme === "light" ? "light" : "dark"];
+    this.ringGroup.traverse((obj) => {
+      if (!obj.material) return;
+      if (obj === this.probeBeads) obj.material.color.setHex(this.colors.probeBead);
+      else if (obj.material.color && obj !== this.haloRing) {
+        // probe ring and halo keep the accent; neutrals follow the theme
+        const isProbeLine =
+          obj.isLine && obj.userData && obj.userData.layer === PROBE;
+        const isHalo = obj === this.haloRing;
+        if (isHalo || isProbeLine || (obj.isPoints && obj !== this.stream?.points)) {
+          obj.material.color.setHex(this.colors.probe);
+        } else if (obj.isLine) {
+          obj.material.color.setHex(this.colors.ring);
+        }
+      }
+    });
+    if (this.stream && this.stream.points.material) {
+      this.stream.points.material.color.setHex(this.colors.stream);
+    }
+    this.axis.traverse((obj) => {
+      if (obj.material && obj.material.color) obj.material.color.setHex(this.colors.axis);
+    });
+    if (this.grid && this.grid.material) {
+      this.grid.material.color.setHex(this.colors.grid);
+    }
   }
 
   /** Set judging state from a real verdict. */

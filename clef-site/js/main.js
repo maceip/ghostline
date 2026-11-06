@@ -3,11 +3,31 @@
  */
 import { ResidualField } from "./field.js";
 import { Console } from "./console.js";
+import { hydrateIcons } from "./icons.js";
+
+hydrateIcons();
+
+/* ---- theme: dark and light are both first-class ---- */
+const stored = localStorage.getItem("clef-theme");
+const initialTheme =
+  stored || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+document.documentElement.setAttribute("data-theme", initialTheme);
 
 const canvas = document.getElementById("field");
 const fieldState = document.getElementById("field-state");
-const field = new ResidualField(canvas);
+const field = new ResidualField(canvas, { theme: initialTheme });
 field.start();
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  localStorage.setItem("clef-theme", theme);
+  field.setTheme(theme);
+  for (const btn of document.querySelectorAll("#seg-theme .seg-btn")) {
+    btn.classList.toggle("is-on", btn.dataset.theme === theme);
+  }
+  // re-render the SVG instruments against the new tokens
+  if (consoleApp && consoleApp.selectedId) consoleApp.select(consoleApp.selectedId);
+}
 
 const consoleApp = new Console({
   spine: document.getElementById("spine"),
@@ -42,11 +62,16 @@ const consoleApp = new Console({
   },
 });
 
+for (const btn of document.querySelectorAll("#seg-theme .seg-btn")) {
+  btn.addEventListener("click", () => applyTheme(btn.dataset.theme));
+}
+applyTheme(initialTheme);
+
 consoleApp.load().then(() => {
   const strip = document.getElementById("strip-source");
   if (strip) {
     strip.textContent = consoleApp.live
-      ? `LIVE ${consoleApp.liveBase}`
+      ? `LIVE ${consoleApp.liveBase || location.host}`
       : "REPLAY · 36 AUDIT EVENTS";
   }
 });

@@ -11,6 +11,31 @@
 
 const NS = "http://www.w3.org/2000/svg";
 
+/** Resolve a design token from the live stylesheet (dark and light both work). */
+function token(name, fallback) {
+  if (typeof getComputedStyle !== "function" || typeof document === "undefined") {
+    return fallback;
+  }
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+function palette() {
+  return {
+    accent: token("--accent", "#d71921"),
+    success: token("--success", "#4a9e5c"),
+    warning: token("--warning", "#d4a843"),
+    interactive: token("--interactive", "#5b9bf6"),
+    display: token("--text-display", "#ffffff"),
+    primary: token("--text-primary", "#e8e8e8"),
+    secondary: token("--text-secondary", "#999999"),
+    disabled: token("--text-disabled", "#666666"),
+    border: token("--border", "#222222"),
+    borderVisible: token("--border-visible", "#333333"),
+    surfaceRaised: token("--surface-raised", "#1a1a1a"),
+  };
+}
+
 function el(name, attrs = {}, text) {
   const node = document.createElementNS(NS, name);
   for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
@@ -36,14 +61,12 @@ export class LayerSpine {
   constructor(container, opts = {}) {
     this.container = container;
     this.height = opts.height || 260;
-    this.accent = opts.accent || "#D71921";
-    this.info = opts.info || "#5B8DEF";
-    this.ok = opts.ok || "#3FA35C";
     this.render(null);
   }
 
   /** @param {object|null} ev TelemetryEvent with layer_profile, probe_layer, harm_baseline */
   render(ev) {
+    const C = palette();
     this.container.textContent = "";
     const W = this.container.clientWidth || 520;
     const H = this.height;
@@ -74,7 +97,7 @@ export class LayerSpine {
     // axis hairline at 0
     svg.appendChild(el("line", {
       x1: x(0), x2: x(0), y1: padT - 4, y2: H - padB + 4,
-      stroke: "#2C2C2C", "stroke-width": 1,
+      stroke: C.borderVisible, "stroke-width": 1,
     }));
 
     // baseline hairline
@@ -82,7 +105,7 @@ export class LayerSpine {
       const bx = x(ev.harm_baseline);
       svg.appendChild(el("line", {
         x1: bx, x2: bx, y1: padT - 4, y2: H - padB + 4,
-        stroke: "#8C8C8C", "stroke-width": 1, "stroke-dasharray": "3 3",
+        stroke: C.secondary, "stroke-width": 1, "stroke-dasharray": "3 3",
       }));
       svg.appendChild(el("text", {
         x: bx + 4, y: padT + 6, class: "viz-tick",
@@ -92,23 +115,23 @@ export class LayerSpine {
     // probe marker band
     svg.appendChild(el("line", {
       x1: padL, x2: W - padR, y1: y(probe), y2: y(probe),
-      stroke: this.accent, "stroke-width": 1, "stroke-dasharray": "2 4", opacity: 0.7,
+      stroke: C.accent, "stroke-width": 1, "stroke-dasharray": "2 4", opacity: 0.7,
     }));
     svg.appendChild(el("text", {
-      x: W - padR + 6, y: y(probe) + 3, class: "viz-tick", fill: this.accent,
+      x: W - padR + 6, y: y(probe) + 3, class: "viz-tick", fill: C.accent,
     }, `L${probe}`));
 
     // profile polyline
     const d = profile.map((v, i) => `${i === 0 ? "M" : "L"}${x(v).toFixed(2)},${y(i).toFixed(2)}`).join(" ");
     svg.appendChild(el("path", {
-      d, fill: "none", stroke: "#E4E4E4", "stroke-width": 1.5, opacity: 0.85,
+      d, fill: "none", stroke: C.primary, "stroke-width": 1.5, opacity: 0.85,
     }));
 
     // dots
     profile.forEach((v, i) => {
       const c = el("circle", {
         cx: x(v), cy: y(i), r: i === probe ? 4 : 2.4,
-        fill: i === probe ? this.accent : (v > 0 ? "#E4E4E4" : "#8C8C8C"),
+        fill: i === probe ? C.accent : (v > 0 ? C.primary : C.secondary),
         class: "viz-dot",
       });
       const t = el("title", {}, `L${i}  ${fmt(v)}`);
@@ -132,9 +155,6 @@ export class LayerSpine {
 export class ExcessGate {
   constructor(container, opts = {}) {
     this.container = container;
-    this.accent = opts.accent || "#D71921";
-    this.ok = opts.ok || "#3FA35C";
-    this.warn = opts.warn || "#C9971F";
     this.render(null, { threshold: 0.015, mode: "enforce", baseline: "panel" });
   }
 
@@ -143,6 +163,7 @@ export class ExcessGate {
    * @param {object} state     {threshold, mode:'enforce'|'monitor', baseline:'panel'|'off'}
    */
   render(rec, state = {}) {
+    const C = palette();
     const threshold = state.threshold ?? 0.015;
     const mode = state.mode || "enforce";
     const useBaseline = state.baseline !== "off";
@@ -154,7 +175,7 @@ export class ExcessGate {
     const shown = useBaseline ? excess : cosine;
     const blocked = shown != null && shown >= threshold;
     const word = shown == null ? "—" : blocked ? "BLOCKED" : "PASSED";
-    const stateColor = shown == null ? "#5A5A5A" : blocked ? this.accent : this.ok;
+    const stateColor = shown == null ? C.disabled : blocked ? C.accent : C.success;
 
     const root = document.createElement("div");
     root.className = "gate";
@@ -247,11 +268,11 @@ export class PcaTriad {
   constructor(container, opts = {}) {
     this.container = container;
     this.height = opts.height || 150;
-    this.info = opts.info || "#5B8DEF";
     this.render(null);
   }
 
   render(ev) {
+    const C = palette();
     const coords = ev && ev.pca_coords ? ev.pca_coords : null;
     const energy = ev && ev.pca_subspace_energy != null ? ev.pca_subspace_energy : null;
     this.container.textContent = "";
@@ -267,7 +288,7 @@ export class PcaTriad {
 
     const maxAbs = Math.max(0.02, ...coords.map((c) => Math.abs(c)));
     const labels = ["PC1", "PC2", "PC3"];
-    const colors = ["#E4E4E4", this.info, "#C9971F"];
+    const colors = [C.primary, C.interactive, C.warning];
 
     const wrap = document.createElement("div");
     wrap.className = "triad-bars";
@@ -303,8 +324,6 @@ export class PcaTriad {
 export class EventTape {
   constructor(container, opts = {}) {
     this.container = container;
-    this.accent = opts.accent || "#D71921";
-    this.ok = opts.ok || "#3FA35C";
     this.rows = [];
     this.autoScroll = true;
     this.container.classList.add("tape");

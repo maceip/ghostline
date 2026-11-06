@@ -13,17 +13,46 @@ Space Mono 400/700 — loaded via Google Fonts with system fallbacks.
 
 ## Verdict by dimension
 
-| Dimension | Grade | One line |
-|---|---|---|
-| Anti-patterns | **A** | No gradients, shadows, blur, zebra, skeletons, toasts, or bounce. |
-| Composition | **A−** | Manifesto rhythm holds; console screen has competing primaries. |
-| Data visualization | **B+** | LayerSpine/ExcessGate are instrument-grade; gate meter should be segmented. |
-| Typography | **B−** | Families right; size/weight budget blown (see census). |
-| Tokens | **C+** | Names correct in spirit; values drifted from spec, scale not tokenized. |
-| Logo | **C** | Wordmark is type-only (fine); favicon is a crude red bar, no mark. |
-| Iconography | **N/A→C** | Zero icons on the site. No icon system defined for future use. |
-| Imagery | **A−** | WebGL residual field is the right kind of imagery; nothing to remove. |
-| Light mode | **F** | Absent. Spec makes both modes first-class. |
+| Dimension | Grade (before) | Grade (after) | One line |
+|---|---|---|---|
+| Anti-patterns | **A** | **A** | No gradients, shadows, blur, zebra, skeletons, toasts, or bounce. |
+| Composition | **A−** | **A−** | Manifesto rhythm holds; P1 tally competition fixed. |
+| Data visualization | **B+** | **B+** | Instrument-grade; gate meter segmentation still open (P2-5). |
+| Typography | **B−** | **B−** | Type scale now tokenized; size collapse still open (P3-9). |
+| Tokens | **C+** | **A** | Snapped to `tokens.md`, status vars renamed, scale tokenized. |
+| Logo | **C** | **A** | Probe-ring mark + favicon + wordmark lockup. |
+| Iconography | **C** | **A** | Monoline contract + set in `js/icons.js`, wired in. |
+| Imagery | **A−** | **A−** | WebGL field adapts to both themes. |
+| Light mode | **F** | **A** | First-class theme, toggle, persistent, field/viz adapt. |
+
+### Resolved (P1)
+
+1. Console competing primaries — tally demoted to Space Mono. ✓
+2. Decorative red on mechanism step numbers — now `--text-secondary`. ✓
+3. Light mode — full theme with toggle, `prefers-color-scheme` seeding,
+   `localStorage` persistence; the 3D field and all SVG instruments read the
+   live tokens. ✓
+
+### Resolved (P2)
+
+4. Token drift — `:root` matches `tokens.md` exactly; `--ok/--warn/--info` →
+   `--success/--warning/--interactive`; type scale (`--display-xl … --label`)
+   and spacing scale (`--space-2xs … --space-4xl`) tokenized. ✓
+6. Logo mark — `assets/mark.svg` (residual ring + probe interrupt), favicon,
+   strip/footer lockup. ✓
+7. `--text-disabled` raised to `#666666` (4.0:1). ✓
+
+### Resolved (P3)
+
+8. Knob hint no longer wraps mid-glyph. ✓
+11. `.DS_Store` ignored. ✓
+12. Icon contract declared in DESIGN.md and implemented. ✓
+
+### Still open
+
+5. Gate meter should be segmented blocks (components.md §11).
+9. Caption size collapse (9/10/11/12/13 → 10 + 12) and weight budget (2/screen).
+10. `prefers-reduced-motion`: freeze the field instead of slowing it.
 
 ---
 
