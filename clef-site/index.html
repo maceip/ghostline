@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CLEF — Read the residual stream, not the command string</title>
-  <meta name="description" content="Clef is a tool-call guard that reads a model's residual stream at 68% depth and blocks destructive, secret-reading, and exfiltrating calls before they run. Zero generation tokens, no second model." />
+  <title>CLEF — representation engineering for agent tool calls</title>
+  <meta name="description" content="Clef applies representation engineering to agent traces at the moment code becomes execution. It surfaces the most critical patterns in the residual stream and keeps your asset safe before a destructive call runs." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Doto:wght@100..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
@@ -22,36 +22,39 @@
     <span class="strip-sep">·</span>
     <span id="strip-model">QWEN2.5-0.5B · 24 LAYERS · PROBE 16</span>
     <span class="strip-right" id="strip-source">BOOTING…</span>
-    <div class="seg seg-theme" id="seg-theme" role="group" aria-label="Theme">
-      <button type="button" class="seg-btn is-on" data-theme="dark">DARK</button>
-      <button type="button" class="seg-btn" data-theme="light">LIGHT</button>
-    </div>
+  </div>
+
+  <!-- theme control: fixed bottom-right instrument switch -->
+  <div class="seg seg-theme" id="seg-theme" role="group" aria-label="Theme">
+    <button type="button" class="seg-btn is-on" data-theme="dark">DARK</button>
+    <button type="button" class="seg-btn" data-theme="light">LIGHT</button>
   </div>
 
   <!-- ============ hero · manifesto ============ -->
   <header class="hero" id="top">
     <div class="hero-grid">
       <div class="hero-copy">
-        <p class="label hero-eyebrow">ACTIVATION-LEVEL TOOL-CALL GUARD</p>
+        <p class="label hero-eyebrow">ACTIVE OBSERVABILITY · TARGET PROTECTION</p>
         <h1 class="hero-title">
-          READ THE<br />
-          RESIDUAL,<br />
-          <span class="hero-knows">NOT THE PROMPT.</span>
+          KEEP YOUR<br />
+          ASSET SAFE<br />
+          <span class="hero-knows">BEFORE IT RUNS.</span>
         </h1>
-        <p class="hero-kicker">intercepted at layer 16 · before the shell runs</p>
+        <p class="hero-kicker">from code to execution</p>
         <p class="hero-deck">
-          Clef sits between your agent and its tools. Instead of grepping
-          command strings or running a second LLM judge, it reads the model’s
-          residual stream at 68% depth and blocks destructive calls before they
-          execute. Zero generation tokens. One forward pass.
+          Clef applies <strong>representation engineering</strong> to agent
+          traces at the moment code becomes execution. It surfaces the most
+          critical patterns in the residual stream — the intent the model
+          already carries — and keeps your asset safe before a destructive call
+          runs. No second model. Without compromising data quality.
         </p>
         <div class="hero-cta">
-          <a class="btn btn-primary" href="#console">OPEN THE CONSOLE</a>
-          <a class="btn btn-ghost" href="#mechanism">HOW IT WORKS</a>
+          <a class="btn btn-primary" href="#console">RUN AN ASSESSMENT</a>
+          <a class="btn btn-ghost" href="#mechanism">INTERPRETING RESULTS</a>
         </div>
         <dl class="hero-stats">
           <div><dt>probe</dt><dd>16 / 24</dd></div>
-          <div><dt>harmful blocked</dt><dd class="ok">17 / 18</dd></div>
+          <div><dt>findings blocked</dt><dd class="ok">17 / 18</dd></div>
           <div><dt>false positives</dt><dd class="ok">0 / 18</dd></div>
           <div><dt>generation tokens</dt><dd class="ok">0</dd></div>
         </dl>

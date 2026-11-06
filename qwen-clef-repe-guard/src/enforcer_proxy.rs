@@ -1,3 +1,4 @@
+use crate::access::{AccessConfig, AuthOutcome, RateLimiter, check_bearer, client_key};
 use crate::clef_head::{ClefDecision, ClefQuestion, ClefSchemaHead};
 use crate::mlx_loader::{QwenLoadedLayer, ShardedModelLoader};
 use crate::qwen_hook::{GuardableEngine, HookedQwenClefEngine};
@@ -9,8 +10,12 @@ use crate::trajectory::ExcessTrajectory;
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::State,
-    http::{HeaderValue, StatusCode},
+    extract::{Request, State, connect_info::ConnectInfo},
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+    },
+    middleware::{self, Next},
     response::{
         Html, IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -19,6 +24,8 @@ use axum::{
 };
 use std::convert::Infallible;
 use std::io::Write;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio_stream::StreamExt;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -27,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use tokio::sync::oneshot;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// A single tool call submitted for judging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +267,10 @@ pub struct EnforcerConfig {
     pub mode: EnforcementMode,
     pub clamp_threshold: f32,
     pub clem_temperature: f32,
+    /// Bearer authentication and rate limiting for the HTTP surface.
+    ///
+    /// Both are off by default, so a local run is unchanged.
+    pub access: AccessConfig,
 }
 
 /// How the engine inside the worker thread should be built.
@@ -727,6 +738,11 @@ pub struct Enforcer {
     /// Live telemetry, fanned out to every connected dashboard.
     pub events: broadcast::Sender<TelemetryEvent>,
     info: EngineInfo,
+    /// The per-client rate limiter, shared by every request.
+    ///
+    /// `None` when no ceiling is configured — an unlimited guard must not
+    /// pay for a map it never uses.
+    limiter: Option<Arc<RateLimiter>>,
 }
 
 impl Enforcer {
@@ -744,6 +760,10 @@ impl Enforcer {
         let (events, _) = broadcast::channel::<TelemetryEvent>(256);
         let engine_events = events.clone();
         let engine_info = info.clone();
+        let limiter = config
+            .access
+            .rate_limit_per_minute
+            .map(|rpm| Arc::new(RateLimiter::new(rpm)));
         std::thread::Builder::new()
             .name("mlx-engine".to_string())
             .spawn(move || {
@@ -826,6 +846,7 @@ impl Enforcer {
             config,
             events,
             info,
+            limiter,
         })
     }
 
@@ -847,7 +868,18 @@ impl Enforcer {
         }
     }
 
+    /// The HTTP surface of the guard.
+    ///
+    /// The access-control layer carries its own copy of the state, so it
+    /// does not depend on the router's state type.
+    ///
+    /// The router must be served through
+    /// `into_make_service_with_connect_info::<SocketAddr>()`: the access
+    /// layer reads the socket peer to identify a client.
     pub fn router(&self) -> Router {
+        let state = EnforcerState {
+            enforcer: self.clone(),
+        };
         Router::new()
             .route("/", get(index))
             .route("/health", get(health))
@@ -856,10 +888,90 @@ impl Enforcer {
             .route("/v1/guard/tool-call", post(guard_tool_call))
             .route("/v1/chat/completions", post(proxy_chat_completions))
             .route("/api/label", post(record_label))
-            .with_state(EnforcerState {
-                enforcer: self.clone(),
-            })
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                access_guard,
+            ))
+            .with_state(state)
     }
+}
+
+/// The access-control layer.
+///
+/// Authentication and rate limiting are both opt-in: with no token and no
+/// ceiling configured, the guard behaves exactly as it did before, which
+/// keeps the local workflow and the benchmark harnesses unchanged.
+///
+/// `/health` is exempt from both. It is the liveness probe the supervisor
+/// polls, and it exposes nothing but the service name.
+async fn access_guard(
+    State(state): State<EnforcerState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
+    let access = &state.enforcer.config.access;
+
+    if request.uri().path() == "/health" {
+        return next.run(request).await;
+    }
+
+    if let Some(expected) = access.token() {
+        let header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
+        let outcome = check_bearer(header, expected);
+        if outcome != AuthOutcome::Ok {
+            warn!(
+                outcome = ?outcome,
+                path = %request.uri().path(),
+                "rejected: bearer token"
+            );
+            let body = serde_json::json!({
+                "error": "unauthorized",
+                "reason": outcome.reason(),
+            });
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(WWW_AUTHENTICATE, "Bearer")],
+                Json(body),
+            )
+                .into_response();
+        }
+    }
+
+    let mut decision = None;
+    if let Some(limiter) = state.enforcer.limiter.as_ref() {
+        let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+        let key = client_key(Some(peer), forwarded, access.trust_proxy);
+        let verdict = limiter.check(&key, std::time::Instant::now());
+        if !verdict.allowed {
+            debug!(client = %key, limit = verdict.limit, "rejected: rate limit");
+            let body = serde_json::json!({
+                "error": "rate_limited",
+                "limit_per_minute": verdict.limit,
+                "retry_after_seconds": verdict.retry_after_secs,
+            });
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", verdict.retry_after_secs.to_string())],
+                Json(body),
+            )
+                .into_response();
+        }
+        decision = Some(verdict);
+    }
+
+    let mut response = next.run(request).await;
+    if let Some(verdict) = decision {
+        let headers = response.headers_mut();
+        if let Ok(value) = HeaderValue::from_str(&verdict.limit.to_string()) {
+            headers.insert("x-ratelimit-limit", value);
+        }
+        if let Ok(value) = HeaderValue::from_str(&verdict.remaining.to_string()) {
+            headers.insert("x-ratelimit-remaining", value);
+        }
+    }
+    response
 }
 
 #[derive(Clone)]

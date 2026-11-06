@@ -162,8 +162,18 @@ a:hover { color: var(--text-display); }
 .strip-mark { color: var(--text-display); font-weight: 700; letter-spacing: 0.22em; }
 .strip-sep { color: var(--text-disabled); }
 .strip-right { margin-left: auto; color: var(--text-disabled); }
-.seg-theme { margin-left: 12px; }
-.seg-theme .seg-btn { padding: 4px 10px; }
+.seg-theme {
+  position: fixed;
+  right: var(--space-lg);
+  bottom: var(--space-lg);
+  z-index: 50;
+  background: var(--surface);
+  border: 1px solid var(--border-visible);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 0;
+}
+.seg-theme .seg-btn { padding: 8px 14px; }
 
 /* ---- hero ---- */
 
@@ -1208,7 +1218,7 @@ input[type="range"]:disabled { opacity: 0.4; }
 
 /* ---- responsive ---- */
 
-@media (max-width: 980px) {
+@media (max-width: 860px) {
   .hero-grid,
   .console-grid,
   .versus,
@@ -1224,6 +1234,12 @@ input[type="range"]:disabled { opacity: 0.4; }
   .measure-row { grid-template-columns: 80px 1fr; }
   .measure-rs { grid-column: 1 / -1; }
   .knobs { grid-template-columns: 1fr; }
+}
+
+/* strip keeps the mark and theme control; metadata drops first */
+@media (max-width: 1100px) {
+  .strip > span:not(.strip-mark):not(.strip-right) { display: none; }
+  .strip-right { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

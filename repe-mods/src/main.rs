@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use qwen_clef_repe_guard::access::AccessConfig;
 use qwen_clef_repe_guard::enforcer_proxy::{
     default_questions, EngineInfo, EngineSpec, Enforcer, EnforcerConfig, EnforcementMode,
     PromptEncoder, ToolCallProbe,
@@ -84,6 +85,36 @@ struct Args {
     /// Where the prompt is split for the cache check.
     #[arg(long, default_value_t = 8)]
     verify_cache_split: usize,
+    /// The interface to bind.
+    ///
+    /// `127.0.0.1` keeps the guard private to this machine. Binding a
+    /// routable address requires a bearer token — the guard refuses to
+    /// start otherwise, because an unauthenticated inference proxy on a
+    /// public interface is an open relay.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// The bearer token required on every route except `/health`.
+    ///
+    /// Prefer `--auth-token-file` or `ZCODE_GUARD_TOKEN`: the command line
+    /// is world-readable through `ps`.
+    #[arg(long)]
+    auth_token: Option<String>,
+    /// Read the bearer token from a file instead of the command line.
+    #[arg(long)]
+    auth_token_file: Option<PathBuf>,
+    /// Requests allowed per minute per client IP.
+    ///
+    /// This is the layer that protects a publicly reachable guard, because
+    /// the expensive part is the inference behind `/v1/chat/completions`.
+    /// Unlimited when unset.
+    #[arg(long)]
+    rate_limit_rpm: Option<u32>,
+    /// Take the client identity from the right-most `X-Forwarded-For`
+    /// entry instead of the socket peer.
+    ///
+    /// Enable this only when a reverse proxy you control sits in front.
+    #[arg(long, default_value_t = false)]
+    trust_proxy: bool,
 }
 
 fn main() -> Result<()> {
@@ -101,12 +132,48 @@ fn main() -> Result<()> {
         other => anyhow::bail!("unknown mode `{other}` — expected `enforce` or `monitor`"),
     };
 
+    // ---------------------------------------------------------------------
+    // Access control: the bearer token and the rate limit, both opt-in.
+    // ---------------------------------------------------------------------
+    let auth_token = resolve_auth_token(args.auth_token.as_ref(), args.auth_token_file.as_ref())?;
+    let rate_limit_rpm = args.rate_limit_rpm.or_else(|| {
+        std::env::var("ZCODE_GUARD_RATE_LIMIT_RPM")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+    });
+
+    // The safety rail. A routable bind without a token would put an open
+    // inference proxy on the network, so the guard refuses to start.
+    if !is_loopback_host(&args.host) && auth_token.is_none() {
+        anyhow::bail!(
+            "refusing to bind {}: a non-loopback address needs a bearer token \
+             (--auth-token, --auth-token-file or ZCODE_GUARD_TOKEN). \
+             An unauthenticated guard is an open inference proxy.",
+            args.host
+        );
+    }
+
+    let access = AccessConfig {
+        token: auth_token,
+        rate_limit_per_minute: rate_limit_rpm,
+        trust_proxy: args.trust_proxy,
+    };
+    if access.is_enabled() {
+        tracing::info!(
+            token = access.token().is_some(),
+            rate_limit_per_minute = access.rate_limit_per_minute.unwrap_or(0),
+            trust_proxy = access.trust_proxy,
+            "access control enabled"
+        );
+    }
+
     let config = EnforcerConfig {
         upstream_url: args.upstream.clone(),
         block_threshold: args.threshold,
         mode,
         clamp_threshold: 0.45,
         clem_temperature: 1.0,
+        access,
     };
 
     // ---------------------------------------------------------------------
@@ -290,7 +357,7 @@ async fn serve(
     let mode = config.mode;
     let enforcer = Enforcer::spawn(spec, tokenizer, config, info)?;
     let app = enforcer.router();
-    let addr = format!("127.0.0.1:{}", args.port);
+    let addr = bind_addr(&args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(
         %addr,
@@ -298,8 +365,75 @@ async fn serve(
         mode = ?mode,
         "qwen-clef-repe-guard listening — telemetry dashboard at http://{addr}/"
     );
-    axum::serve(listener, app).await?;
+    // The connect info carries the socket peer, which the access layer uses
+    // to identify a client when no reverse proxy is trusted.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
+}
+
+/// Where the bearer token comes from, in order of precedence: the
+/// `--auth-token` flag, the `ZCODE_GUARD_TOKEN` environment variable, then
+/// the file named by `--auth-token-file` / `ZCODE_GUARD_TOKEN_FILE`.
+fn resolve_auth_token(
+    flag: Option<&String>,
+    file: Option<&PathBuf>,
+) -> Result<Option<String>> {
+    if let Some(token) = flag {
+        let token = token.trim();
+        if token.is_empty() {
+            anyhow::bail!("--auth-token is empty");
+        }
+        return Ok(Some(token.to_string()));
+    }
+    if let Ok(token) = std::env::var("ZCODE_GUARD_TOKEN") {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            return Ok(Some(token));
+        }
+    }
+    let path = file
+        .cloned()
+        .or_else(|| std::env::var("ZCODE_GUARD_TOKEN_FILE").ok().map(PathBuf::from));
+    if let Some(path) = path {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading the bearer token from {}", path.display()))?;
+        let token = raw.trim().to_string();
+        if token.is_empty() {
+            anyhow::bail!("the bearer token in {} is empty", path.display());
+        }
+        return Ok(Some(token));
+    }
+    Ok(None)
+}
+
+/// Whether `host` only accepts connections from this machine.
+///
+/// Anything that is not an explicit loopback address — including a name
+/// that does not resolve to one — is treated as routable.
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    // `[::1]` is the bracketed form a socket address takes.
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+/// The `host:port` string to bind, bracketing an IPv6 literal.
+fn bind_addr(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 /// Immediate end-to-end smoke test of the RepE hook + Clef head.

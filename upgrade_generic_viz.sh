@@ -83,6 +83,7 @@ CARGO
 # 2. src/lib.rs
 # ------------------------------------------------------------------------------
 cat << 'LIB' > "$PROJ/src/lib.rs"
+pub mod access;
 pub mod clef_head;
 pub mod enforcer_proxy;
 pub mod mlx_loader;
@@ -3421,6 +3422,7 @@ HOOK
 # 8. src/enforcer_proxy.rs
 # ------------------------------------------------------------------------------
 cat << 'ENFORCER' > "$PROJ/src/enforcer_proxy.rs"
+use crate::access::{AccessConfig, AuthOutcome, RateLimiter, check_bearer, client_key};
 use crate::clef_head::{ClefDecision, ClefQuestion, ClefSchemaHead};
 use crate::mlx_loader::{QwenLoadedLayer, ShardedModelLoader};
 use crate::qwen_hook::{GuardableEngine, HookedQwenClefEngine};
@@ -3432,8 +3434,12 @@ use crate::trajectory::ExcessTrajectory;
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
-    extract::State,
-    http::{HeaderValue, StatusCode},
+    extract::{Request, State, connect_info::ConnectInfo},
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+    },
+    middleware::{self, Next},
     response::{
         Html, IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -3442,6 +3448,8 @@ use axum::{
 };
 use std::convert::Infallible;
 use std::io::Write;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio_stream::StreamExt;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -3450,7 +3458,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use tokio::sync::oneshot;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// A single tool call submitted for judging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3683,6 +3691,10 @@ pub struct EnforcerConfig {
     pub mode: EnforcementMode,
     pub clamp_threshold: f32,
     pub clem_temperature: f32,
+    /// Bearer authentication and rate limiting for the HTTP surface.
+    ///
+    /// Both are off by default, so a local run is unchanged.
+    pub access: AccessConfig,
 }
 
 /// How the engine inside the worker thread should be built.
@@ -4150,6 +4162,11 @@ pub struct Enforcer {
     /// Live telemetry, fanned out to every connected dashboard.
     pub events: broadcast::Sender<TelemetryEvent>,
     info: EngineInfo,
+    /// The per-client rate limiter, shared by every request.
+    ///
+    /// `None` when no ceiling is configured — an unlimited guard must not
+    /// pay for a map it never uses.
+    limiter: Option<Arc<RateLimiter>>,
 }
 
 impl Enforcer {
@@ -4167,6 +4184,10 @@ impl Enforcer {
         let (events, _) = broadcast::channel::<TelemetryEvent>(256);
         let engine_events = events.clone();
         let engine_info = info.clone();
+        let limiter = config
+            .access
+            .rate_limit_per_minute
+            .map(|rpm| Arc::new(RateLimiter::new(rpm)));
         std::thread::Builder::new()
             .name("mlx-engine".to_string())
             .spawn(move || {
@@ -4249,6 +4270,7 @@ impl Enforcer {
             config,
             events,
             info,
+            limiter,
         })
     }
 
@@ -4270,7 +4292,18 @@ impl Enforcer {
         }
     }
 
+    /// The HTTP surface of the guard.
+    ///
+    /// The access-control layer carries its own copy of the state, so it
+    /// does not depend on the router's state type.
+    ///
+    /// The router must be served through
+    /// `into_make_service_with_connect_info::<SocketAddr>()`: the access
+    /// layer reads the socket peer to identify a client.
     pub fn router(&self) -> Router {
+        let state = EnforcerState {
+            enforcer: self.clone(),
+        };
         Router::new()
             .route("/", get(index))
             .route("/health", get(health))
@@ -4279,10 +4312,90 @@ impl Enforcer {
             .route("/v1/guard/tool-call", post(guard_tool_call))
             .route("/v1/chat/completions", post(proxy_chat_completions))
             .route("/api/label", post(record_label))
-            .with_state(EnforcerState {
-                enforcer: self.clone(),
-            })
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                access_guard,
+            ))
+            .with_state(state)
     }
+}
+
+/// The access-control layer.
+///
+/// Authentication and rate limiting are both opt-in: with no token and no
+/// ceiling configured, the guard behaves exactly as it did before, which
+/// keeps the local workflow and the benchmark harnesses unchanged.
+///
+/// `/health` is exempt from both. It is the liveness probe the supervisor
+/// polls, and it exposes nothing but the service name.
+async fn access_guard(
+    State(state): State<EnforcerState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
+    let access = &state.enforcer.config.access;
+
+    if request.uri().path() == "/health" {
+        return next.run(request).await;
+    }
+
+    if let Some(expected) = access.token() {
+        let header = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok());
+        let outcome = check_bearer(header, expected);
+        if outcome != AuthOutcome::Ok {
+            warn!(
+                outcome = ?outcome,
+                path = %request.uri().path(),
+                "rejected: bearer token"
+            );
+            let body = serde_json::json!({
+                "error": "unauthorized",
+                "reason": outcome.reason(),
+            });
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(WWW_AUTHENTICATE, "Bearer")],
+                Json(body),
+            )
+                .into_response();
+        }
+    }
+
+    let mut decision = None;
+    if let Some(limiter) = state.enforcer.limiter.as_ref() {
+        let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+        let key = client_key(Some(peer), forwarded, access.trust_proxy);
+        let verdict = limiter.check(&key, std::time::Instant::now());
+        if !verdict.allowed {
+            debug!(client = %key, limit = verdict.limit, "rejected: rate limit");
+            let body = serde_json::json!({
+                "error": "rate_limited",
+                "limit_per_minute": verdict.limit,
+                "retry_after_seconds": verdict.retry_after_secs,
+            });
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", verdict.retry_after_secs.to_string())],
+                Json(body),
+            )
+                .into_response();
+        }
+        decision = Some(verdict);
+    }
+
+    let mut response = next.run(request).await;
+    if let Some(verdict) = decision {
+        let headers = response.headers_mut();
+        if let Ok(value) = HeaderValue::from_str(&verdict.limit.to_string()) {
+            headers.insert("x-ratelimit-limit", value);
+        }
+        if let Ok(value) = HeaderValue::from_str(&verdict.remaining.to_string()) {
+            headers.insert("x-ratelimit-remaining", value);
+        }
+    }
+    response
 }
 
 #[derive(Clone)]
@@ -5078,6 +5191,7 @@ ENFORCER
 cat << 'MAIN' > "$PROJ/src/main.rs"
 use anyhow::{Context, Result};
 use clap::Parser;
+use qwen_clef_repe_guard::access::AccessConfig;
 use qwen_clef_repe_guard::enforcer_proxy::{
     default_questions, EngineInfo, EngineSpec, Enforcer, EnforcerConfig, EnforcementMode,
     PromptEncoder, ToolCallProbe,
@@ -5162,6 +5276,36 @@ struct Args {
     /// Where the prompt is split for the cache check.
     #[arg(long, default_value_t = 8)]
     verify_cache_split: usize,
+    /// The interface to bind.
+    ///
+    /// `127.0.0.1` keeps the guard private to this machine. Binding a
+    /// routable address requires a bearer token — the guard refuses to
+    /// start otherwise, because an unauthenticated inference proxy on a
+    /// public interface is an open relay.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// The bearer token required on every route except `/health`.
+    ///
+    /// Prefer `--auth-token-file` or `ZCODE_GUARD_TOKEN`: the command line
+    /// is world-readable through `ps`.
+    #[arg(long)]
+    auth_token: Option<String>,
+    /// Read the bearer token from a file instead of the command line.
+    #[arg(long)]
+    auth_token_file: Option<PathBuf>,
+    /// Requests allowed per minute per client IP.
+    ///
+    /// This is the layer that protects a publicly reachable guard, because
+    /// the expensive part is the inference behind `/v1/chat/completions`.
+    /// Unlimited when unset.
+    #[arg(long)]
+    rate_limit_rpm: Option<u32>,
+    /// Take the client identity from the right-most `X-Forwarded-For`
+    /// entry instead of the socket peer.
+    ///
+    /// Enable this only when a reverse proxy you control sits in front.
+    #[arg(long, default_value_t = false)]
+    trust_proxy: bool,
 }
 
 fn main() -> Result<()> {
@@ -5179,12 +5323,48 @@ fn main() -> Result<()> {
         other => anyhow::bail!("unknown mode `{other}` — expected `enforce` or `monitor`"),
     };
 
+    // ---------------------------------------------------------------------
+    // Access control: the bearer token and the rate limit, both opt-in.
+    // ---------------------------------------------------------------------
+    let auth_token = resolve_auth_token(args.auth_token.as_ref(), args.auth_token_file.as_ref())?;
+    let rate_limit_rpm = args.rate_limit_rpm.or_else(|| {
+        std::env::var("ZCODE_GUARD_RATE_LIMIT_RPM")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+    });
+
+    // The safety rail. A routable bind without a token would put an open
+    // inference proxy on the network, so the guard refuses to start.
+    if !is_loopback_host(&args.host) && auth_token.is_none() {
+        anyhow::bail!(
+            "refusing to bind {}: a non-loopback address needs a bearer token \
+             (--auth-token, --auth-token-file or ZCODE_GUARD_TOKEN). \
+             An unauthenticated guard is an open inference proxy.",
+            args.host
+        );
+    }
+
+    let access = AccessConfig {
+        token: auth_token,
+        rate_limit_per_minute: rate_limit_rpm,
+        trust_proxy: args.trust_proxy,
+    };
+    if access.is_enabled() {
+        tracing::info!(
+            token = access.token().is_some(),
+            rate_limit_per_minute = access.rate_limit_per_minute.unwrap_or(0),
+            trust_proxy = access.trust_proxy,
+            "access control enabled"
+        );
+    }
+
     let config = EnforcerConfig {
         upstream_url: args.upstream.clone(),
         block_threshold: args.threshold,
         mode,
         clamp_threshold: 0.45,
         clem_temperature: 1.0,
+        access,
     };
 
     // ---------------------------------------------------------------------
@@ -5368,7 +5548,7 @@ async fn serve(
     let mode = config.mode;
     let enforcer = Enforcer::spawn(spec, tokenizer, config, info)?;
     let app = enforcer.router();
-    let addr = format!("127.0.0.1:{}", args.port);
+    let addr = bind_addr(&args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(
         %addr,
@@ -5376,8 +5556,75 @@ async fn serve(
         mode = ?mode,
         "qwen-clef-repe-guard listening — telemetry dashboard at http://{addr}/"
     );
-    axum::serve(listener, app).await?;
+    // The connect info carries the socket peer, which the access layer uses
+    // to identify a client when no reverse proxy is trusted.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
+}
+
+/// Where the bearer token comes from, in order of precedence: the
+/// `--auth-token` flag, the `ZCODE_GUARD_TOKEN` environment variable, then
+/// the file named by `--auth-token-file` / `ZCODE_GUARD_TOKEN_FILE`.
+fn resolve_auth_token(
+    flag: Option<&String>,
+    file: Option<&PathBuf>,
+) -> Result<Option<String>> {
+    if let Some(token) = flag {
+        let token = token.trim();
+        if token.is_empty() {
+            anyhow::bail!("--auth-token is empty");
+        }
+        return Ok(Some(token.to_string()));
+    }
+    if let Ok(token) = std::env::var("ZCODE_GUARD_TOKEN") {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            return Ok(Some(token));
+        }
+    }
+    let path = file
+        .cloned()
+        .or_else(|| std::env::var("ZCODE_GUARD_TOKEN_FILE").ok().map(PathBuf::from));
+    if let Some(path) = path {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading the bearer token from {}", path.display()))?;
+        let token = raw.trim().to_string();
+        if token.is_empty() {
+            anyhow::bail!("the bearer token in {} is empty", path.display());
+        }
+        return Ok(Some(token));
+    }
+    Ok(None)
+}
+
+/// Whether `host` only accepts connections from this machine.
+///
+/// Anything that is not an explicit loopback address — including a name
+/// that does not resolve to one — is treated as routable.
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    // `[::1]` is the bracketed form a socket address takes.
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+/// The `host:port` string to bind, bracketing an IPv6 literal.
+fn bind_addr(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 /// Immediate end-to-end smoke test of the RepE hook + Clef head.
@@ -18365,6 +18612,379 @@ fn main() -> Result<()> {
     Ok(())
 }
 ROLLBACK_PROBE
+
+# ------------------------------------------------------------------------------
+# 38. src/access.rs
+# ------------------------------------------------------------------------------
+cat << 'ACCESS' > "$PROJ/src/access.rs"
+//! Access control for the guard's HTTP surface.
+//!
+//! Two independent layers, both **off by default** so that a local run and
+//! the benchmark harnesses behave exactly as they did before:
+//!
+//! * **Bearer authentication** — every route except `/health` requires
+//!   `Authorization: Bearer <token>`. The comparison runs over SHA-256
+//!   digests in constant time, so neither the token nor its length leaks
+//!   through the response time.
+//! * **Rate limiting** — a sliding one-minute window per client. This is
+//!   the layer that actually protects a publicly reachable guard, because
+//!   the expensive part is the LLM inference behind `/v1/chat/completions`,
+//!   not the token check.
+//!
+//! The client identity is taken from the socket peer, unless the guard is
+//! told to trust a reverse proxy, in which case the **right-most**
+//! `X-Forwarded-For` entry is used. The right-most entry is the one the
+//! nearest proxy actually observed; everything to its left was supplied by
+//! the client and can be forged.
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
+
+/// The window the rate limiter counts over.
+pub const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// How many distinct clients the limiter tracks before it starts evicting.
+/// Without a bound, an attacker could grow the map without limit by
+/// rotating source addresses.
+const MAX_TRACKED_CLIENTS: usize = 4096;
+
+/// What the guard is willing to accept.
+#[derive(Debug, Clone, Default)]
+pub struct AccessConfig {
+    /// The bearer token. `None` disables authentication entirely.
+    pub token: Option<String>,
+    /// Requests per client per minute. `None` disables rate limiting.
+    pub rate_limit_per_minute: Option<u32>,
+    /// Whether `X-Forwarded-For` may be used for client identity.
+    pub trust_proxy: bool,
+}
+
+impl AccessConfig {
+    /// Whether any access control is active at all.
+    pub fn is_enabled(&self) -> bool {
+        self.token.is_some() || self.rate_limit_per_minute.is_some()
+    }
+
+    /// The token, if one is configured.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+}
+
+/// The result of checking an `Authorization` header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthOutcome {
+    /// The bearer token matched.
+    Ok,
+    /// No `Authorization` header was sent.
+    Missing,
+    /// The header was present but was not a bearer credential.
+    Malformed,
+    /// A bearer token was sent but it was not the expected one.
+    Mismatch,
+}
+
+impl AuthOutcome {
+    /// The HTTP status this outcome is served with.
+    pub fn status(&self) -> u16 {
+        match self {
+            AuthOutcome::Ok => 200,
+            _ => 401,
+        }
+    }
+
+    /// A short reason for the response body. It never echoes the token.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            AuthOutcome::Ok => "ok",
+            AuthOutcome::Missing => "missing bearer token",
+            AuthOutcome::Malformed => "malformed authorization header",
+            AuthOutcome::Mismatch => "bearer token mismatch",
+        }
+    }
+}
+
+/// Compare two secrets without leaking their contents through timing.
+///
+/// Both sides are hashed first, so the comparison runs over two fixed-size
+/// digests: the length of the secret never shows up in the runtime, and
+/// the loop does not exit early on the first differing byte.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let da = Sha256::digest(a);
+    let db = Sha256::digest(b);
+    let mut diff = 0u8;
+    for (x, y) in da.iter().zip(db.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Check an `Authorization` header against the expected bearer token.
+pub fn check_bearer(header: Option<&str>, expected: &str) -> AuthOutcome {
+    let Some(raw) = header else {
+        return AuthOutcome::Missing;
+    };
+    let raw = raw.trim();
+    let Some(token) = raw
+        .strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))
+    else {
+        return AuthOutcome::Malformed;
+    };
+    let token = token.trim();
+    if constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+        AuthOutcome::Ok
+    } else {
+        AuthOutcome::Mismatch
+    }
+}
+
+/// The identity a request is rate limited against.
+///
+/// With `trust_proxy` the right-most `X-Forwarded-For` entry wins, because
+/// that is the address the nearest trusted proxy saw. The socket peer is
+/// the fallback; when the proxy did not forward the header, every request
+/// collapses onto the proxy itself, which is the safe direction to fail.
+pub fn client_key(
+    peer: Option<SocketAddr>,
+    forwarded_for: Option<&str>,
+    trust_proxy: bool,
+) -> String {
+    if trust_proxy {
+        if let Some(observed) = rightmost_forwarded_for(forwarded_for) {
+            return observed;
+        }
+    }
+    match peer {
+        Some(addr) => addr.ip().to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
+/// The right-most `X-Forwarded-For` entry, or `None` when the header
+/// carries no usable value.
+fn rightmost_forwarded_for(forwarded_for: Option<&str>) -> Option<String> {
+    let raw = forwarded_for?;
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .next_back()
+        .map(|s| s.to_string())
+}
+
+/// The outcome of one rate-limit check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateDecision {
+    /// Whether the request may proceed.
+    pub allowed: bool,
+    /// The configured ceiling.
+    pub limit: u32,
+    /// How many requests are still allowed in the current window.
+    pub remaining: u32,
+    /// How long the caller should wait before retrying.
+    pub retry_after_secs: u64,
+}
+
+/// A sliding-window rate limiter, one window per client.
+#[derive(Debug)]
+pub struct RateLimiter {
+    per_minute: u32,
+    buckets: Mutex<HashMap<String, Vec<Instant>>>,
+}
+
+impl RateLimiter {
+    /// A limiter that allows `per_minute` requests per client per minute.
+    pub fn new(per_minute: u32) -> Self {
+        Self {
+            per_minute: per_minute.max(1),
+            buckets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The configured ceiling.
+    pub fn limit(&self) -> u32 {
+        self.per_minute
+    }
+
+    /// Count one request for `key` against the window that contains `now`.
+    ///
+    /// The window is a true sliding log: hits older than a minute are
+    /// dropped, so a client gets exactly `per_minute` requests in *any*
+    /// sixty-second span, not `per_minute` per fixed minute boundary.
+    pub fn check(&self, key: &str, now: Instant) -> RateDecision {
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let cutoff = now.checked_sub(RATE_WINDOW).unwrap_or(now);
+
+        let decision = {
+            let entry = buckets.entry(key.to_string()).or_default();
+            entry.retain(|t| *t >= cutoff);
+            if entry.len() as u32 >= self.per_minute {
+                let oldest = entry.first().copied().unwrap_or(now);
+                let wait = RATE_WINDOW.saturating_sub(now.saturating_duration_since(oldest));
+                RateDecision {
+                    allowed: false,
+                    limit: self.per_minute,
+                    remaining: 0,
+                    retry_after_secs: wait.as_secs().max(1),
+                }
+            } else {
+                entry.push(now);
+                RateDecision {
+                    allowed: true,
+                    limit: self.per_minute,
+                    remaining: self.per_minute - entry.len() as u32,
+                    retry_after_secs: 0,
+                }
+            }
+        };
+
+        // Keep the map bounded. An attacker rotating source addresses could
+        // otherwise grow it without limit.
+        if buckets.len() > MAX_TRACKED_CLIENTS {
+            buckets.retain(|_, hits| hits.iter().any(|t| *t >= cutoff));
+            while buckets.len() > MAX_TRACKED_CLIENTS {
+                let Some(key) = buckets.keys().next().cloned() else {
+                    break;
+                };
+                buckets.remove(&key);
+            }
+        }
+
+        decision
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::str::FromStr;
+
+    fn peer(ip: &str) -> Option<SocketAddr> {
+        let addr = IpAddr::V4(Ipv4Addr::from_str(ip).expect("ipv4"));
+        Some(SocketAddr::new(addr, 443))
+    }
+
+    #[test]
+    fn correct_token_is_accepted() {
+        assert_eq!(
+            check_bearer(Some("Bearer s3cret"), "s3cret"),
+            AuthOutcome::Ok
+        );
+        assert_eq!(
+            check_bearer(Some("bearer s3cret"), "s3cret"),
+            AuthOutcome::Ok
+        );
+        assert_eq!(
+            check_bearer(Some("  Bearer   s3cret  "), "s3cret"),
+            AuthOutcome::Ok
+        );
+    }
+
+    #[test]
+    fn wrong_token_is_a_mismatch_not_a_malformed_header() {
+        assert_eq!(
+            check_bearer(Some("Bearer wrong"), "s3cret"),
+            AuthOutcome::Mismatch
+        );
+        // A prefix of the real token must not pass.
+        assert_eq!(
+            check_bearer(Some("Bearer s3cre"), "s3cret"),
+            AuthOutcome::Mismatch
+        );
+        assert_eq!(
+            check_bearer(Some("Bearer s3cretx"), "s3cret"),
+            AuthOutcome::Mismatch
+        );
+    }
+
+    #[test]
+    fn missing_and_malformed_headers_are_distinguished() {
+        assert_eq!(check_bearer(None, "s3cret"), AuthOutcome::Missing);
+        assert_eq!(check_bearer(Some(""), "s3cret"), AuthOutcome::Malformed);
+        assert_eq!(
+            check_bearer(Some("Basic dXNlcjpwYXNz"), "s3cret"),
+            AuthOutcome::Malformed
+        );
+        assert_eq!(
+            check_bearer(Some("s3cret"), "s3cret"),
+            AuthOutcome::Malformed
+        );
+    }
+
+    #[test]
+    fn constant_time_eq_matches_equality_semantics() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn the_rate_limiter_stops_after_the_ceiling() {
+        let limiter = RateLimiter::new(3);
+        let now = Instant::now();
+        for expected_remaining in [2, 1, 0] {
+            let decision = limiter.check("1.2.3.4", now);
+            assert!(decision.allowed, "the first three requests must pass");
+            assert_eq!(decision.remaining, expected_remaining);
+            assert_eq!(decision.limit, 3);
+        }
+        let denied = limiter.check("1.2.3.4", now);
+        assert!(!denied.allowed);
+        assert_eq!(denied.remaining, 0);
+        assert!(denied.retry_after_secs >= 1);
+    }
+
+    #[test]
+    fn the_rate_limiter_is_per_client() {
+        let limiter = RateLimiter::new(1);
+        let now = Instant::now();
+        assert!(limiter.check("1.2.3.4", now).allowed);
+        assert!(!limiter.check("1.2.3.4", now).allowed);
+        // A different client is unaffected.
+        assert!(limiter.check("5.6.7.8", now).allowed);
+    }
+
+    #[test]
+    fn the_window_slides_rather_than_resetting_on_a_boundary() {
+        let limiter = RateLimiter::new(2);
+        let start = Instant::now();
+        assert!(limiter.check("9.9.9.9", start).allowed);
+        assert!(limiter.check("9.9.9.9", start).allowed);
+        assert!(!limiter.check("9.9.9.9", start + Duration::from_secs(30)).allowed);
+        // One minute after the first hit, the first hit has left the window.
+        let later = start + Duration::from_secs(61);
+        assert!(limiter.check("9.9.9.9", later).allowed);
+    }
+
+    #[test]
+    fn the_client_key_uses_the_right_most_forwarded_entry() {
+        // A client that prepends a forged address cannot move its bucket.
+        let key = client_key(peer("127.0.0.1"), Some("6.6.6.6, 203.0.113.9"), true);
+        assert_eq!(key, "203.0.113.9");
+        // Without the proxy flag the header is ignored entirely.
+        let key = client_key(peer("127.0.0.1"), Some("6.6.6.6, 203.0.113.9"), false);
+        assert_eq!(key, "127.0.0.1");
+        // A trusted proxy that forwards nothing falls back to the peer.
+        let key = client_key(peer("127.0.0.1"), None, true);
+        assert_eq!(key, "127.0.0.1");
+        let key = client_key(peer("127.0.0.1"), Some("  "), true);
+        assert_eq!(key, "127.0.0.1");
+    }
+
+    #[test]
+    fn the_client_key_survives_a_missing_peer() {
+        let key = client_key(None, None, false);
+        assert_eq!(key, "unknown");
+    }
+}
+ACCESS
 
 # ------------------------------------------------------------------------------
 # 24. Archive — sources only; the Cargo build cache is never packaged.

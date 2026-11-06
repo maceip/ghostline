@@ -1,0 +1,128 @@
+# ===========================================================================
+#  CLEF guard — production reverse proxy.
+#
+#  This file is the PUBLIC face of the MLX tool-call guard.  It does three
+#  jobs and nothing else:
+#
+#    1. Terminates TLS with an automatically renewed ACME certificate.
+#    2. Serves the static demo site (clef-site/) from the SAME ORIGIN as the
+#       API, so the browser never makes a cross-origin request and the
+#       guard never has to relax CORS.
+#    3. Forwards /api/*, /v1/* and /health to the local guard process and
+#       injects the bearer token SERVER-SIDE.
+#
+#  Everything that differs per machine lives in the ENVIRONMENT, not in this
+#  file.  The service loads /opt/zcode/caddy/caddy.env (KEY=VALUE) before it
+#  reads this file, so one Caddyfile works on every box:
+#
+#    CLEF_DOMAIN   public hostname, e.g. clef.example.com   (required)
+#    GUARD_TOKEN   the bearer token the guard expects          (required)
+#    GUARD_PORT    local port the guard listens on   (default 8090)
+#    SITE_ROOT     directory holding the static site (default /opt/zcode/site)
+#    ACME_EMAIL    contact address for the ACME account        (required)
+#
+#  VALIDATE BEFORE YOU RELOAD.  A bad Caddyfile must never reach the
+#  running server:
+#
+#    caddy validate --config /opt/zcode/caddy/Caddyfile \
+#                       --envfile /opt/zcode/caddy/caddy.env
+#
+#  The variables marked "required" above have NO default on purpose.  An
+#  unset CLEF_DOMAIN or GUARD_TOKEN has to fail loudly at parse time rather
+#  than quietly serve the wrong thing.
+# ===========================================================================
+
+{
+	# Contact address for the ACME account.  Caddy uses it for expiry
+	# warnings; it never appears in a certificate.
+	email {$ACME_EMAIL}
+
+	# Keep the certificates and the ACME account in a predictable place
+	# instead of the root user's home directory, so a backup or a rebuild
+	# knows where to look.
+	storage file_system /var/lib/caddy
+}
+
+# The site address.  Caddy binds :443 and :80 and redirects plain HTTP to
+# HTTPS on its own.  The certificate is obtained and renewed by ACME
+# (HTTP-01 / TLS-ALPN-01) — there is no certificate file to manage here.
+{$CLEF_DOMAIN} {
+	# The static site.  `clef-site/` from the repository is copied here at
+	# install time: index.html, js/, styles.css, data/ and vendor/ are all
+	# served from the same origin as the API below.
+	root * {$SITE_ROOT:/opt/zcode/site}
+
+	# Compression for the static assets and the JSON API.  zstd first,
+	# gzip for the clients that do not speak zstd.
+	encode zstd gzip
+
+	# The API accepts small JSON tool-call probes — it is not an upload
+	# endpoint.  Anything bigger is refused with 413 before a handler runs.
+	# (request_body needs Caddy v2.10 or newer; the Homebrew build is new
+	# enough.)
+	request_body {
+		max_size 1MB
+	}
+
+	# Security headers.  `-Server` removes the Caddy signature; the rest
+	# are the ordinary browser hardening headers.  The CSP is tight on
+	# purpose: the site loads only its own scripts, the Google Fonts
+	# stylesheet and the fonts it serves, and talks to nothing but its own
+	# origin.  If you host the site somewhere else, widen it here.
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	}
+
+	# Access log, so an operator can see who called what and how the rate
+	# limiter is doing.  Delete this block if you ship the access log
+	# somewhere else.
+	log {
+		output file /var/log/zcode/caddy-access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		format json
+	}
+
+	# Everything the browser asks the GUARD for:
+	#   /api/info          the model's facts
+	#   /api/events        the live telemetry stream (SSE)
+	#   /v1/guard/tool-call the tool-call probe
+	#   /health            the liveness probe
+	@guard path /api/* /v1/* /health
+
+	handle @guard {
+		reverse_proxy 127.0.0.1:{$GUARD_PORT:8090} {
+			# The bearer token is added HERE, on the server.  The browser
+			# never receives it and never sends it, so it cannot leak by
+			# reading the page or the network tab.  This also REPLACES any
+			# Authorization header the client sent — a client cannot
+			# override the token by sending its own.
+			header_up Authorization "Bearer {$GUARD_TOKEN}"
+
+			# REPLACE the client-supplied X-Forwarded-For with the address
+			# this proxy actually saw on the socket.  Without this a client
+			# could forge the header and choose its own rate-limit bucket.
+			# The guard runs with --trust-proxy, so it reads exactly this
+			# value.
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+
+			# Stream the response through, unbuffered, so the SSE endpoint
+			# (/api/events) arrives event by event instead of in one lump
+			# at the end.
+			flush_interval -1
+		}
+	}
+
+	# Everything else is the static site.
+	handle {
+		file_server
+	}
+}
