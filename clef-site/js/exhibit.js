@@ -471,26 +471,8 @@ async function renderSelected(opts = {}) {
   if (!rec) return;
   const ev = rec.event || null;
   const v = rec.verdict || {};
+  const seq = ++animSeq;
 
-  // Animate 4-Stage Brain Timeline
-  const nodes = Array.from(document.querySelectorAll("#ex-tl-track .ex-tl-node"));
-  if (!opts.instant && nodes.length === 4) {
-    setStep(2);
-    nodes.forEach((n, i) => {
-      n.classList.toggle("is-active", i === 1);
-      n.classList.toggle("is-done", i < 1);
-      n.classList.remove("is-flagged");
-    });
-    await wait(120);
-    setStep(3);
-    nodes.forEach((n, i) => {
-      n.classList.toggle("is-active", i === 2);
-      n.classList.toggle("is-done", i < 2);
-    });
-    await wait(140);
-  }
-
-  setStep(4);
   const cid = getEffectiveClusterId(rec);
   const filterEnabled = optedInClusters.has(cid);
   spine.render(ev);
@@ -508,6 +490,18 @@ async function renderSelected(opts = {}) {
       : `TRACE #${rec.id} · CLEAN BELOW THRESHOLD (${fmt(getScore(rec))}) · READ-ONLY`,
     flagged ? "blocked" : "ok"
   );
+
+  // Visual 4-Stage Brain Timeline step rail progression (cancelable on rapid clicks)
+  const nodes = Array.from(document.querySelectorAll("#ex-tl-track .ex-tl-node"));
+  if (!opts.instant && nodes.length === 4) {
+    setStep(2);
+    await wait(90);
+    if (seq !== animSeq) return;
+    setStep(3);
+    await wait(90);
+    if (seq !== animSeq) return;
+  }
+  setStep(4);
 }
 
 function renderTimelineBar(rec) {
@@ -589,16 +583,6 @@ function renderDetail(rec) {
       <dt>peak attributed token</dt><dd>${attrText}</dd>
       <dt>task drift cosine</dt><dd>${fmt(v.drift_cosine)}</dd>
       <dt>LAT PCA energy</dt><dd>${fmtBare(v.pca_subspace_energy)}</dd>
-      ${
-        v.attribution_token != null
-          ? `<dt>peak token in span</dt><dd><code>${escapeHtml(v.attribution_token)}</code> <em>(tok #${v.attribution_token_index ?? "—"}, cos ${fmt(v.attribution_cosine)})</em></dd>`
-          : ""
-      }
-      ${
-        v.span_tokens != null
-          ? `<dt>pooled tool-call span</dt><dd>${v.span_tokens} tokens</dd>`
-          : ""
-      }
       <dt>probe depth</dt><dd>Layer ${ev.probe_layer ?? 16} / ${ev.num_layers ?? 24} (68%)</dd>
       <dt>backbone</dt><dd>${escapeHtml(ev.architecture || liveInfo?.architecture || "Qwen2ForCausalLM")}</dd>
       <dt>trace reason</dt><dd>${escapeHtml(v.reason || "read-only trace recorded")}</dd>
@@ -696,16 +680,7 @@ async function runLiveProbe() {
     await selectRecord(rec.id, { instant: true });
     setStep(4);
   } catch (err) {
-    // Fallback to matching real captured record if live guard returned an error
-    const matched = records.find((r) => {
-      const c = (r.verdict?.tool_args_preview || r.call_render || "").toLowerCase();
-      return c.includes(cmd.toLowerCase());
-    });
-    if (matched) {
-      await selectRecord(matched.id, { instant: false });
-    } else {
-      status(`LIVE PROBE ERROR: ${String(err.message || err).slice(0, 60)}`, "blocked");
-    }
+    status(`LIVE PROBE ERROR: ${String(err.message || err).slice(0, 60)}`, "blocked");
   } finally {
     if (btn) {
       btn.disabled = false;
