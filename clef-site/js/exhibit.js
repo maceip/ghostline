@@ -329,7 +329,7 @@ function applyFilterAndSort() {
   const subset =
     c === "all"
       ? records.slice()
-      : records.filter((r) => String(r.cluster_id) === String(c));
+      : records.filter((r) => getEffectiveClusterId(r) === String(c));
 
   const sortMode = state.sort;
   if (sortMode === "excess-desc") {
@@ -533,9 +533,11 @@ function renderTimelineBar(rec) {
     n.classList.remove("is-active");
     if (idx < 4) n.classList.add("is-done");
   }
+  const optedOut = aboveThr && !filterOn;
   if (vBox) {
     vBox.classList.toggle("is-flagged", flagged);
-    vBox.classList.toggle("is-done", !flagged);
+    vBox.classList.toggle("is-opted-out", optedOut);
+    vBox.classList.toggle("is-done", !flagged && !optedOut);
   }
   if (vDot) vDot.classList.toggle("is-alert", flagged);
   if (vWord) {
@@ -765,7 +767,18 @@ function bindControls() {
       );
       const gm = $("gate-mode");
       if (gm) gm.textContent = state.mode === "monitor" ? "READ-ONLY TRACE" : "SIMULATED BLOCK";
+      rejudgeAll();
       renderSelected({ instant: true });
+    });
+  }
+
+  const tapeEl = $("tape");
+  if (tapeEl) {
+    tapeEl.addEventListener("click", (e) => {
+      const row = e.target.closest(".tape-row[data-id]");
+      if (row && row.dataset.id) {
+        selectRecord(row.dataset.id, { instant: false });
+      }
     });
   }
 

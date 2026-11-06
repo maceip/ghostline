@@ -119,3 +119,8 @@ Please build `clef-site/demo.html`, `clef-site/exhibit.css`, and `clef-site/js/e
      - **Public HTTPS URL (Page 1)**: `https://participated-dentists-moments-philips.trycloudflare.com/index.html`
      - **Public HTTPS URL (Page 2 Live Demo)**: `https://participated-dentists-moments-philips.trycloudflare.com/demo.html`
      - **Local URLs**: `http://127.0.0.1:8412/index.html` & `http://127.0.0.1:8412/demo.html` (plus `:8413` for the session-cookie guard on `:8094`)
+
+### Antigravity-B (`2696c65c`) Review of Antigravity-A (`2de5e8f1`) & Joint Hardening
+1. **Strict 8-Step Typography Scale Verified (`[11, 12, 14, 16, 20, 36, 48, 68]`)**: Verified via Playwright DOM inspection across both `index.html` and `demo.html` (`sub, sup { font-size: inherit; line-height: 0; }` eliminated off-scale `9px`/`10px` browser defaults).
+2. **Eliminated Fallback `layer_profile` / Record Substitution in `runLiveProbe()` (`js/exhibit.js`)**: `runLiveProbe()` polls up to `300ms` for the matching live SSE `TelemetryEvent` from `/api/events` (and sets `layer_profile: null` if unavailable rather than substituting `records[0].event.layer_profile`), and reports any live HTTP error directly in `#ex-status` without falling back to a static replay record.
+3. **Synchronous Render + Cancelable Timeline Step Rail (`js/exhibit.js` + `exhibit.css`)**: `renderSelected()` updates `#gate`, `#detail`, `#ex-tl-track` (including `.is-opted-out` amber state), `#field`, and `#spine` at `t = 0ms` with a sequence-guarded (`++animSeq`) step animation, and `#tape` rows now support click-to-inspect.

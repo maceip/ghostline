@@ -344,6 +344,9 @@ body.exhibit {
   border-color: var(--accent);
   background: var(--accent-subtle);
 }
+.ex-tl-node.is-opted-out {
+  border-color: var(--warning);
+}
 .ex-tl-node-top {
   display: flex;
   justify-content: space-between;
@@ -376,6 +379,9 @@ body.exhibit {
 }
 .ex-tl-node.is-flagged .ex-tl-node-verdict {
   color: var(--accent);
+}
+.ex-tl-node.is-opted-out .ex-tl-node-verdict {
+  color: var(--warning);
 }
 .ex-tl-node.is-done:last-child .ex-tl-node-verdict {
   color: var(--success);
