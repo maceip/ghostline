@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Pre-commit guard for this repository.
+#
+# The generator (`upgrade_generic_viz.sh`) is assembled from the module
+# workspace (`repe-mods/`). When the two drift apart, the generator silently
+# REWRITES the project with the old sources — which has twice destroyed work
+# that looked committed, because the loss only shows up on the next rebuild.
+#
+# This hook refuses the commit if the generator is out of sync, so the drift
+# is caught at the moment it is introduced.
+#
+# Enabled with: git config core.hooksPath .githooks
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT" || exit 1
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "pre-commit: python3 not found — skipping the generator sync check"
+    exit 0
+fi
+
+if [ ! -f repe-compose.py ] || [ ! -d repe-mods ]; then
+    exit 0
+fi
+
+if ! output="$(python3 repe-compose.py --check 2>&1)"; then
+    echo "pre-commit: the generator is OUT OF SYNC with repe-mods/"
+    echo "$output"
+    echo ""
+    echo "  Fix it with:  python3 repe-compose.py"
+    echo "  then stage:   upgrade_generic_viz.sh"
+    exit 1
+fi
+
+exit 0

@@ -8,12 +8,17 @@ PROJ="qwen-clef-repe-guard"
 KEEP="$(mktemp -d)"
 [ -d "$PROJ/target" ] && mv "$PROJ/target" "$KEEP/target" 2>/dev/null || true
 [ -d "$PROJ/artifacts" ] && mkdir -p "$KEEP/artifacts" && cp -R "$PROJ/artifacts/." "$KEEP/artifacts/" 2>/dev/null || true
+# The lock file pins the dependency versions. Wiping it would make every
+# rebuild resolve fresh versions, so the build would no longer be the build
+# that was measured. It is preserved like the build cache.
+[ -f "$PROJ/Cargo.lock" ] && cp "$PROJ/Cargo.lock" "$KEEP/Cargo.lock" 2>/dev/null || true
 
 rm -rf "$PROJ" "${PROJ}.zip"
 mkdir -p "$PROJ/src/bin" "$PROJ/artifacts" "$PROJ/tools"
 
 [ -d "$KEEP/target" ] && mv "$KEEP/target" "$PROJ/target" 2>/dev/null || true
 [ -d "$KEEP/artifacts" ] && cp -R "$KEEP/artifacts/." "$PROJ/artifacts/" 2>/dev/null || true
+[ -f "$KEEP/Cargo.lock" ] && cp "$KEEP/Cargo.lock" "$PROJ/Cargo.lock" 2>/dev/null || true
 rm -rf "$KEEP"
 # ------------------------------------------------------------------------------
 # 1. Cargo.toml
@@ -11861,9 +11866,16 @@ DOC
 cat << 'IGNORE' > "$PROJ/.gitignore"
 /target/
 **/*.rs.bk
-/artifacts/*.safetensors
+# The CALIBRATED vectors are versioned: they are the measured operating point,
+# not a derived file — they cost minutes of calibration against a specific
+# checkpoint snapshot, and they are what the running guard loads. Versioning
+# them means a fresh clone reproduces the SAME behaviour instead of a
+# re-derived one.
 /artifacts/*.bin
 /artifacts/*.npz
+# ...but not the multi-megabyte scratch the parity dumps leave behind.
+/artifacts/gdn_probe/
+/artifacts/whiten/
 IGNORE
 
 # ------------------------------------------------------------------------------

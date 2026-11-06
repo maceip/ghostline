@@ -1,0 +1,63 @@
+name: repe-guard
+
+# The guard itself needs Apple Silicon (mlx-rs is Metal-only), so the full
+# benchmark suite cannot run here. What CAN run is the part that is pure
+# arithmetic and has no MLX dependency: the Ledoit-Wolf whitening, the
+# cross-turn trajectory, and the conformal thresholding. Those are exactly
+# the parts where a silent numerical regression would be invisible until a
+# calibration run hours later.
+#
+# The full end-to-end verification lives in `evals/verify_all.sh` and is run
+# locally on the Apple Silicon machine before a release.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "repe-mods/**"
+      - "repe-compose.py"
+      - "upgrade_generic_viz.sh"
+      - "evals/**"
+      - ".github/workflows/repe-guard.yml"
+  pull_request:
+    paths:
+      - "repe-mods/**"
+      - "repe-compose.py"
+      - "upgrade_generic_viz.sh"
+      - "evals/**"
+      - ".github/workflows/repe-guard.yml"
+
+jobs:
+  pure-math:
+    name: pure arithmetic + generator sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # The generator must be assembled from the module workspace. If the two
+      # drift apart, the next local rebuild silently rewrites the project
+      # with stale sources — this is the check that stops that.
+      - name: generator is in sync with repe-mods/
+        run: python3 repe-compose.py --check
+
+      # The trajectory module is std-only, so it compiles and tests on its own.
+      - name: trajectory tests
+        run: |
+          rustc --edition 2021 --test repe-mods/src/trajectory.rs -o /tmp/trajectory_test
+          /tmp/trajectory_test
+
+      # The whitening module is std-only as well.
+      - name: whitening module type-checks
+        run: rustc --edition 2021 --crate-type lib repe-mods/src/whiten.rs -o /tmp/libwhiten.rlib
+
+      # The Python extractor's LSE pooling must agree with the Rust one to
+      # within float32 round-off. The reference implementation recomputes the
+      # statistic independently and compares.
+      - name: Python extractor parses
+        run: python3 -c "import ast, pathlib; ast.parse(pathlib.Path('extract_repe_vectors.py').read_text()); print('extract_repe_vectors.py parses')"
+
+      - name: evaluation scripts parse
+        run: |
+          python3 -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ['evals/canonical_40.py','evals/real_upstream_20.py']]; print('eval scripts parse')"

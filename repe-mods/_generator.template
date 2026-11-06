@@ -8,12 +8,17 @@ PROJ="qwen-clef-repe-guard"
 KEEP="$(mktemp -d)"
 [ -d "$PROJ/target" ] && mv "$PROJ/target" "$KEEP/target" 2>/dev/null || true
 [ -d "$PROJ/artifacts" ] && mkdir -p "$KEEP/artifacts" && cp -R "$PROJ/artifacts/." "$KEEP/artifacts/" 2>/dev/null || true
+# The lock file pins the dependency versions. Wiping it would make every
+# rebuild resolve fresh versions, so the build would no longer be the build
+# that was measured. It is preserved like the build cache.
+[ -f "$PROJ/Cargo.lock" ] && cp "$PROJ/Cargo.lock" "$KEEP/Cargo.lock" 2>/dev/null || true
 
 rm -rf "$PROJ" "${PROJ}.zip"
 mkdir -p "$PROJ/src/bin" "$PROJ/artifacts" "$PROJ/tools"
 
 [ -d "$KEEP/target" ] && mv "$KEEP/target" "$PROJ/target" 2>/dev/null || true
 [ -d "$KEEP/artifacts" ] && cp -R "$KEEP/artifacts/." "$PROJ/artifacts/" 2>/dev/null || true
+[ -f "$KEEP/Cargo.lock" ] && cp "$KEEP/Cargo.lock" "$PROJ/Cargo.lock" 2>/dev/null || true
 rm -rf "$KEEP"
 # ------------------------------------------------------------------------------
 # 1. Cargo.toml

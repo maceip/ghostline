@@ -1,5 +1,12 @@
 /target/
 **/*.rs.bk
-/artifacts/*.safetensors
+# The CALIBRATED vectors are versioned: they are the measured operating point,
+# not a derived file — they cost minutes of calibration against a specific
+# checkpoint snapshot, and they are what the running guard loads. Versioning
+# them means a fresh clone reproduces the SAME behaviour instead of a
+# re-derived one.
 /artifacts/*.bin
 /artifacts/*.npz
+# ...but not the multi-megabyte scratch the parity dumps leave behind.
+/artifacts/gdn_probe/
+/artifacts/whiten/
