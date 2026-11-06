@@ -10,115 +10,8 @@ body.exhibit {
   padding-bottom: var(--space-4xl);
 }
 
-body.exhibit.is-locked {
-  overflow: hidden;
-}
-body.exhibit.is-locked #dashboard-header,
-body.exhibit.is-locked #ex-rail,
-body.exhibit.is-locked #dashboard-main,
-body.exhibit.is-locked #dashboard-footer {
-  filter: blur(8px);
-  pointer-events: none;
-  user-select: none;
-}
-
-/* ---- password / bearer token gate (#auth-gate) ---- */
-.auth-gate {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  background: rgba(0, 0, 0, 0.88);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--pad);
-}
-.auth-gate[hidden] {
-  display: none !important;
-}
-.auth-gate-card {
-  width: 100%;
-  max-width: 560px;
-  background: var(--surface);
-  border: 1px solid var(--border-visible);
-  border-radius: 8px;
-  padding: var(--space-xl);
-}
-.auth-gate-brand {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
-}
-.auth-eyebrow {
-  margin-bottom: 10px;
-}
-.auth-title {
-  font-family: var(--sans);
-  font-size: var(--heading);
-  font-weight: 500;
-  line-height: 1.12;
-  color: var(--text-display);
-  margin-bottom: 14px;
-}
-.auth-desc {
-  font-size: var(--body-sm);
-  font-weight: 300;
-  line-height: 1.6;
-  color: var(--text-primary);
-  margin-bottom: 24px;
-}
-.auth-form {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.auth-input-row {
-  display: flex;
-  gap: 10px;
-}
-.auth-input-row input {
-  flex: 1;
-  background: var(--surface-raised);
-  border: 1px solid var(--border-visible);
-  border-radius: 6px;
-  color: var(--text-display);
-  font-family: var(--mono);
-  font-size: var(--body-sm);
-  padding: 12px 14px;
-  outline: none;
-}
-.auth-input-row input:focus {
-  border-color: var(--text-display);
-}
-.auth-input-row button {
-  font-family: var(--mono);
-  font-size: var(--label);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding: 0 20px;
-  background: var(--accent);
-  color: #ffffff;
-  border: 0;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.auth-input-row button:hover {
-  background: var(--text-display);
-  color: var(--black);
-}
-.auth-error {
-  font-family: var(--mono);
-  font-size: var(--caption);
-  color: var(--accent);
-}
-.auth-hint {
-  font-family: var(--mono);
-  font-size: var(--label);
-  color: var(--text-disabled);
-}
+/* Note: #auth-gate, body.is-locked, and .gate-seg-row are defined in
+   styles.css (Single Source of Truth across both pages). */
 
 /* ---- header & step rail ---- */
 .ex-head {
@@ -549,36 +442,6 @@ body.exhibit.is-locked #dashboard-footer {
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
-}
-
-.gate-header-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-}
-.gate-seg-row {
-  display: grid;
-  grid-template-columns: repeat(24, 1fr);
-  gap: 3px;
-  margin-bottom: 8px;
-}
-.gate-seg-block {
-  height: 10px;
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
-  border-radius: 1px;
-}
-.gate-seg-block.is-lit-ok {
-  background: var(--success);
-  border-color: var(--success);
-}
-.gate-seg-block.is-lit-blocked {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-.gate-seg-block.is-thresh-block {
-  border-color: var(--warning);
 }
 
 /* Optional drawer */

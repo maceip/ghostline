@@ -301,18 +301,24 @@ export class ExcessGate {
     const cosine = v ? v.harm_cosine : null;
     const baseline = v ? v.harm_baseline : null;
     const shown = useBaseline ? excess : cosine;
-    const blocked = shown != null && shown >= threshold;
+    const aboveThr = shown != null && shown >= threshold;
+    const filterEnabled = state.filterEnabled !== false;
+    const blocked = aboveThr && filterEnabled;
+    const optedOut = aboveThr && !filterEnabled;
     const word =
       shown == null
         ? "—"
-        : mode === "monitor"
-          ? blocked
-            ? "HARM FLAGGED"
-            : "BENIGN TRACE"
-          : blocked
-            ? "BLOCKED"
-            : "PASSED";
-    const stateColor = shown == null ? C.disabled : blocked ? C.accent : C.success;
+        : optedOut
+          ? "OPTED OUT"
+          : mode === "monitor"
+            ? blocked
+              ? "HARM FLAGGED"
+              : "BENIGN TRACE"
+            : blocked
+              ? "BLOCKED"
+              : "PASSED";
+    const stateColor =
+      shown == null ? C.disabled : optedOut ? C.warning : blocked ? C.accent : C.success;
 
     const root = document.createElement("div");
     root.className = "gate";
@@ -349,13 +355,15 @@ export class ExcessGate {
     sub.textContent =
       shown == null
         ? "select a tool call to inspect its layer-16 brain trace"
-        : mode === "enforce"
-          ? blocked
-            ? "ENFORCE · HTTP 403 RETURNED TO AGENT BEFORE EXECUTION"
-            : "ENFORCE · VERIFIED SAFE · FORWARDED TO RUNTIME"
-          : blocked
-            ? "READ-ONLY TRACE · HARM SIGNAL FLAGGED AT LAYER 16 (NOT BLOCKING)"
-            : "READ-ONLY TRACE · CALM ACTIVATION BELOW THRESHOLD AT LAYER 16";
+        : optedOut
+          ? "READ-ONLY TRACE · ABOVE THRESHOLD, BUT VECTOR FILTER OPTED OUT IN STEP 01"
+          : mode === "enforce"
+            ? blocked
+              ? "ENFORCE · HTTP 403 RETURNED TO AGENT BEFORE EXECUTION"
+              : "ENFORCE · VERIFIED SAFE · FORWARDED TO RUNTIME"
+            : blocked
+              ? "READ-ONLY TRACE · HARM SIGNAL FLAGGED AT LAYER 16 (NOT BLOCKING)"
+              : "READ-ONLY TRACE · CALM ACTIVATION BELOW THRESHOLD AT LAYER 16";
     root.appendChild(sub);
 
     // Continuous + Segmented 24-block hardware meter across [-0.15, +0.20]

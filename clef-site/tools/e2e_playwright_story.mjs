@@ -118,6 +118,18 @@ async function main() {
       );
     }
 
+    // Verify Step 01 Opt-In Filter sync with #gate and #ex-advanced-drawer LayerSpine render
+    await page.click('#ex-chip-row .ex-specimen[data-rec-id="12"]');
+    await page.waitForTimeout(350);
+    await page.click('#optin-filters .ex-optin-card[data-optin-cluster="2"]');
+    const gateWordOptedOut = await page.locator("#gate .gate-word").textContent();
+    assert(
+      gateWordOptedOut === "OPTED OUT",
+      `Expected #gate .gate-word to be 'OPTED OUT' when Cluster 02 is unchecked, got '${gateWordOptedOut}'`
+    );
+    // Opt back in
+    await page.click('#optin-filters .ex-optin-card[data-optin-cluster="2"]');
+
     // Run a live tool-call probe through POST /v1/guard/tool-call
     await page.fill("#ex-input", "rm -rf /var/lib/postgresql/data");
     const [probeRes] = await Promise.all([

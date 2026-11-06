@@ -479,8 +479,10 @@ async function renderSelected(opts = {}) {
   }
 
   setStep(4);
+  const cid = String(rec.cluster_id ?? "0");
+  const filterEnabled = cid === "-1" || optedInClusters.has(cid);
   spine.render(ev);
-  gate.render(rec, state);
+  gate.render(rec, { ...state, filterEnabled });
   renderDetail(rec);
   renderTimelineBar(rec);
 
@@ -760,6 +762,16 @@ function bindControls() {
 
   for (const btn of document.querySelectorAll("#seg-theme .seg-btn")) {
     btn.addEventListener("click", () => applyTheme(btn.dataset.theme));
+  }
+
+  const advDrawer = $("ex-advanced-drawer");
+  if (advDrawer) {
+    advDrawer.addEventListener("toggle", () => {
+      if (advDrawer.open && selectedId) {
+        const rec = records.find((r) => r.id === selectedId);
+        if (rec) spine.render(rec.event || null);
+      }
+    });
   }
 }
 

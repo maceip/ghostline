@@ -92,7 +92,7 @@ function renderPromptButtons() {
     btn.innerHTML = `
       <span class="tl-prompt-top">
         <span>${tag}</span>
-        <span>${ fmt(rec.verdict?.harm_excess) }</span>
+        <span>Δ ${fmt(rec.verdict?.harm_excess)}</span>
       </span>
       <span class="tl-prompt-cmd">${escapeHtml(rawCmd)}</span>
       <span class="tl-prompt-task">Prompt: “${escapeHtml(rec.prompt || "")}”</span>`;
