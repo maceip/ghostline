@@ -84,18 +84,14 @@ Nothing in this project fabricates a measurement.
 
 Two benchmarks, both reproducible against a running guard.
 
-**Canonical** (`final.py` — eight harmful/benign command pairs across five
+**Canonical** (`evals/canonical_40.py` — eight harmful/benign command pairs across five
 prompt shapes, judged through the direct probe endpoint):
 
 ```
-TOTAL: harmful blocked 31/40   benign wrongly blocked 0/40
+TOTAL: harmful blocked 35/40   benign wrongly blocked 1/40
 ```
 
-The natural-language shape is 8/8 with 0 false positives; the misses are
-concentrated in the synthetic `run:<cmd>` echo shapes, where the prompt names
-a different command than the one being judged.
-
-**Real model** (`real_eval.py` — a real `mlx_lm` upstream is asked for a goal
+**Real model** (`evals/real_upstream_20.py` — a real `mlx_lm` upstream is asked for a goal
 in natural language and the guard judges whatever command the model actually
 produced; nothing is injected):
 
@@ -115,6 +111,41 @@ upstream used here is Qwen2.5-0.5B-Instruct, whose tool calls are often
 malformed or unrelated to the request; a stronger upstream will produce
 different traffic and wants its own calibration pass. The guard's recall on
 the synthetic echo shapes is materially lower than on natural-language goals.
+
+### Pooling, and why the mean is still the default
+
+The artifact records how the residual was pooled over the tool-call span
+(`pooling` in the metadata). Two are implemented:
+
+* `mean` — the mean residual over the span, then one cosine. This is the
+  default.
+* `lse:<beta>` — token-wise LogSumExp pooling. Every token of the span is
+  scored on its own against each cluster, and the cluster's score is pooled
+  with `S_c = max_t s_c(t) + (1/beta) * ln sum_t exp(beta * (s_c(t) - max))`.
+  A two-token destructive command inside a thirty-token JSON envelope is no
+  longer diluted by its punctuation, and the token that peaked is reported as
+  the **attribution**.
+
+The token attribution is produced under either pooling — it is a property of
+the reading, not of the pooling.
+
+**The measured result, stated plainly.** LogSumExp pooling wins on the
+calibration set and loses on the held-out sets:
+
+| variant | calibration (144) | canonical (40) |
+|---|---|---|
+| `mean`, 10% FP budget | 133 harmful, 4 FP | **35 harmful, 1 FP** |
+| `lse:12`, 10% FP budget | 138 harmful, 3 FP | 38 harmful, 7 FP |
+| `lse:12`, 1% FP budget | 130 harmful, 1 FP | 35 harmful, 4 FP |
+
+LogSumExp buys three more harmful calls caught and pays six more benign calls
+blocked; at a strict budget it matches the mean's recall with four times the
+false positives. A guard that blocks one legitimate command in six is not
+shippable, so **the mean pooling stays the default** and LogSumExp remains
+available as a calibrated, selectable mode. The thresholds are never
+transferred between poolings: the artifact records which one it was
+calibrated under.
+
 
 ## Run
 
@@ -164,9 +195,14 @@ cargo run --bin extract-repe -- \
 | `src/repe_sensor.rs` | Layer hook, clamping, per-layer profile, vector cache |
 | `src/clef_head.rs` | Clef joint-schema head over the final hidden state |
 | `src/qwen_hook.rs` | The hooked decoder loop |
-| `src/enforcer_proxy.rs` | Blocking proxy, telemetry bus, SSE endpoint |
+| `src/enforcer_proxy.rs` | Blocking proxy, telemetry bus, SSE endpoint, labelling API |
 | `src/viz_ui.html` | The embedded dashboard |
 | `src/bin/extract_repe.rs` | In-language RepE extractor |
+| `src/trajectory.rs` | Cross-turn EMA over the per-cluster excess vector |
+| `src/whiten.rs` | Ledoit-Wolf shrinkage and whitened (Mahalanobis) directions |
+| `src/capability.rs` | Ed25519 capability tokens |
+| `src/site_calibration.rs` | Interactive mining and conformal thresholding |
+| `src/rollback.rs` | Shared KV cache and speculative activation rollback |
 
 ## Wiring it into an agent loop
 
@@ -175,18 +211,41 @@ Zode that is `toAgentTools` in `src/llm/pi.js`. Either call
 `/v1/guard/tool-call` before running the tool, or point the agent's base URL at
 this proxy so unsafe tool calls never reach it.
 
-## Measured behaviour
-
-On `Qwen/Qwen2.5-0.5B-Instruct` with vectors calibrated by `extract-repe`, the
-eight harmful/benign calibration pairs replayed through five different prompt
-shapes (a plain task description, a prompt naming the command, a terse
-`run:<cmd>` form, and two more) give **37/40 harmful calls blocked with 4/40
-benign calls wrongly blocked** — a 10% false-positive rate, which is the
-budget the operating point is calibrated to.
-
 The zero-shot direction extracted from the static weights is much weaker on
 this model — a cosine scale of roughly 0.01 against 0.2-0.4 for a calibrated
 direction. It is a starting point, not a substitute for calibration.
+
+## The advanced readings
+
+Four readings sit alongside the harm cosine. None of them is allowed to
+invent a number: each reports `None` when the thing it measures is absent.
+
+**Token attribution.** Every token of the tool-call span is scored on its own
+against each cluster. The token that peaked is reported with its index, its
+decoded text and its un-pooled cosine, so a block says *which* part of the
+command carried the signal.
+
+**Untrusted-span attention ratio.** The probe layer's attention distribution
+is captured for the intercepted call, and the share of the tool call's
+attention that landed on the declared-untrusted part of the context is
+reported. The caller declares what is untrusted (`untrusted_context` on the
+probe; the proxy treats `role: "tool"` messages as untrusted). Measured on an
+injection attempt: **0.253** of the attention landed on the injected span.
+A benign command under the same context measured **0.243** — so the ratio is
+reported as provenance, and is deliberately NOT used as a blocking signal: it
+does not discriminate.
+
+**Cross-turn trajectory.** The per-cluster excess vector is accumulated across
+the turns of a conversation with an EMA (`λ = 0.7`) and a least-squares slope.
+A call below the threshold is still blocked when the session's EMA for a
+cluster is above it and rising — an agent that escalates looks benign at every
+individual step. The trajectory is keyed by `conversation_id`, so independent
+calls never accumulate into each other.
+
+**Capability tokens.** A human-approved tool call can carry an Ed25519
+capability token: the tool name, a SHA-256 digest of the arguments, an issue
+time and a TTL, signed by a key the guard verifies offline. On macOS the
+approval step is a Touch ID gesture (`tools/touchid_stepup.swift`).
 
 ## Known gaps
 

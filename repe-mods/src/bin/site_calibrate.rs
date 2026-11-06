@@ -32,8 +32,8 @@ use std::path::PathBuf;
 mod site_calibration;
 
 use site_calibration::{
-    build_engine, conformal_upper_threshold, read_artifact_clusters, read_artifact_metadata,
-    read_labels, refit, remeasure_labels,
+    build_engine, conformal_upper_threshold, cosine, read_artifact_clusters,
+    read_artifact_metadata, read_labels, refit, remeasure_labels,
 };
 
 /// The tensors the refit does not touch and therefore carries over.
@@ -149,7 +149,16 @@ fn main() -> Result<()> {
     // 3. The artifact the refit starts from.
     // ---------------------------------------------------------------------
     let metadata = read_artifact_metadata(&args.artifact)?;
-    let previous_clusters = read_artifact_clusters(&args.artifact)?;
+    // The raw centroids and, when the artifact carries them, the whitened
+    // directions. An artifact calibrated before the whitening was added has
+    // only the former, and the guard reads those.
+    let previous_raw = read_artifact_clusters(&args.artifact, false)?;
+    let previous_whitened = read_artifact_clusters(&args.artifact, true)?;
+    let previous_is_whitened = previous_whitened.len() == previous_raw.len()
+        && previous_whitened
+            .iter()
+            .zip(previous_raw.iter())
+            .all(|(a, b)| cosine(a, b).map(|value| (value - 1.0).abs() < 1e-6).unwrap_or(false));
     let input_tensors = Array::load_safetensors(&args.artifact)
         .with_context(|| format!("Failed loading the artifact {:?}", args.artifact))?;
     let decision_mode = metadata
@@ -166,12 +175,36 @@ fn main() -> Result<()> {
         None => 0,
     };
     println!(
-        "[*] artifact {}: decision mode {decision_mode}, pooling {}, {} layers, {} clusters",
+        "[*] artifact {}: decision mode {decision_mode}, pooling {}, {} layers, {} clusters{}",
         args.artifact.display(),
         pooling.metadata_string(),
-        previous_clusters.len(),
-        previous_clusters.len()
+        previous_raw.len(),
+        previous_raw.len(),
+        if previous_is_whitened {
+            " (whitened)"
+        } else {
+            " (not whitened)"
+        }
     );
+    // What the previous artifact's own threshold does on the labelled traffic.
+    // This is the operating point the conformal fit is compared against.
+    if let Some(previous_threshold) = metadata
+        .get("harm_excess_threshold")
+        .and_then(|value| value.trim().parse::<f64>().ok())
+    {
+        let false_positives = benign.iter().filter(|value| **value >= previous_threshold).count();
+        let harmful_blocked = harmful.iter().filter(|value| **value >= previous_threshold).count();
+        println!(
+            "[*] the previous artifact's threshold {previous_threshold:+.6} blocks {} of the {} \
+             labelled benign calls (empirical FP rate {:.4}) and {} of the {} labelled harmful \
+             calls",
+            false_positives,
+            benign.len(),
+            false_positives as f64 / benign.len().max(1) as f64,
+            harmful_blocked,
+            harmful.len()
+        );
+    }
 
     // ---------------------------------------------------------------------
     // 4. The refit.
@@ -198,7 +231,7 @@ fn main() -> Result<()> {
         &mut engine,
         &tokenizer,
         &labels,
-        &previous_clusters,
+        &previous_raw,
         pooling,
     )?;
     println!(
@@ -222,7 +255,42 @@ fn main() -> Result<()> {
     }
     for (index, movement) in refit.cluster_movement.iter().enumerate() {
         println!(
-            "[*] cluster {index}: cosine with the previous artifact's direction {movement:+.6}"
+            "[*] cluster {index}: the refitted centroid keeps a cosine of {movement:+.6} with the \
+             previous artifact's centroid"
+        );
+    }
+    // The comparison the guard actually sees: the whitened directions against
+    // the previous artifact's whitened directions. An artifact that predates
+    // the whitening is whitened here first, so both sides are the same kind of
+    // direction.
+    let previous_whitened_for_comparison = if previous_is_whitened {
+        previous_whitened.clone()
+    } else {
+        site_calibration::whiten_clusters(&previous_raw)
+            .map(|(_, directions)| directions)
+            .with_context(|| "failed to whiten the previous artifact's centroids")?
+    };
+    // What the PREVIOUS artifact's running guard actually scored against: its
+    // own directions (whitened only if it carries them) and its own copy
+    // channel. The "before" measurement has to use these, not the whitened
+    // reconstruction, or it compares two different artifacts.
+    let previous_runtime_clusters = if previous_is_whitened {
+        previous_whitened.clone()
+    } else {
+        previous_raw.clone()
+    };
+    let previous_copy_dir = input_tensors
+        .get("v_copy_mode")
+        .cloned()
+        .context("the previous artifact carries no copy channel")?;
+    for (index, current) in refit.whitened_clusters.iter().enumerate() {
+        let movement = previous_whitened_for_comparison
+            .get(index)
+            .and_then(|previous| cosine(current, previous).ok())
+            .unwrap_or(f32::NAN);
+        println!(
+            "[*] cluster {index}: the whitened direction keeps a cosine of {movement:+.6} with \
+             the previous artifact's whitened direction"
         );
     }
     println!(
@@ -233,14 +301,35 @@ fn main() -> Result<()> {
 
     // ---------------------------------------------------------------------
     // 5. Did the refit move the statistic the threshold was fitted on?
+    //
+    // The threshold was fitted on the readings the guard produced with the
+    // PREVIOUS artifact. Both sides are therefore re-measured here with the
+    // artifact's own convention (the same decision mode, the same matched
+    // baseline), so the difference is the refit's and nothing else.
     // ---------------------------------------------------------------------
-    let readings = remeasure_labels(
+    let absolute_reading = decision_mode.eq_ignore_ascii_case("absolute");
+    let previous_baseline = metadata
+        .get("benign_baseline_matched")
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .unwrap_or(0.0);
+    let old_readings = remeasure_labels(
+        &mut engine,
+        &tokenizer,
+        &labels,
+        &previous_copy_dir,
+        &previous_runtime_clusters,
+        previous_baseline,
+        absolute_reading,
+        pooling,
+    )?;
+    let new_readings = remeasure_labels(
         &mut engine,
         &tokenizer,
         &labels,
         &refit.copy_dir,
         &refit.whitened_clusters,
         refit.matched_baseline,
+        absolute_reading,
         pooling,
     )?;
     let mut mean_shift = 0.0;
@@ -249,16 +338,21 @@ fn main() -> Result<()> {
     let mut compared = 0usize;
     let mut benign_flips = 0usize;
     let mut harmful_flips = 0usize;
-    for reading in readings.iter() {
-        let shift = reading.remeasured_excess - reading.recorded_excess;
+    let mut recorded_gap = 0.0;
+    for (old, new) in old_readings.iter().zip(new_readings.iter()) {
+        let shift = new.remeasured_excess - old.remeasured_excess;
         mean_shift += shift;
         mean_abs_shift += shift.abs();
         compared += 1;
-        let recorded_blocked = reading.recorded_excess >= fit.threshold;
-        let remeasured_blocked = reading.remeasured_excess >= fit.threshold;
-        if recorded_blocked != remeasured_blocked {
+        // How far the recorded reading sits from the same call re-measured
+        // under the previous artifact: the label file holds the LIVE-panel
+        // excess, while the artifact's own baseline is the MATCHED panel.
+        recorded_gap += old.remeasured_excess - old.recorded_excess;
+        let old_blocked = old.remeasured_excess >= fit.threshold;
+        let new_blocked = new.remeasured_excess >= fit.threshold;
+        if old_blocked != new_blocked {
             flips += 1;
-            match reading.label {
+            match new.label {
                 SiteLabel::Benign => benign_flips += 1,
                 SiteLabel::Harmful => harmful_flips += 1,
             }
@@ -266,14 +360,20 @@ fn main() -> Result<()> {
     }
     if compared > 0 {
         println!(
-            "[*] transfer check: the refit moved the recorded excess by {:+.6} on average \
-             ({:.6} absolute) over {compared} re-measured labels; {} labels change their \
+            "[*] transfer check: the refit moved the excess by {:+.6} on average ({:.6} \
+             absolute) over {compared} re-measured labels; {} labels change their \
              blocked/allowed state under the conformal threshold ({} benign, {} harmful)",
             mean_shift / compared as f64,
             mean_abs_shift / compared as f64,
             flips,
             benign_flips,
             harmful_flips
+        );
+        println!(
+            "[*] transfer check: the recorded (live-panel) excess sits {:+.6} away from the same \
+             call measured against the artifact's matched panel — the label file does not carry \
+             the prompt, so the live baseline is not reproducible offline",
+            recorded_gap / compared as f64
         );
     }
 

@@ -104,6 +104,13 @@ EXTRA_SECTIONS = [
      "tools/capability_runner.sh", "tools/capability_runner.sh"),
     ("tools/capability_check.py", "CAPABILITY_CHECK",
      "tools/capability_check.py", "tools/capability_check.py"),
+    ("src/site_calibration.rs", "SITE_CALIBRATION",
+     "src/site_calibration.rs", "src/site_calibration.rs"),
+    ("src/bin/site_calibrate.rs", "SITE_CALIBRATE",
+     "src/bin/site_calibrate.rs", "src/bin/site_calibrate.rs"),
+    ("src/rollback.rs", "ROLLBACK", "src/rollback.rs", "src/rollback.rs"),
+    ("src/bin/rollback_probe.rs", "ROLLBACK_PROBE",
+     "src/bin/rollback_probe.rs", "src/bin/rollback_probe.rs"),
 ]
 
 ARCHIVE_ANCHOR = "# 24. Archive"

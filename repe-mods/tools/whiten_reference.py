@@ -14,15 +14,31 @@ Usage:
         --dump artifacts/whiten/synth_200x8.f64
     uv run --python 3.12 --with numpy python3 tools/whiten_reference.py \\
         --fit artifacts/whiten/synth_200x8.f64 --dim 8
+    uv run --python 3.12 --with numpy python3 tools/whiten_reference.py \\
+        --artifact artifacts/repe_vectors_whiten.safetensors
 
 `--dump` writes the dataset as raw little-endian float64, row-major
 `[n_samples][d]`, which is the format `whiten-check <dump> --dim D` reads.
+
+`--artifact` checks a calibrated artifact end to end: it re-fits the
+Ledoit-Wolf estimator on the artifact's own `v_harm_clusters` centroids,
+re-whitens them, and compares the result with the artifact's
+`v_harm_clusters_whitened` tensor and its `whitening_shrinkage` metadata.
+`--centroid-dump` writes those centroids as a raw float64 dump, so the Rust
+harness can reproduce the fit with its own ordered loops:
+
+    uv run --python 3.12 --with numpy python3 tools/whiten_reference.py \\
+        --artifact artifacts/repe_vectors_whiten.safetensors \\
+        --centroid-dump artifacts/whiten/centroids_3x896.f64
+    ./target/debug/whiten-check artifacts/whiten/centroids_3x896.f64 --dim 896
 
 The default (synthetic) run prints the same machine-parsable fields as the
 Rust harness, so the two outputs can be diffed directly.
 """
 
 import argparse
+import json
+import struct
 import sys
 from pathlib import Path
 
@@ -370,6 +386,106 @@ def vectorised_fit(samples: np.ndarray) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Artifact reader -- the calibrated RepE artifact, end to end.
+# ---------------------------------------------------------------------------
+SAFETENSORS_DTYPES = {"F32": "<f4", "F64": "<f8", "I32": "<i4"}
+
+
+def read_safetensors(path: Path) -> tuple[dict, dict]:
+    """Reads the metadata and the tensors of a safetensors file.
+
+    The file is an 8-byte little-endian header length, the JSON header and
+    the raw tensor data, so no third-party reader is needed.
+    """
+    with path.open("rb") as handle:
+        header_len = struct.unpack("<Q", handle.read(8))[0]
+        header = json.loads(handle.read(header_len))
+        blob = handle.read()
+
+    metadata = header.get("__metadata__", {})
+    tensors = {}
+    for name, entry in header.items():
+        if name == "__metadata__":
+            continue
+        begin, end = entry["data_offsets"]
+        dtype = SAFETENSORS_DTYPES.get(entry["dtype"])
+        if dtype is None:
+            raise ValueError(f"unsupported dtype {entry['dtype']} for tensor {name}")
+        raw = blob[begin:end]
+        tensors[name] = np.frombuffer(raw, dtype=dtype).reshape(entry["shape"])
+    return metadata, tensors
+
+
+def vectorised_whiten(covariance, directions) -> list[np.ndarray]:
+    """Whitens directions under a covariance, mirroring the jitter ladder.
+
+    Same arithmetic as `whiten_direction`, but the triangular solve is done
+    with LAPACK: the ordered reference mirror is O(d^3) in pure Python, which
+    is not runnable at the artifact's dimension.
+    """
+    factor = None
+    for jitter in CHOLESKY_JITTERS:
+        candidate = np.array(covariance, dtype=np.float64, copy=True)
+        if jitter != 0.0:
+            candidate[np.diag_indices_from(candidate)] += f64(jitter)
+        try:
+            factor = np.linalg.cholesky(candidate)
+            break
+        except np.linalg.LinAlgError:
+            continue
+    if factor is None:
+        raise ValueError("cholesky: no jitter produced a valid factorisation")
+    return [
+        l2_normalize(np.linalg.solve(factor.T, direction)) for direction in directions
+    ]
+
+
+def check_artifact(path: Path, tolerance: float) -> dict:
+    """Re-derives an artifact's whitening and compares it with what it holds.
+
+    The artifact's `v_harm_clusters` holds the raw centroids, so the fit can
+    be reproduced from the artifact alone; the result is compared with the
+    stored `v_harm_clusters_whitened` and with the `whitening_shrinkage`
+    metadata.
+    """
+    metadata, tensors = read_safetensors(path)
+    for required in ("v_harm_clusters", "v_harm_clusters_whitened"):
+        if required not in tensors:
+            raise ValueError(f"the artifact carries no `{required}` tensor")
+
+    centroids = np.asarray(tensors["v_harm_clusters"], dtype=np.float64)
+    stored = np.asarray(tensors["v_harm_clusters_whitened"], dtype=np.float64)
+    n, d = centroids.shape
+
+    model = vectorised_fit(centroids)
+    whitened = np.stack(vectorised_whiten(model["covariance"], [row for row in centroids]))
+
+    results = {"n": n, "d": d}
+    results["shrinkage_recomputed"] = float(model["shrinkage"])
+    stored_shrinkage = metadata.get("whitening_shrinkage")
+    results["shrinkage_stored"] = stored_shrinkage
+    if stored_shrinkage is None:
+        raise ValueError("the artifact carries no `whitening_shrinkage` metadata")
+    stored_value = float(stored_shrinkage)
+    results["shrinkage_rel_err"] = abs(stored_value - results["shrinkage_recomputed"]) / max(
+        abs(results["shrinkage_recomputed"]), 1e-300
+    )
+    results["direction_max_abs_err"] = float(np.max(np.abs(stored - whitened)))
+    results["stored_unit_norm_max_err"] = float(
+        np.max(np.abs(np.linalg.norm(stored, axis=1) - 1.0))
+    )
+    results["whitening_method"] = metadata.get("whitening", "")
+    results["whitening_applied"] = metadata.get("whitening_applied", "")
+    results["whitening_samples"] = metadata.get("whitening_samples", "")
+    results["tolerance"] = tolerance
+    results["passed"] = (
+        results["shrinkage_rel_err"] < tolerance
+        and results["direction_max_abs_err"] < tolerance
+    )
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Output helpers.
 # ---------------------------------------------------------------------------
 def fmt(value) -> str:
@@ -521,6 +637,26 @@ def main() -> int:
         help="also report the deviation against a vectorised NumPy implementation",
     )
     parser.add_argument(
+        "--artifact",
+        metavar="PATH",
+        help="check a calibrated artifact: re-fit and re-whiten its centroids",
+    )
+    parser.add_argument(
+        "--artifact-tolerance",
+        type=float,
+        default=1e-6,
+        help=(
+            "tolerance for the artifact check (default 1e-6); the artifact "
+            "stores the whitened directions in float32, so the round-off of "
+            "the storage itself bounds the deviation"
+        ),
+    )
+    parser.add_argument(
+        "--centroid-dump",
+        metavar="PATH",
+        help="write the artifact's cluster centroids as a raw float64 dump",
+    )
+    parser.add_argument(
         "--compare",
         metavar="PATH",
         help="compare against a `whiten-check` output file and report the errors",
@@ -532,6 +668,41 @@ def main() -> int:
         help="parity tolerance for the acceptance check (default 1e-9)",
     )
     args = parser.parse_args()
+
+    if args.artifact:
+        artifact_path = Path(args.artifact)
+        if args.centroid_dump:
+            _meta, artifact_tensors = read_safetensors(artifact_path)
+            centroids = np.asarray(
+                artifact_tensors["v_harm_clusters"], dtype=np.float64
+            )
+            write_dump(Path(args.centroid_dump), centroids)
+            print(
+                f"wrote centroid dump {args.centroid_dump} "
+                f"({centroids.shape[0]} samples, dim {centroids.shape[1]})",
+                file=sys.stderr,
+            )
+        results = check_artifact(artifact_path, args.artifact_tolerance)
+        print(f"artifact = {artifact_path}")
+        print(f"artifact_n = {results['n']}")
+        print(f"artifact_d = {results['d']}")
+        print(f"artifact_whitening = {results['whitening_method']}")
+        print(f"artifact_whitening_applied = {results['whitening_applied']}")
+        print(f"artifact_whitening_samples = {results['whitening_samples']}")
+        print(f"artifact_shrinkage_stored = {results['shrinkage_stored']}")
+        print(f"artifact_shrinkage_recomputed = {fmt(results['shrinkage_recomputed'])}")
+        print(f"artifact_shrinkage_rel_err = {fmt(results['shrinkage_rel_err'])}")
+        print(
+            "artifact_direction_max_abs_err = "
+            f"{fmt(results['direction_max_abs_err'])}"
+        )
+        print(
+            "artifact_stored_unit_norm_max_err = "
+            f"{fmt(results['stored_unit_norm_max_err'])}"
+        )
+        print(f"artifact_tolerance = {fmt(results['tolerance'])}")
+        print(f"artifact_result = {'PASS' if results['passed'] else 'FAIL'}")
+        return 0 if results["passed"] else 1
 
     if args.fit:
         samples = read_dump(Path(args.fit), args.dim)

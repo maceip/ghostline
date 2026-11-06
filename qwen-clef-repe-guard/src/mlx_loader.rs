@@ -46,11 +46,38 @@ pub struct HfModelConfig {
     pub vocab_size: Option<i32>,
     #[serde(default)]
     pub tie_word_embeddings: Option<bool>,
+    /// The beginning-of-sequence token id, when the checkpoint records one.
+    #[serde(default)]
+    pub bos_token_id: Option<TokenId>,
+    /// The end-of-sequence token id(s), when the checkpoint records them.
+    ///
+    /// Checkpoints write this either as a single id (`151645`) or as a list
+    /// (`[151645, 151643]`), so both forms are accepted.
+    #[serde(default)]
+    pub eos_token_id: Option<TokenId>,
     /// Qwen3.5 / Qwen3.8 hybrid stacks mark their attention mix here.
     #[serde(default)]
     pub layer_types: Option<Vec<String>>,
     #[serde(default)]
     pub text_config: Option<Box<HfModelConfig>>,
+}
+
+/// A token id that a checkpoint records either as one id or as a list of them.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum TokenId {
+    One(i64),
+    Many(Vec<i64>),
+}
+
+impl TokenId {
+    /// Every id this entry stands for.
+    pub fn ids(&self) -> Vec<i64> {
+        match self {
+            TokenId::One(v) => vec![*v],
+            TokenId::Many(v) => v.clone(),
+        }
+    }
 }
 
 impl HfModelConfig {
@@ -84,6 +111,7 @@ pub struct SafetensorsIndex {
 
 /// Transparently executes either full-precision (`bf16`/`f32`) matmul or
 /// Apple Silicon Metal affine `quantized_matmul` (`4-bit`, `6-bit`, `8-bit`, or mixed OptiQ).
+#[derive(Clone)]
 pub enum MlxLinear {
     FullPrecision {
         weight: Array,
@@ -153,13 +181,32 @@ pub struct RopeTables {
 /// Uses the NeoX ("half-split") convention that Qwen2/Qwen3 use: the head
 /// dimension is cut in half and the two halves are rotated against each other.
 pub fn rope_tables(seq_len: i32, head_dim: i32, theta: f32) -> Result<RopeTables> {
+    rope_tables_at(0, seq_len, head_dim, theta)
+}
+
+/// Build rotary position tables for `seq_len` positions starting at
+/// `position_offset`.
+///
+/// This is what the shared KV cache needs: the cached entries keep the
+/// positions they were written with, and the newly appended tokens are
+/// rotated at `position_offset + i`. With an offset of zero the tables are
+/// bit-identical to [`rope_tables`] — the same angle is computed from the
+/// same `f64` expression and rounded to `f32` in the same order — so the
+/// non-cached path is numerically untouched.
+pub fn rope_tables_at(
+    position_offset: usize,
+    seq_len: i32,
+    head_dim: i32,
+    theta: f32,
+) -> Result<RopeTables> {
     let half = (head_dim / 2) as usize;
     let mut cos_data = vec![0f32; seq_len as usize * half];
     let mut sin_data = vec![0f32; seq_len as usize * half];
     for pos in 0..seq_len {
+        let abs_pos = position_offset as f64 + pos as f64;
         for i in 0..half {
             let freq = 1.0f64 / (theta as f64).powf((2 * i) as f64 / half as f64);
-            let angle = pos as f64 * freq;
+            let angle = abs_pos * freq;
             cos_data[pos as usize * half + i] = angle.cos() as f32;
             sin_data[pos as usize * half + i] = angle.sin() as f32;
         }
@@ -204,8 +251,32 @@ fn causal_mask(seq_len: i32) -> Result<Array> {
     Ok(Array::from_slice(&data, &[seq_len, seq_len]))
 }
 
+/// The additive causal mask for `new_len` tokens appended to a cache that
+/// already holds `offset` positions, over a total length of `total_len`.
+///
+/// Row `i` is the token at absolute position `offset + i`: it attends to
+/// EVERY cached position (they are all in the past) and to the new tokens up
+/// to and including itself. This is NOT a fresh `causal_mask(new_len)` over
+/// the new tokens alone — that would hide the cached context from the new
+/// tokens and silently produce a different model.
+///
+/// With `offset == 0` and `total_len == new_len` the mask is exactly
+/// `causal_mask(new_len)`.
+fn cached_causal_mask(new_len: i32, offset: usize, total_len: i32) -> Result<Array> {
+    let mut data: Vec<f32> = Vec::with_capacity((new_len * total_len) as usize);
+    for i in 0..new_len {
+        // The last position this row may attend to.
+        let limit = offset + i as usize;
+        for j in 0..total_len as usize {
+            data.push(if j <= limit { 0.0 } else { -1e9 });
+        }
+    }
+    Ok(Array::from_slice(&data, &[new_len, total_len]))
+}
+
 /// Complete Qwen Transformer Decoder Block supporting both quantized and
 /// unquantized projections.
+#[derive(Clone)]
 pub struct QwenLoadedLayer {
     pub input_norm: Array,
     pub post_attn_norm: Array,
@@ -230,6 +301,16 @@ pub struct QwenLoadedLayer {
     pub capture_attention: bool,
     /// The attention probabilities kept by the last forward pass.
     pub attention_probs: Option<Array>,
+    /// The cached keys of the shared KV cache, `[B, n_kv, S, D]`.
+    ///
+    /// The cache holds the projected keys AFTER RoPE but BEFORE the
+    /// grouped-query expansion: appending a token is then a concatenation on
+    /// axis 2, and the expansion is redone over the whole cache on every
+    /// step. `None` means "no cache" — the layer then behaves exactly like
+    /// the non-cached path.
+    pub k_cache: Option<Array>,
+    /// The cached values of the shared KV cache, `[B, n_kv, S, D]`.
+    pub v_cache: Option<Array>,
 }
 
 impl QwenLoadedLayer {
@@ -260,6 +341,8 @@ impl QwenLoadedLayer {
             rope_theta: 10000.0,
             capture_attention: false,
             attention_probs: None,
+            k_cache: None,
+            v_cache: None,
             rms_eps: 1e-6,
         })
     }
@@ -277,6 +360,156 @@ impl QwenLoadedLayer {
         let s = x.shape()[1];
         Ok(x.reshape(&[b, s, heads, head_dim])?)
     }
+
+    /// The number of positions the layer's shared KV cache holds.
+    pub fn cache_len(&self) -> usize {
+        self.k_cache
+            .as_ref()
+            .map(|k| k.shape()[2] as usize)
+            .unwrap_or(0)
+    }
+
+    /// Drop every cache entry beyond `length`.
+    ///
+    /// This is the rollback primitive. The layers above the probe layer wrote
+    /// their entries for an offending token from the UNCLAMPED residual, so
+    /// they have to be dropped and recomputed from the clamped one.
+    ///
+    /// `length` larger than the current cache is a no-op: the cache simply
+    /// does not reach that far.
+    pub fn truncate_cache(&mut self, length: usize) -> Result<()> {
+        let len = length as i32;
+        if let Some(kc) = &self.k_cache {
+            if len < kc.shape()[2] {
+                self.k_cache = Some(kc.index((.., .., 0..len, ..)));
+            }
+        }
+        if let Some(vc) = &self.v_cache {
+            if len < vc.shape()[2] {
+                self.v_cache = Some(vc.index((.., .., 0..len, ..)));
+            }
+        }
+        Ok(())
+    }
+
+    /// Forget the shared KV cache entirely.
+    pub fn clear_cache(&mut self) {
+        self.k_cache = None;
+        self.v_cache = None;
+    }
+
+    /// Run the layer against the shared KV cache.
+    ///
+    /// The new tokens are appended to the layer's cache and the attention runs
+    /// over the FULL cached length. The new tokens are rotated at
+    /// `position_offset + i`; the cached entries keep the positions they were
+    /// written with, because the cache stores the keys AFTER RoPE.
+    ///
+    /// `position_offset` must equal the current cache length — the position
+    /// of the first new token. A mismatch is a bug in the caller (a dropped
+    /// token, or a cache that was not rolled back) and is reported rather
+    /// than silently producing a model that attends to the wrong places.
+    pub fn forward_cached(&mut self, h: &Array, position_offset: usize) -> Result<Array> {
+        let cached = self.cache_len();
+        if cached != position_offset {
+            anyhow::bail!(
+                "forward_cached: position_offset {position_offset} does not match the cache \
+                 length {cached} — the cache and the position must advance together"
+            );
+        }
+        let seq_len = h.shape()[1];
+        let h_norm = Self::rms_norm(h, &self.input_norm, self.rms_eps)?;
+
+        let mut q = self.q_proj.forward(&h_norm)?;
+        let mut k = self.k_proj.forward(&h_norm)?;
+        let v = self.v_proj.forward(&h_norm)?;
+
+        q = Self::to_heads(&q, self.num_heads, self.head_dim)?;
+        k = Self::to_heads(&k, self.num_kv_heads, self.head_dim)?;
+        let v = Self::to_heads(&v, self.num_kv_heads, self.head_dim)?;
+
+        // Qwen3 applies an RMSNorm per head to q and k.
+        if let Some(qn) = &self.q_norm {
+            q = Self::rms_norm(&q, qn, self.rms_eps)?;
+        }
+        if let Some(kn) = &self.k_norm {
+            k = Self::rms_norm(&k, kn, self.rms_eps)?;
+        }
+
+        let tables = rope_tables_at(position_offset, seq_len, self.head_dim, self.rope_theta)?;
+        let (q, k) = apply_rope(&q, &k, &tables)?;
+
+        // [B, S, H, D] -> [B, H, S, D]
+        let q = transpose_axes(&q, &[0, 2, 1, 3])?;
+        let k = transpose_axes(&k, &[0, 2, 1, 3])?;
+        let v = transpose_axes(&v, &[0, 2, 1, 3])?;
+
+        // Append the new keys and values to the cache. With an empty cache the
+        // new arrays are used as they are — no concatenation, no copy — so
+        // the numbers are exactly the ones the non-cached path produces.
+        let (k_all, v_all) = match (self.k_cache.as_ref(), self.v_cache.as_ref()) {
+            (Some(kc), Some(vc)) => (
+                concatenate(&[kc, &k], 2)?,
+                concatenate(&[vc, &v], 2)?,
+            ),
+            _ => (k, v),
+        };
+        let total_len = k_all.shape()[2] as usize;
+        self.k_cache = Some(k_all.clone());
+        self.v_cache = Some(v_all.clone());
+
+        // Grouped-query attention: each KV head serves `repeats` consecutive
+        // query heads, matching the `repeat_kv` convention. The KV axis is
+        // expanded and broadcast, not merely reshaped.
+        let repeats = (self.num_heads / self.num_kv_heads.max(1)).max(1);
+        let (k, v) = if repeats > 1 {
+            let b = k_all.shape()[0];
+            let expand = |x: &Array| -> Result<Array> {
+                let x5 = x.expand_dims(2)?; // [B, n_kv, 1, S, D]
+                let x5 = broadcast_to(
+                    &x5,
+                    &[b, self.num_kv_heads, repeats, total_len as i32, self.head_dim],
+                )?;
+                Ok(x5.reshape(&[b, self.num_heads, total_len as i32, self.head_dim])?)
+            };
+            (expand(&k_all)?, expand(&v_all)?)
+        } else {
+            (k_all, v_all)
+        };
+
+        let scale = 1.0f32 / (self.head_dim as f32).sqrt();
+        let scores = multiply(
+            &matmul(&q, &transpose_axes(&k, &[0, 1, 3, 2])?)?,
+            &Array::from_f32(scale),
+        )?;
+        // The new tokens see every cached position and each other causally.
+        let mask = cached_causal_mask(seq_len, position_offset, total_len as i32)?;
+        let scores = add(&scores, &mask)?;
+        let probs = softmax_axes(&scores, &[-1], None)?;
+        if self.capture_attention {
+            // Kept for the provenance reading: the attention distribution of
+            // the probe layer, so the guard can see how much of the tool
+            // call's attention came from the untrusted part of the context.
+            self.attention_probs = Some(probs.clone());
+        }
+        let attn_ctx = matmul(&probs, &v)?; // [B, H, S, D]
+
+        // [B, H, S, D] -> [B, S, H*D]
+        let attn_ctx = transpose_axes(&attn_ctx, &[0, 2, 1, 3])?;
+        let attn_ctx = attn_ctx.reshape(&[h.shape()[0], seq_len, self.num_heads * self.head_dim])?;
+        let attn_out = self.o_proj.forward(&attn_ctx)?;
+        let h_mid = add(&h.as_type::<f32>()?, &attn_out)?;
+
+        let h_mlp_norm = Self::rms_norm(&h_mid, &self.post_attn_norm, self.rms_eps)?;
+        let gate = self.gate_proj.forward(&h_mlp_norm)?;
+        let up = self.up_proj.forward(&h_mlp_norm)?;
+        // SiLU(gate) = gate / (1 + exp(-gate))
+        let silu_gate = divide(&gate, &add(&Array::from_f32(1.0), &exp(&negative(&gate)?)?)?)?;
+        let fused = multiply(&silu_gate, &up)?;
+        let mlp_out = self.down_proj.forward(&fused)?;
+
+        Ok(add(&h_mid, &mlp_out)?)
+    }
 }
 
 impl QwenDecoderLayer for QwenLoadedLayer {
@@ -289,6 +522,18 @@ impl QwenDecoderLayer for QwenLoadedLayer {
 
     fn take_attention_probs(&mut self) -> Option<Array> {
         self.attention_probs.take()
+    }
+
+    fn forward_cached(&mut self, h: &Array, position_offset: usize) -> Result<Array> {
+        QwenLoadedLayer::forward_cached(self, h, position_offset)
+    }
+
+    fn truncate_cache(&mut self, length: usize) -> Result<()> {
+        QwenLoadedLayer::truncate_cache(self, length)
+    }
+
+    fn cache_len(&self) -> usize {
+        QwenLoadedLayer::cache_len(self)
     }
 
     fn forward(&mut self, h: &Array, _lora_scale: f32) -> Result<Array> {
@@ -547,6 +792,8 @@ impl ShardedModelLoader {
             rms_eps: cfg.rms_norm_eps.unwrap_or(1e-6),
             capture_attention: false,
             attention_probs: None,
+            k_cache: None,
+            v_cache: None,
         })
     }
 
@@ -583,5 +830,23 @@ impl ShardedModelLoader {
             .or_else(|| self.optional_tensor("language_model.model.norm.weight"))
             .context("Missing final norm weight")?;
         Ok(t.as_type::<f32>()?)
+    }
+
+    /// The language-model head: the tied embedding table when the checkpoint
+    /// ties its input and output embeddings, otherwise the checkpoint's own
+    /// `lm_head.weight`.
+    ///
+    /// Qwen2.5-0.5B ties them, so `lm_head == embed_tokens`; a checkpoint
+    /// that does not tie them carries a separate `lm_head.weight`.
+    pub fn load_lm_head(&self) -> Result<Array> {
+        let cfg = self.config.effective();
+        if cfg.tie_word_embeddings.unwrap_or(false) {
+            return self.load_embed_tokens_f32();
+        }
+        let w = self
+            .optional_tensor("lm_head.weight")
+            .or_else(|| self.optional_tensor("model.lm_head.weight"))
+            .context("Missing `lm_head.weight` and the checkpoint does not tie its embeddings")?;
+        Ok(w.as_type::<f32>()?)
     }
 }

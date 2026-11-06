@@ -925,11 +925,13 @@ pub fn refit(
         }
     };
 
-    // How far the refit moved each cluster, against the artifact it starts from.
+    // How far the refit moved each centroid, against the artifact it starts
+    // from. The comparison is between the two UNWHITENED centroids: the
+    // whitening is a separate map applied on top of both sides.
     let cluster_movement = previous_clusters
         .iter()
         .enumerate()
-        .map(|(index, previous)| match whitened_clusters.get(index) {
+        .map(|(index, previous)| match raw_clusters.get(index) {
             Some(current) => cosine(current, previous).unwrap_or(f32::NAN),
             None => f32::NAN,
         })
@@ -1019,12 +1021,17 @@ pub struct LabelReading {
     pub remeasured_excess: f64,
 }
 
-/// Re-measure every labelled call under the refitted directions.
+/// Re-measure every labelled call under a set of directions.
 ///
 /// The threshold was fitted on the readings the guard produced with the
 /// ORIGINAL directions. The refit moves the directions, so the statistic's
 /// scale moves with it — this measures by how much, instead of assuming the
 /// transfer is exact.
+///
+/// `absolute_reading` must match the artifact's `decision_mode`: an absolute
+/// reading projects the tool-call state itself, a relative one the shift away
+/// from the trusted user turn. Mixing the two would compare two different
+/// statistics and call the difference a refit.
 pub fn remeasure_labels(
     engine: &mut SiteEngine,
     tokenizer: &tokenizers::Tokenizer,
@@ -1032,6 +1039,7 @@ pub fn remeasure_labels(
     copy_dir: &Array,
     clusters: &[Array],
     matched_baseline: f32,
+    absolute_reading: bool,
     pooling: Pooling,
 ) -> Result<Vec<LabelReading>> {
     let mut out = Vec::new();
@@ -1040,7 +1048,11 @@ pub fn remeasure_labels(
             continue;
         };
         let instruction = canonical_instruction(record);
-        let anchor = anchor_state(engine, tokenizer, &render_user_turn(&instruction))?;
+        let anchor = if absolute_reading {
+            None
+        } else {
+            Some(anchor_state(engine, tokenizer, &render_user_turn(&instruction))?)
+        };
         let text = render_tool_call_turn(&instruction, &record.tool_name, &record.tool_args);
         let prefix = tool_call_span_prefix(&instruction);
         let harm = harm_reading(
@@ -1048,7 +1060,7 @@ pub fn remeasure_labels(
             tokenizer,
             &text,
             Some(span_start_for(tokenizer, &text, &prefix)),
-            Some(&anchor),
+            anchor.as_ref(),
             copy_dir,
             clusters,
             pooling,
@@ -1068,14 +1080,23 @@ pub fn read_artifact_metadata(path: &Path) -> Result<HashMap<String, String>> {
         .with_context(|| format!("Failed reading the metadata of {path:?}"))
 }
 
-/// The cluster directions of an artifact, whitened ones first.
-pub fn read_artifact_clusters(path: &Path) -> Result<Vec<Array>> {
+/// The cluster directions of an artifact.
+///
+/// `whitened` selects the artifact's whitened directions when it carries them
+/// and falls back to the raw centroids otherwise. The two are different
+/// directions — the whitening is a map, not a normalisation — so a comparison
+/// between two artifacts has to say which of the two it is making.
+pub fn read_artifact_clusters(path: &Path, whitened: bool) -> Result<Vec<Array>> {
     let tensors = Array::load_safetensors(path)
         .with_context(|| format!("Failed loading the artifact {path:?}"))?;
-    let source = tensors
-        .get("v_harm_clusters_whitened")
-        .or_else(|| tensors.get("v_harm_clusters"))
-        .context("the artifact carries no cluster directions")?;
+    let source = if whitened {
+        tensors
+            .get("v_harm_clusters_whitened")
+            .or_else(|| tensors.get("v_harm_clusters"))
+    } else {
+        tensors.get("v_harm_clusters")
+    }
+    .context("the artifact carries no cluster directions")?;
     let values = source.as_type::<f32>()?.contiguous()?;
     values.eval()?;
     let rows = values.shape()[0] as usize;

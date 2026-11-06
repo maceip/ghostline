@@ -21,6 +21,33 @@ pub trait QwenDecoderLayer {
     fn take_attention_probs(&mut self) -> Option<Array> {
         None
     }
+
+    /// Run the layer against a shared KV cache.
+    ///
+    /// The new tokens are appended to the layer's own cache and the attention
+    /// runs over the full cached length; `position_offset` is the position
+    /// of the first new token and must equal the current cache length.
+    ///
+    /// The default implementation keeps no cache and simply runs the layer,
+    /// so an implementor that does not support caching still compiles and
+    /// still behaves correctly — it just pays the full-attention cost.
+    fn forward_cached(&mut self, h: &Array, _position_offset: usize) -> Result<Array> {
+        self.forward(h, 0.0)
+    }
+
+    /// Drop every cache entry beyond `length`.
+    ///
+    /// The rollback primitive: the layers above the probe layer wrote their
+    /// entries for an offending token from the unclamped residual, so they
+    /// have to be dropped and recomputed from the clamped one.
+    fn truncate_cache(&mut self, _length: usize) -> Result<()> {
+        Ok(())
+    }
+
+    /// The number of positions the layer's shared KV cache holds.
+    fn cache_len(&self) -> usize {
+        0
+    }
 }
 
 /// Output of a hooked forward pass through the Qwen + Clef backbone

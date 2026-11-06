@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use qwen_clef_repe_guard::enforcer_proxy::{
     default_questions, EngineInfo, EngineSpec, Enforcer, EnforcerConfig, EnforcementMode,
@@ -6,6 +6,16 @@ use qwen_clef_repe_guard::enforcer_proxy::{
 };
 use qwen_clef_repe_guard::zero_shot_loader::UniversalModelRuntime;
 use std::path::PathBuf;
+
+// The rollback module lives beside this binary rather than in the library:
+// the composer emits it into the generated project as a source file, and the
+// standalone probe binary includes the same file through `#[path]`.
+mod rollback;
+
+use rollback::{
+    RollbackConfig, RollbackEngine, TokenCodec, generate_with_guard, resolve_trip_threshold,
+    verify_cache_parity,
+};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -42,6 +52,38 @@ struct Args {
     /// Skip zero-shot weight introspection and use the cached vectors as-is
     #[arg(long, default_value_t = false)]
     no_zero_shot: bool,
+    /// Run the speculative-activation-rollback generation and print the
+    /// outcome as JSON, instead of serving the guard.
+    ///
+    /// The model writes the tool call itself; when the RepE reading trips,
+    /// the guard clamps the harmful activation, rolls the KV cache back and
+    /// resumes decoding — the alternative completion instead of a 403.
+    #[arg(long, default_value_t = false)]
+    rollback: bool,
+    /// The prompt the rollback generation answers.
+    #[arg(long)]
+    rollback_prompt: Option<String>,
+    /// The clamp strength: `h' = h - alpha * max(0, h.v) * v`.
+    #[arg(long, default_value_t = 0.5)]
+    rollback_alpha: f32,
+    /// How many tokens the rollback generation may produce.
+    #[arg(long, default_value_t = 64)]
+    rollback_max_tokens: usize,
+    /// The harm reading above which the rollback generation trips.
+    ///
+    /// Defaults to the artifact's own calibrated operating point.
+    #[arg(long)]
+    rollback_trip_threshold: Option<f32>,
+    /// How many times the rollback generation may trip and roll back.
+    #[arg(long, default_value_t = 4)]
+    rollback_max_rollbacks: usize,
+    /// Check that the shared KV cache reproduces the plain forward pass and
+    /// print the comparison as JSON.
+    #[arg(long, default_value_t = false)]
+    verify_cache: bool,
+    /// Where the prompt is split for the cache check.
+    #[arg(long, default_value_t = 8)]
+    verify_cache_split: usize,
 }
 
 fn main() -> Result<()> {
@@ -66,6 +108,18 @@ fn main() -> Result<()> {
         clamp_threshold: 0.45,
         clem_temperature: 1.0,
     };
+
+    // ---------------------------------------------------------------------
+    // The rollback path: the model writes the tool call, the guard watches
+    // the residual stream, and a harmful activation is clamped and rolled
+    // back instead of being refused.
+    // ---------------------------------------------------------------------
+    if args.rollback {
+        return run_rollback(&args);
+    }
+    if args.verify_cache {
+        return run_verify_cache(&args);
+    }
 
     // ---------------------------------------------------------------------
     // Introspect the checkpoint: hyper-parameters and the structural
@@ -163,6 +217,67 @@ fn main() -> Result<()> {
         return runtime.block_on(run_self_test(spec, tokenizer, config, info));
     }
     runtime.block_on(serve(args, spec, tokenizer, config, info))
+}
+
+/// Run the speculative-activation-rollback generation and print the
+/// outcome as JSON.
+///
+/// The model and the RepE artifact are loaded exactly like the normal path
+/// does; only the decision is different. Instead of refusing a tool call the
+/// guard watches the model WRITE one, and steers it away from the harmful
+/// activation.
+fn run_rollback(args: &Args) -> Result<()> {
+    let model_dir = args
+        .model
+        .as_ref()
+        .context("--rollback needs --model pointing at a checkpoint")?;
+    let prompt = args
+        .rollback_prompt
+        .as_ref()
+        .context("--rollback needs --rollback-prompt")?;
+
+    let mut engine = RollbackEngine::load(model_dir, &args.repe)?;
+    let codec = TokenCodec::from_model_dir(model_dir);
+
+    let rule = resolve_trip_threshold(&engine.repe_sensor, args.rollback_trip_threshold);
+    let config = RollbackConfig {
+        alpha: args.rollback_alpha,
+        max_tokens: args.rollback_max_tokens,
+        trip_threshold: rule.threshold,
+        trip_rule: rule.rule,
+        max_rollbacks: args.rollback_max_rollbacks,
+    };
+
+    // The canonical context: the trusted user turn followed by the
+    // assistant's tool-call prefix. The model writes the call itself.
+    let context = qwen_clef_repe_guard::repe_sensor::tool_call_span_prefix(prompt);
+
+    let outcome = generate_with_guard(&mut engine, &codec, &context, &config)?;
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
+    Ok(())
+}
+
+/// Check that the shared KV cache reproduces the plain forward pass.
+///
+/// The plain pass runs the whole prompt through the stack at once; the cached
+/// pass prefills a prefix and appends the rest at their own positions. The
+/// two final hidden states — and the next-token logits derived from them —
+/// have to agree.
+fn run_verify_cache(args: &Args) -> Result<()> {
+    let model_dir = args
+        .model
+        .as_ref()
+        .context("--verify-cache needs --model pointing at a checkpoint")?;
+    let prompt = args
+        .rollback_prompt
+        .as_ref()
+        .context("--verify-cache needs --rollback-prompt")?;
+    let codec = TokenCodec::from_model_dir(model_dir);
+    let context = qwen_clef_repe_guard::repe_sensor::tool_call_span_prefix(prompt);
+    let ids = codec.encode(&context);
+    let parity = verify_cache_parity(model_dir, &args.repe, &ids, args.verify_cache_split)?;
+    println!("{}", serde_json::to_string_pretty(&parity)?);
+    Ok(())
 }
 
 async fn serve(

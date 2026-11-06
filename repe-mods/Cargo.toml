@@ -43,3 +43,11 @@ path = "src/bin/capability_tool.rs"
 [[bin]]
 name = "whiten-check"
 path = "src/bin/whiten_check.rs"
+
+[[bin]]
+name = "site-calibrate"
+path = "src/bin/site_calibrate.rs"
+
+[[bin]]
+name = "rollback-probe"
+path = "src/bin/rollback_probe.rs"

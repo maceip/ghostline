@@ -111,6 +111,8 @@
       <dt>baseline</dt><dd id="v-baseline">—</dd>
       <dt>attribution</dt><dd id="v-attrib">—</dd>
       <dt>cluster scores</dt><dd id="v-clusters">—</dd>
+      <dt>untrusted attn</dt><dd id="v-untrusted">—</dd>
+      <dt>trajectory</dt><dd id="v-trajectory">—</dd>
       <dt>drift cosine</dt><dd id="v-drift">—</dd>
       <dt>PCA energy</dt><dd id="v-energy">—</dd>
       <dt>clamped</dt><dd id="v-clamped">—</dd>
@@ -375,6 +377,22 @@
     const clusters = last.cluster_scores || [];
     $("v-clusters").textContent = clusters.length
       ? clusters.map((s, i) => (clusterNames[i] || ("c" + i)) + " " + Number(s).toFixed(4)).join(" · ")
+      : "—";
+    // The provenance reading: how much of the tool call's attention landed on
+    // the untrusted part of the context. Absent when nothing was declared
+    // untrusted — which is not the same as "the context was clean".
+    const untrusted = last.untrusted_attention_ratio;
+    $("v-untrusted").textContent = (untrusted === undefined || untrusted === null)
+      ? "none declared"
+      : Number(untrusted).toFixed(4);
+    // The cross-turn trajectory: the session's EMA of the cluster excess and
+    // the per-turn slope of each cluster.
+    const ema = last.ema_excess || [];
+    const slope = last.ema_slope || [];
+    $("v-trajectory").textContent = ema.length
+      ? ema.map((e, i) => (clusterNames[i] || ("c" + i)) + " " + Number(e).toFixed(4) +
+          " (" + (Number(slope[i] || 0) >= 0 ? "+" : "") + Number(slope[i] || 0).toFixed(4) + "/turn)"
+        ).join(" · ") + " · turn " + (last.trajectory_turns ?? 0)
       : "—";
     const advisories = (last.advisories || []).join("; ");
     $("v-reason").textContent = (last.reason || "—") +

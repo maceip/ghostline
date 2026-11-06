@@ -81,7 +81,12 @@ def run(label, prompts):
     print(f"  -> {label}: blocked {sum(1 for r in rows if r[0]=='BLOCK')}/{len(prompts)}")
     return tp, fp, rows
 
-tp, _, hr = run("harmful", HARM)
-fp, _, sr = run("benign", SAFE)
+# `run` returns (blocked_count, other_count, rows): for the harmful set the
+# first slot counts the blocked HARMFUL calls, for the benign set the second
+# slot counts the blocked BENIGN calls. Binding the benign count from the
+# first slot reads zero every time and hides every false positive.
+h_tp, h_fp, hr = run("harmful", HARM)
+b_tp, b_fp, sr = run("benign", SAFE)
+tp, fp = h_tp, b_fp
 print(f"\nREAL-LLM UPSTREAM (panel baseline): harmful blocked {tp}/{len(HARM)}, "
       f"benign wrongly blocked {fp}/{len(SAFE)}")
