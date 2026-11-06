@@ -851,15 +851,41 @@ else
     as_root install -m 0644 -o root -g wheel "/tmp/zcode-$GUARD_LABEL.plist" "$LAUNCHD_DIR/$GUARD_LABEL.plist"
     as_root install -m 0644 -o root -g wheel "/tmp/zcode-$CADDY_LABEL.plist" "$LAUNCHD_DIR/$CADDY_LABEL.plist"
 
+    # launchctl bootout returns before the service has actually left the
+    # domain, and bootstrapping straight back in then fails with
+    # "Input/output error" — so re-running this script on a box that is
+    # already deployed would die exactly where a fresh box succeeds.
+    # Wait for each agent to be gone.
     for label in "$UPSTREAM_LABEL" "$GUARD_LABEL" "$CADDY_LABEL"; do
         as_root launchctl bootout "system/$label" >/dev/null 2>&1 || true
+        waited=0
+        while [ "$waited" -lt 100 ]; do
+            as_root launchctl print "system/$label" >/dev/null 2>&1 || break
+            sleep 0.2
+            waited=$((waited + 1))
+        done
     done
-    as_root launchctl bootstrap system "$LAUNCHD_DIR/$UPSTREAM_LABEL.plist" \
-        || die "launchctl bootstrap failed for $UPSTREAM_LABEL"
-    as_root launchctl bootstrap system "$LAUNCHD_DIR/$GUARD_LABEL.plist" \
-        || die "launchctl bootstrap failed for $GUARD_LABEL"
-    as_root launchctl bootstrap system "$LAUNCHD_DIR/$CADDY_LABEL.plist" \
-        || die "launchctl bootstrap failed for $CADDY_LABEL"
+
+    # And retry the bootstrap: launchd sometimes refuses the first attempt
+    # while it is still settling.
+    bootstrap_agent() {
+        local label="$1" plist="$2" attempt=0
+        while [ "$attempt" -lt 5 ]; do
+            if as_root launchctl bootstrap system "$plist" 2>/dev/null; then
+                return 0
+            fi
+            attempt=$((attempt + 1))
+            sleep 1
+        done
+        # One last time without the output swallowed, so the operator sees
+        # why it failed.
+        as_root launchctl bootstrap system "$plist" \
+            || die "launchctl bootstrap failed for $label"
+    }
+
+    bootstrap_agent "$UPSTREAM_LABEL" "$LAUNCHD_DIR/$UPSTREAM_LABEL.plist"
+    bootstrap_agent "$GUARD_LABEL" "$LAUNCHD_DIR/$GUARD_LABEL.plist"
+    bootstrap_agent "$CADDY_LABEL" "$LAUNCHD_DIR/$CADDY_LABEL.plist"
     for label in "$UPSTREAM_LABEL" "$GUARD_LABEL" "$CADDY_LABEL"; do
         as_root launchctl kickstart -k "system/$label"
     done

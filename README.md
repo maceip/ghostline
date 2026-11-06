@@ -613,6 +613,13 @@ secret is stable, and without it a random one is generated per process, so
 every session ends when the process does. Rotating the secret is how every
 session is ended at once.
 
+Both installers write one: `scripts/install_guard.sh` puts it at
+`~/.config/zcode/session.secret` and `scripts/bootstrap_cloud_metal.sh` at
+`/opt/zcode/session.secret`. Measured on a real launchd install: a session
+answered `200`, the guard was restarted with `launchctl kickstart`, and it
+still answered `200`; rotating the secret turned that into `401`, and
+restoring it turned it back into `200`.
+
 **What it defends against:** a session cookie copied into another browser on
 its own, a cookie edited to point at somebody else's session, and a client
 that never went through the admission step at all. **What it does not:**

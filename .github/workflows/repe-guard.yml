@@ -96,7 +96,10 @@ jobs:
       # refuses to start is a deploy that cannot happen, so this builds
       # that binary and runs the edge check against the SHIPPED
       # deploy/Caddyfile: it must validate, a stock Caddy must refuse it,
-      # and the limit must shed load before the backend sees it.
+      # the limit must shed load before the backend sees it, and the
+      # configuration as the box will really run it — a bare hostname,
+      # :443, /opt/zcode/site — must validate too, with the zones and
+      # their limits in the adapted config.
       - name: the Caddy edge config loads and rate limits by IP
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest

@@ -49,6 +49,10 @@ THRESHOLD="${ZCODE_GUARD_THRESHOLD:-0.45}"
 MODEL_REPO="Qwen/Qwen2.5-0.5B-Instruct"
 REPE_REL="qwen-clef-repe-guard/artifacts/repe_vectors_qwen2_5_0_5b.safetensors"
 TOKEN_FILE="${ZCODE_TOKEN_FILE:-$HOME/.config/zcode/guard.token}"
+# The HMAC key that signs the session cookies.  Without a file the guard
+# makes one per process, so every restart ends every session — which for
+# a launchd service with KeepAlive means a crash logs everybody out.
+SESSION_SECRET_FILE="${ZCODE_SESSION_SECRET_FILE:-$HOME/.config/zcode/session.secret}"
 HF_HOME="${ZCODE_HF_HOME:-$HOME/.cache/zcode/huggingface}"
 MODEL_DIR_OVERRIDE="${ZCODE_MODEL_DIR:-}"
 LOG_DIR="$HOME/Library/Logs/zcode"
@@ -339,6 +343,24 @@ fi
 # ---------------------------------------------------------------------------
 # 6. the build
 # ---------------------------------------------------------------------------
+log "5b. session secret"
+if [ -s "$SESSION_SECRET_FILE" ]; then
+    ok "reusing $SESSION_SECRET_FILE"
+else
+    if [ "$DRY_RUN" -eq 1 ]; then
+        plan "openssl rand -hex 32 > $SESSION_SECRET_FILE (mode 0600)"
+    else
+        mkdir -p "$(dirname "$SESSION_SECRET_FILE")"
+        ( umask 077; openssl rand -hex 32 > "$SESSION_SECRET_FILE" ) \
+            || die "could not write $SESSION_SECRET_FILE"
+        chmod 0600 "$SESSION_SECRET_FILE"
+        ok "wrote a new session secret to $SESSION_SECRET_FILE (mode 0600)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6. the build
+# ---------------------------------------------------------------------------
 log "6. build"
 if [ "$DRY_RUN" -eq 1 ]; then
     plan "cd $ZCODE_DIR/qwen-clef-repe-guard && cargo build --release"
@@ -441,6 +463,8 @@ write_guard_plist() {
 		<string>${THRESHOLD}</string>
 		<string>--auth-token-file</string>
 		<string>$(xml_escape "$token_file")</string>
+		<string>--session-secret-file</string>
+		<string>$(xml_escape "$SESSION_SECRET_FILE")</string>
 		<string>--rate-limit-rpm</string>
 		<string>${RATE_LIMIT}</string>
 	</array>
@@ -462,6 +486,8 @@ write_guard_plist() {
 		<string>info</string>
 		<key>ZCODE_GUARD_TOKEN_FILE</key>
 		<string>$(xml_escape "$token_file")</string>
+		<key>ZCODE_SESSION_SECRET_FILE</key>
+		<string>$(xml_escape "$SESSION_SECRET_FILE")</string>
 		<key>ZCODE_GUARD_RATE_LIMIT_RPM</key>
 		<string>${RATE_LIMIT}</string>
 	</dict>
@@ -472,8 +498,36 @@ PLIST
 
 UID_NUM="$(id -u)"
 
+# launchctl bootout returns before the service has actually left the
+# domain, and bootstrapping straight back in then fails with
+# "Input/output error" — so a second run of this installer would die
+# exactly where the first one succeeded.  Wait for it to be gone.
 bootout_agent() {
     launchctl bootout "gui/$UID_NUM/$1" >/dev/null 2>&1 || true
+    local waited=0
+    while [ "$waited" -lt 100 ]; do
+        launchctl print "gui/$UID_NUM/$1" >/dev/null 2>&1 || return 0
+        sleep 0.2
+        waited=$((waited + 1))
+    done
+    warn "the agent $1 did not leave the domain — the plist may be busy"
+}
+
+# Bootstrap, and retry: launchd sometimes refuses the first attempt
+# while it is still settling after a bootout.
+bootstrap_agent() {
+    local label="$1" plist="$2" attempt=0
+    while [ "$attempt" -lt 5 ]; do
+        if launchctl bootstrap "gui/$UID_NUM" "$plist" 2>/dev/null; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    # One last time without the output swallowed, so the operator sees
+    # why it failed.
+    launchctl bootstrap "gui/$UID_NUM" "$plist" \
+        || die "launchctl bootstrap failed for $label"
 }
 
 log "7. launchd agents"
@@ -499,10 +553,8 @@ else
         # failing with "service already loaded".
         bootout_agent "$UPSTREAM_LABEL"
         bootout_agent "$GUARD_LABEL"
-        launchctl bootstrap "gui/$UID_NUM" "$UPSTREAM_PLIST" \
-            || die "launchctl bootstrap failed for $UPSTREAM_LABEL"
-        launchctl bootstrap "gui/$UID_NUM" "$GUARD_PLIST" \
-            || die "launchctl bootstrap failed for $GUARD_LABEL"
+        bootstrap_agent "$UPSTREAM_LABEL" "$UPSTREAM_PLIST"
+        bootstrap_agent "$GUARD_LABEL" "$GUARD_PLIST"
         launchctl enable "gui/$UID_NUM/$UPSTREAM_LABEL" >/dev/null 2>&1 || true
         launchctl enable "gui/$UID_NUM/$GUARD_LABEL" >/dev/null 2>&1 || true
         launchctl kickstart -k "gui/$UID_NUM/$UPSTREAM_LABEL"
@@ -567,6 +619,7 @@ cat <<SUMMARY
     health            http://127.0.0.1:${GUARD_PORT}/health
     upstream model    http://127.0.0.1:${UPSTREAM_PORT}
     token             ${TOKEN_FILE}      (mode 0600)
+    session secret    ${SESSION_SECRET_FILE}      (mode 0600; keeps sessions across restarts)
     model             ${MODEL_DIR}
     binary            ${GUARD_BIN:-$ZCODE_DIR/qwen-clef-repe-guard/target/release/qwen-clef-repe-guard}
     install root      ${ZCODE_DIR}
