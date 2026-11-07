@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Doto:wght@100..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css?v=2" />
-  <link rel="stylesheet" href="./exhibit.css?v=session" />
+  <link rel="stylesheet" href="./exhibit.css?v=llm" />
   <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
 </head>
 <body class="exhibit">
@@ -26,17 +26,17 @@
 
     <!-- 0 · the only thing that happens on load: nothing -->
     <section class="ex-step is-first" id="step-0" data-state="idle">
-      <button class="ex-zero" id="act-0" type="button">
-        <span class="ex-zero-n">0</span>
-        <span class="ex-zero-t">WAKE IT UP</span>
-      </button>
+      <p class="ex-num">0</p>
       <div class="ex-body">
         <h2>Nothing has happened yet.</h2>
         <p>
           Press zero. A model on this machine loads and says hello — from an
           empty context. It knows nothing about you. Watch it guess anyway.
         </p>
-        <div class="ex-out" id="out-0" hidden>
+        <button class="ex-act" id="act-0" type="button">0 · WAKE IT UP</button>
+        <div class="ex-out from-llm" id="out-0" hidden>
+          <span class="llm-tag" id="tag-0">FROM QWEN</span>
+          <div class="ex-tokstrip" id="tokstrip-0"></div>
           <pre class="ex-quote" id="msg-0"></pre>
           <dl class="ex-facts" id="facts-0">
             <div><dt>about you</dt><dd>0 tokens</dd></div>
@@ -52,22 +52,13 @@
       <p class="ex-num">1</p>
       <div class="ex-body">
         <h2>Open the checkpoint.</h2>
-        <p>
-          Two files on this machine are about to be opened: the model’s
-          weights, and the calibrated directions stored beside them.
-        </p>
-        <p class="ex-sub">WHAT GETS OPENED</p>
         <ul class="ex-paths">
           <li>~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/7ae55760…/</li>
           <li>~/zune-code/qwen-clef-repe-guard/artifacts/repe_vectors_qwen2_5_0_5b.safetensors</li>
         </ul>
-        <p>
-          Press, and the engine reports the structure it read from the weights
-          themselves — layers, width, how the matrices are quantized. No
-          config file is involved.
-        </p>
         <button class="ex-act" id="act-1" type="button" disabled>1 · OPEN THE CHECKPOINT</button>
         <div class="ex-out" id="out-1" hidden>
+          <div class="ex-layers" id="layers-1"></div>
           <dl class="ex-facts">
             <div><dt>model</dt><dd id="f1-arch">—</dd></div>
             <div><dt>layers</dt><dd id="f1-layers">—</dd></div>
@@ -193,8 +184,13 @@
           model <em>means</em> it with — that is the one nobody shows you.
         </p>
         <button class="ex-act" id="act-4" type="button" disabled>4 · RUN INFERENCE</button>
-        <div class="ex-out" id="out-4" hidden>
+        <div class="ex-out from-llm" id="out-4" hidden>
+          <span class="llm-tag">FROM QWEN · WHERE IT MEANS IT</span>
           <p class="ex-tokens" id="tok-4"></p>
+          <div class="ex-meter" id="meter-4">
+            <div class="ex-meter-track"><i id="meter-4-fill"></i><span class="ex-meter-thr"></span></div>
+            <div class="ex-meter-lab"><span>−0.15</span><span>excess vs threshold</span><span>+0.15</span></div>
+          </div>
           <dl class="ex-facts">
             <div><dt>harm cosine</dt><dd id="f4-cos">—</dd></div>
             <div><dt>baseline</dt><dd id="f4-base">—</dd></div>
@@ -216,7 +212,8 @@
           never runs.
         </p>
         <button class="ex-act" id="act-5" type="button" disabled>5 · PULL THE TRACE</button>
-        <div class="ex-out" id="out-5" hidden>
+        <div class="ex-out from-llm" id="out-5" hidden>
+          <span class="llm-tag">FROM QWEN · INSIDE ITS HEAD</span>
           <p class="ex-verdict" id="f5-verdict">—</p>
           <div id="spine"></div>
           <p class="knob-hint">harm cosine by depth · probe at layer 16 · raw vs baseline-subtracted</p>
@@ -232,6 +229,6 @@
     <p class="label" id="src-chip">…</p>
   </footer>
 
-  <script type="module" src="./js/exhibit.js?v=session"></script>
+  <script type="module" src="./js/exhibit.js?v=llm"></script>
 </body>
 </html>

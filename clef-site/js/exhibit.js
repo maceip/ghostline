@@ -103,7 +103,7 @@ function unlock(id) {
   const sec = $(id);
   if (!sec) return;
   sec.dataset.state = "open";
-  const btn = sec.querySelector("button.ex-act, button.ex-zero");
+  const btn = sec.querySelector("button.ex-act");
   if (btn) btn.disabled = false;
   const input = sec.querySelector("input");
   if (input) input.disabled = false;
@@ -154,6 +154,11 @@ async function act0() {
       const dec = new TextDecoder();
       let buf = "";
       let tokens = 0;
+      const strip = $("tokstrip-0");
+      strip.textContent = "";
+      const tag = $("tag-0");
+      tag.textContent = "FROM QWEN · WRITING…";
+      tag.classList.add("is-writing");
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -171,6 +176,13 @@ async function act0() {
               text += delta;
               tokens++;
               $("msg-0").textContent = text;
+              // one real tick per streamed chunk — the generation, drawn
+              const tick = document.createElement("i");
+              strip.appendChild(tick);
+              const ms = performance.now() - t0;
+              if (ms > 200) {
+                $("f0-dec").textContent = `${(tokens / (ms / 1000)).toFixed(1)} tok/s`;
+              }
             }
           } catch {}
         }
@@ -179,6 +191,8 @@ async function act0() {
       $("f0-pre").textContent = "0 ctx about you";
       $("f0-dec").textContent =
         tokens > 0 ? `${(tokens / (ms / 1000)).toFixed(1)} tok/s` : "—";
+      tag.textContent = "FROM QWEN";
+      tag.classList.remove("is-writing");
     } catch (err) {
       $("msg-0").textContent = `server did not answer — ${String(err).slice(0, 70)}`;
     }
@@ -200,6 +214,18 @@ async function act1() {
       countUp($("f1-width"), Number(info.d_model) || 0);
       countUp($("f1-probe"), Math.round((info.num_layers || 0) * 0.68) || 0);
       $("f1-quant").textContent = info.weight_quant_summary || "—";
+      // the layer stack the engine just reported — lit one at a time
+      const n = Number(info.num_layers) || 24;
+      const probe = Math.round(n * 0.68);
+      const box = $("layers-1");
+      box.textContent = "";
+      for (let i = 0; i < n; i++) {
+        const b = document.createElement("i");
+        if (i === probe) b.className = "is-probe";
+        b.title = `L${i}${i === probe ? " · probe" : ""}`;
+        box.appendChild(b);
+        b.style.animationDelay = `${(i * 28)}ms`;
+      }
       reveal($("out-1"));
     } catch (err) {
       fail("step-1", err);
@@ -242,6 +268,30 @@ async function act2() {
           </div>`;
         })
         .join("");
+      // the same three numbers as directions — lengths are the readings
+      const ang = [-32, 0, 32];
+      const cols = ["#D71921", "#C9971F", "#4A9E5C"];
+      const arrows = ang
+        .map((a, i) => {
+          const s = scores[i] ?? 0;
+          const L = 30 + (Math.abs(s) / max) * 92;
+          const rad = (a * Math.PI) / 180;
+          const x = 40 + Math.cos(rad) * L;
+          const y = 70 + Math.sin(rad) * L;
+          const px = 40 + Math.cos(rad) * (L - 8);
+          const py = 70 + Math.sin(rad) * (L - 8);
+          return `<path d="M40 70 L${x} ${y}" stroke="${cols[i]}" stroke-width="2" fill="none" marker-end="url(#f2${i})"/>
+            <text x="${x + 4}" y="${y + 3}" class="svg-lab" fill="${cols[i]}">${labels[i]} ${fmt(s)}</text>
+            <defs><marker id="f2${i}" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0 0 L7 3.5 L0 7" fill="none" stroke="${cols[i]}" stroke-width="2"/></marker></defs>`;
+        })
+        .join("");
+      $("bars-2").insertAdjacentHTML(
+        "beforeend",
+        `<svg viewBox="0 0 320 150" class="ex-fan">${arrows}
+         <circle cx="40" cy="70" r="3.5" fill="#1a1a1a"/>
+         <text x="8" y="140" class="svg-lab">three readings · one harmless call</text></svg>`
+      );
       reveal($("out-2"));
       // grow the bars from zero on the next frame — motion of the real values
       requestAnimationFrame(() =>
@@ -300,6 +350,17 @@ async function act4() {
       countUp($("f4-cos"), v.harm_cosine, 3, "");
       countUp($("f4-base"), v.harm_baseline, 3, "");
       countUp($("f4-excess"), v.harm_excess, 3, "");
+      // the excess meter: position is the real reading, the tick is the real threshold
+      const lo = -0.15, hi = 0.15;
+      const pct = (val) => Math.max(0, Math.min(100, ((val - lo) / (hi - lo)) * 100));
+      const fill = $("meter-4-fill");
+      fill.style.width = "0%";
+      fill.className = (v.harm_excess >= 0 ? "is-over" : "is-under");
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => { fill.style.width = pct(v.harm_excess) + "%"; })
+      );
+      const thr = document.querySelector(".ex-meter-thr");
+      if (thr) thr.style.left = pct(0.001) + "%";
       $("f4-tok").textContent =
         v.attribution_token_index != null
           ? `#${v.attribution_token_index} "${v.attribution_token || "?"}"`

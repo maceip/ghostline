@@ -395,6 +395,9 @@ printf '    support getting TLS certs").\n\n'
 printf '    The guard needs --session-cookie-secure false for this, because a\n'
 printf '    browser drops a Secure cookie from a plain-HTTP page:\n'
 printf '      bash %s/scripts/install_guard.sh --dir %s --session-cookie-secure false --trust-proxy\n\n' "$ZCODE_DIR" "$ZCODE_DIR"
+printf '    The Mac has to stay awake for the edge to stay up — macOS sleeps an\n'
+printf '    idle Mac, and a sleeping Mac is not on the network:\n'
+printf '      bash %s/scripts/install_keepawake.sh --dir %s\n\n' "$ZCODE_DIR" "$ZCODE_DIR"
 printf '    restart     launchctl kickstart -k gui/$UID/com.zcode.caddy\n'
 printf '    stop        launchctl bootout gui/$UID/com.zcode.caddy\n'
 printf '    logs        %s/caddy-access.log\n\n' "$LOG_DIR"

@@ -701,6 +701,9 @@ bash scripts/install_guard.sh --dir "$PWD" --session-cookie-secure false --trust
 
 # 2. the edge: Caddy with the rate_limit module, bound to the tailnet address
 bash scripts/install_tailscale_edge.sh --dir "$PWD"
+
+# 3. keep the Mac awake, so the edge survives an idle machine
+bash scripts/install_keepawake.sh --dir "$PWD"
 ```
 
 The second script ends with the checks it made:
@@ -712,6 +715,25 @@ The second script ends with the checks it made:
     ok   the listener is bound to the tailnet address (100.80.211.36:8443)
     ok   the edge does NOT answer on the LAN address (10.0.0.242)
 ```
+
+### How public is this? (decided 2026-11-07)
+
+**Tailnet-only, for now.**  The deployment is this Mac on the tailnet, and
+that is the entire public surface: reachable from any device on the tailnet,
+and from nowhere else.
+
+The reasoning that settled it: the cloud Mac is the right long-term answer,
+but it is not needed yet — and this Mac is not carried around, it sits at
+home on mains, which is exactly the shape the tailnet edge wants.  So the
+public questions are **deferred, not answered**:
+
+- **Tailscale Funnel** needs TLS certificates, and this account cannot issue
+  them (measured below).
+- **A cheap edge box plus a domain** needs a domain and an ACME contact,
+  which this account does not have yet.
+
+Neither is a reason to stop.  Both are a short piece of work once there is a
+domain, and `deploy/Caddyfile` is already the same file the cloud box runs.
 
 ### Why it is plain HTTP
 
@@ -753,9 +775,44 @@ both shapes.
 
 ### What it costs
 
-The Mac has to be awake and on the network.  `caffeinate` can hold it
-awake; Tailscale reconnects by itself.  A real public deployment still
-wants the cloud Mac.
+The Mac has to be awake and on the network.  Tailscale reconnects by itself.
+The sleeping half needed fixing, and it is fixed by an agent rather than by
+hope.
+
+**Measured before the fix** — nothing held a sleep assertion, so macOS put
+the Mac to sleep as soon as it went idle, and the tailnet peers saw the
+address go quiet rather than an error:
+
+```
+$ pmset -g assertions | grep -c PreventUserIdleSystemSleep
+0
+$ pgrep -fl caffeinate
+(nothing)
+```
+
+`scripts/install_keepawake.sh` installs `com.zcode.keepawake`, which runs
+`scripts/keepawake.sh` under launchd.  It ends with the assertion it made,
+not with the fact that it started:
+
+```
+    ok   the sleep assertion is held
+    pid 85103(caffeinate): [0x0001491400019cab] 00:00:01 PreventUserIdleSystemSleep named: "caffeinate command-line tool"
+    ok   the system-sleep assertion is held too (AC power)
+```
+
+Two deliberate limits:
+
+- **It only asserts on AC power.**  A laptop held awake on battery drains
+  the battery for nothing, and the edge lives at home on mains.  The script
+  re-checks the power state every minute and drops the assertion on
+  battery.
+- **It cannot survive a closed lid.**  Closing the LID sleeps a MacBook
+  regardless of any assertion; that needs `sudo pmset disablesleep 1`, which
+  the script does not and cannot do.  Keep the lid open.
+
+The guard, both model servers and Caddy keep running while the Mac is
+asleep — they are simply not reachable, because the machine is not on the
+network.  A real public deployment still wants the cloud Mac.
 
 ### If the tailnet breaks DNS
 
