@@ -3,124 +3,107 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AGENTVECTOR — run it</title>
+  <title>AGENTVECTOR — see it before it happens</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Doto:wght@100..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css" />
-  <link rel="stylesheet" href="./exhibit.css" />
+  <link rel="stylesheet" href="./show.css" />
   <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
 </head>
-<body class="exhibit">
+<body class="show">
 
-  <header class="ex-head">
-    <a class="ex-brand" href="./index.html"><img id="ex-logo" alt="AgentVector" /></a>
-    <p class="label ex-title">RUN IT</p>
+  <header class="show-head">
+    <a class="ex-brand" href="./index.html"><img id="show-logo" alt="AgentVector" /></a>
     <div class="seg seg-theme" id="seg-theme" role="group" aria-label="Theme">
       <button type="button" class="seg-btn is-on" data-theme="dark">DARK</button>
       <button type="button" class="seg-btn" data-theme="light">LIGHT</button>
     </div>
   </header>
 
-  <main class="ex-steps">
+  <!-- ============ the glass room ============ -->
+  <section class="room">
+    <p class="room-line">
+      There is a model in this page, writing code. Token by token.
+      <span class="room-dim">Most people never see past this glass.</span>
+    </p>
 
-    <!-- 1 -->
-    <section class="ex-step" id="step-1">
-      <p class="ex-num">1</p>
-      <div class="ex-body">
-        <h2>We load Qwen.</h2>
-        <p>
-          Your model is already on this machine. We open the checkpoint and read
-          its structure from the weights themselves — no config, no guesswork.
-        </p>
-        <dl class="ex-facts" id="facts-model">
-          <div><dt>model</dt><dd id="fact-arch">connecting…</dd></div>
-          <div><dt>layers</dt><dd id="fact-layers">—</dd></div>
-          <div><dt>residual width</dt><dd id="fact-width">—</dd></div>
-          <div><dt>probe layer</dt><dd id="fact-probe">—</dd></div>
-        </dl>
-      </div>
-    </section>
-
-    <!-- 2 -->
-    <section class="ex-step" id="step-2">
-      <p class="ex-num">2</p>
-      <div class="ex-body">
-        <h2>We learn what harm looks like.</h2>
-        <p>
-          Representation engineering. Three directions — destruction, theft,
-          exfiltration — pulled straight out of the weights. When a tool call
-          runs, its hidden state is measured against them at the probe layer.
-        </p>
-        <dl class="ex-facts">
-          <div><dt>directions</dt><dd>3</dd></div>
-          <div><dt>calibration</dt><dd id="fact-cal">—</dd></div>
-        </dl>
-      </div>
-    </section>
-
-    <!-- 3 -->
-    <section class="ex-step" id="step-3">
-      <p class="ex-num">3</p>
-      <div class="ex-body">
-        <h2>You tell us the filter.</h2>
-        <p>
-          Type the tool call you want checked. We don’t run it. We read it.
-        </p>
-        <div class="ex-play">
-          <input id="ex-input" type="text" spellcheck="false"
-                 placeholder="git status --short" autocomplete="off" />
-          <button id="ex-play-btn" type="button">4 · RUN INFERENCE</button>
-        </div>
-        <p class="knob-hint" id="run-note">The button runs one forward pass on the engine above. Nothing is executed.</p>
-      </div>
-    </section>
-
-    <!-- 4 -->
-    <section class="ex-step" id="step-4">
-      <p class="ex-num">4</p>
-      <div class="ex-body">
-        <h2>We run inference.</h2>
-        <p>
-          One forward pass over the call. No second model. No judge. The
-          residual stream is pooled over the call itself — not the prompt around
-          it.
-        </p>
-        <p class="ex-runstatus" id="ex-status">waiting for a filter</p>
-      </div>
-    </section>
-
-    <!-- 5 -->
-    <section class="ex-step" id="step-5">
-      <p class="ex-num">5</p>
-      <div class="ex-body">
-        <h2>Here’s which way it points.</h2>
-        <p>
-          The reading at the probe layer, minus the baseline your own prompt
-          carries. Above the line, we refuse the call before it runs.
-        </p>
-        <div class="ex-result" id="ex-result" hidden>
-          <p class="ex-verdict" id="ex-verdict">—</p>
-          <dl class="ex-facts" id="ex-readout">
-            <div><dt>reading</dt><dd id="r-cos">—</dd></div>
-            <div><dt>baseline</dt><dd id="r-base">—</dd></div>
-            <div><dt>excess</dt><dd id="r-excess">—</dd></div>
-            <div><dt>source</dt><dd id="r-src">—</dd></div>
-          </dl>
-          <div id="spine"></div>
-          <p class="knob-hint">harm cosine by depth · the probe sits at layer 16</p>
-          <p class="ex-reason" id="ex-reason"></p>
+    <div class="room-grid">
+      <div class="pane pane-agent">
+        <p class="pane-cap">THE AGENT</p>
+        <div class="chat">
+          <p class="chat-user">Fix the failing test in src/auth.rs.</p>
+          <pre class="chat-code" id="chat-code"></pre>
+          <p class="chat-note" id="chat-note">generating…</p>
         </div>
       </div>
-    </section>
 
-  </main>
+      <div class="pane pane-glass">
+        <p class="pane-cap">UNDER THE GLASS</p>
+        <div class="layers" id="layers"></div>
+        <p class="pane-foot" id="glass-note">24 decoder layers · reading at 16</p>
+      </div>
+    </div>
+
+    <p class="room-line room-line-2">
+      Representation engineering reads what each action <em>means</em> in there —
+      while it is still only an intention. Two things it gives you:
+    </p>
+
+    <div class="two">
+      <div class="two-col">
+        <p class="two-n">1</p>
+        <h3>OBSERVE</h3>
+        <p>See the meaning of every tool call the moment the agent proposes it.</p>
+      </div>
+      <div class="two-col">
+        <p class="two-n">2</p>
+        <h3>DETER</h3>
+        <p>Refuse the calls that point at harm — before anything runs.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ the monitor ============ -->
+  <section class="monitor">
+    <div class="mon-top">
+      <h2>It is about to happen. <span class="acc">We say so first.</span></h2>
+      <div class="seg" id="seg-mode" role="group" aria-label="Mode">
+        <button type="button" class="seg-btn is-on" data-mode="observe">OBSERVE</button>
+        <button type="button" class="seg-btn" data-mode="deter">DETER</button>
+      </div>
+      <button class="mon-replay" id="btn-replay" type="button">RUN THE SEQUENCE</button>
+    </div>
+    <p class="mon-sub" id="mon-sub">
+      Watch the agent work. Each time it proposes an action, the reading lands
+      <em>before</em> the action does. Live engine, real forward pass.
+    </p>
+
+    <div class="tape" id="tape"></div>
+    <p class="mon-src" id="src-chip">…</p>
+  </section>
+
+  <!-- ============ your turn ============ -->
+  <section class="yours">
+    <h2>Now you.</h2>
+    <p class="mon-sub">Type the action you want read. We don’t run it. We read it.</p>
+    <div class="ex-play">
+      <input id="ex-input" type="text" spellcheck="false"
+             placeholder="git status --short" autocomplete="off" />
+      <button id="btn-read" type="button">READ IT</button>
+    </div>
+    <div class="yours-out" id="yours-out" hidden>
+      <p class="yours-verdict" id="yours-verdict">—</p>
+      <p class="yours-nums" id="yours-nums"></p>
+      <p class="yours-reason" id="yours-reason"></p>
+    </div>
+  </section>
 
   <footer class="ex-foot">
     <a class="label" href="./index.html">← THE STORY</a>
-    <p class="label" id="source-chip">…</p>
+    <p class="label">READINGS ONLY · NOTHING IS EXECUTED</p>
   </footer>
 
-  <script type="module" src="./js/exhibit.js"></script>
+  <script type="module" src="./js/show.js"></script>
 </body>
 </html>

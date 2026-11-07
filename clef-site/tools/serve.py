@@ -167,14 +167,75 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(msg)
 
+    model_id = "local"  # rewritten to the server's loaded path below
+
+    def _proxy_model(self, method: str) -> None:
+        """Forward /gen/* to the model server, streaming chunks as they land."""
+        target = "http://127.0.0.1:8080" + self.path[4:]  # strip "/gen"
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+        if body and self.model_id:
+            # mlx_lm.server wants the path it was loaded with as the model id
+            try:
+                data = json.loads(body)
+                data["model"] = self.model_id
+                body = json.dumps(data).encode()
+            except Exception:  # noqa: BLE001
+                pass
+        req = urllib.request.Request(target, data=body, method=method)
+        ctype = self.headers.get("Content-Type")
+        if ctype:
+            req.add_header("Content-Type", ctype)
+        try:
+            resp = urllib.request.urlopen(req, timeout=600)
+        except urllib.error.HTTPError as exc:
+            payload = exc.read()
+            self.send_response(exc.code)
+            self.send_header("Content-Type", exc.headers.get("Content-Type", "text/plain"))
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        except Exception as exc:  # noqa: BLE001
+            msg = f"model server unreachable: {exc}".encode()
+            self.send_response(502)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+            return
+        self.send_response(resp.status)
+        for key, value in resp.headers.items():
+            if key.lower() in ("transfer-encoding", "connection"):
+                continue
+            self.send_header(key, value)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        try:
+            while True:
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except Exception:  # noqa: BLE001 — client hung up mid-stream
+            pass
+        finally:
+            resp.close()
+
     def do_GET(self):  # noqa: N802
-        if self._wants_proxy(self.path.split("?")[0]):
+        if self.path.split("?")[0].startswith("/gen/"):
+            self._proxy_model("GET")
+        elif self._wants_proxy(self.path.split("?")[0]):
             self._proxy("GET")
         else:
             super().do_GET()
 
     def do_POST(self):  # noqa: N802
-        if self._wants_proxy(self.path.split("?")[0]):
+        if self.path.split("?")[0].startswith("/gen/"):
+            self._proxy_model("POST")
+        elif self._wants_proxy(self.path.split("?")[0]):
             self._proxy("POST")
         else:
             self.send_error(405)
@@ -207,6 +268,10 @@ def main() -> int:
     Handler.guard = args.guard
     Handler.auth_token = args.auth_token
     Handler.require_auth = bool(args.require_auth or args.auth_token)
+    Handler.model_id = os.environ.get(
+        "MODEL_ID",
+        "/Users/mac/.cache/huggingface/hub/models--mlx-community--Qwen3-4B-Instruct-2507-4bit/snapshots/50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b/",
+    )
     with Server((args.bind, args.port), Handler) as httpd:
         print(
             f"CLEF site on http://{args.bind}:{args.port}/ "
