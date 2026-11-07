@@ -80,7 +80,7 @@ RATE_LIMIT="${ZCODE_RATE_LIMIT:-30}"
 # budget — one per client IP and one shared by everybody.  The static site
 # and /health are in no zone at all, so a visitor is never throttled for
 # loading a page and the liveness probe is never throttled.
-RL_TOOL_CALL_EVENTS="${ZCODE_RL_TOOL_CALL_EVENTS:-10}"
+RL_TOOL_CALL_EVENTS="${ZCODE_RL_TOOL_CALL_EVENTS:-30}"
 RL_TOOL_CALL_WINDOW="${ZCODE_RL_TOOL_CALL_WINDOW:-1m}"
 RL_API_EVENTS="${ZCODE_RL_API_EVENTS:-60}"
 RL_API_WINDOW="${ZCODE_RL_API_WINDOW:-1m}"
@@ -88,6 +88,7 @@ RL_GEN_EVENTS="${ZCODE_RL_GEN_EVENTS:-6}"
 RL_GEN_WINDOW="${ZCODE_RL_GEN_WINDOW:-1m}"
 RL_GEN_GLOBAL_EVENTS="${ZCODE_RL_GEN_GLOBAL_EVENTS:-20}"
 RL_GEN_GLOBAL_WINDOW="${ZCODE_RL_GEN_GLOBAL_WINDOW:-1m}"
+BIND_ADDR="${ZCODE_BIND_ADDR:-0.0.0.0}"
 MODE="${ZCODE_GUARD_MODE:-enforce}"
 THRESHOLD="${ZCODE_GUARD_THRESHOLD:-0.45}"
 MODEL_REPO="Qwen/Qwen2.5-0.5B-Instruct"
@@ -721,6 +722,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
         printf 'CLEF_DOMAIN=%s\n' "$CLEF_DOMAIN"
         printf 'GUARD_PORT=%s\n' "$GUARD_PORT"
         printf 'GEN_PORT=%s\n' "$GEN_PORT"
+        printf 'BIND_ADDR=%s\n' "$BIND_ADDR"
         printf 'SITE_ROOT=%s\n' "$SITE_ROOT"
         printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
         printf 'RL_TOOL_CALL_EVENTS=%s\n' "$RL_TOOL_CALL_EVENTS"
@@ -785,6 +787,11 @@ else
         printf 'CLEF_DOMAIN=%s\n' "$CLEF_DOMAIN"
         printf 'GUARD_PORT=%s\n' "$GUARD_PORT"
         printf 'GEN_PORT=%s\n' "$GEN_PORT"
+        # The address to listen on.  0.0.0.0 = every IPv4 interface.  The
+        # box's VPC carries no IPv6 association, so there are no IPv6
+        # clients to lose by binding IPv4 only.  A Tailscale edge sets
+        # this to the tailnet address instead.
+        printf 'BIND_ADDR=%s\n' "$BIND_ADDR"
         printf 'SITE_ROOT=%s\n' "$SITE_ROOT"
         printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
         # The edge rate limit.  /v1/* runs the model and is the expensive
@@ -798,8 +805,6 @@ else
         printf 'RL_GEN_WINDOW=%s\n' "$RL_GEN_WINDOW"
         printf 'RL_GEN_GLOBAL_EVENTS=%s\n' "$RL_GEN_GLOBAL_EVENTS"
         printf 'RL_GEN_GLOBAL_WINDOW=%s\n' "$RL_GEN_GLOBAL_WINDOW"
-        # The generation model server, when there is one.
-        printf 'GEN_PORT=%s\n' "$GEN_PORT"
     } > /tmp/zcode-caddy.env
     as_root install -m 0640 -o root -g wheel /tmp/zcode-caddy.env "$CADDY_ENV"
     ok "$CADDY_CONFIG and $CADDY_ENV"
@@ -1255,7 +1260,7 @@ cat <<SUMMARY
       is already done: this script builds a Caddy with the rate_limit
       module into ${CADDY_BIN}, the shipped Caddyfile carries the zones,
       and the daemon runs that binary.  The limits live in ${CADDY_ENV}:
-          RL_TOOL_CALL_EVENTS  requests a minute on /v1/*  (default 10)
+          RL_TOOL_CALL_EVENTS  requests a minute on /v1/*  (default 30)
           RL_API_EVENTS        requests a minute on /api/*  (default 60)
           RL_GEN_EVENTS        requests a minute on /gen/*  (default 6)
           RL_GEN_GLOBAL_EVENTS requests a minute on /gen/* for EVERYONE at once

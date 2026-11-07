@@ -408,7 +408,7 @@ rate_limit {
 		}
 		key          {remote_host}
 		window       {$RL_TOOL_CALL_WINDOW:1m}
-		events       {$RL_TOOL_CALL_EVENTS:10}
+		events       {$RL_TOOL_CALL_EVENTS:30}
 		ipv6_prefix  64
 	}
 	zone api {
@@ -469,7 +469,7 @@ editing the file. The bootstrap writes them into `/opt/zcode/caddy/caddy.env`:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RL_TOOL_CALL_EVENTS` | `10` | `/v1/*` requests per IP per window |
+| `RL_TOOL_CALL_EVENTS` | `30` | `/v1/*` requests per IP per window |
 | `RL_TOOL_CALL_WINDOW` | `1m` | the window for `/v1/*` |
 | `RL_API_EVENTS` | `60` | `/api/*` requests per IP per window |
 | `RL_API_WINDOW` | `1m` | the window for `/api/*` |
@@ -635,6 +635,75 @@ sudo launchctl kickstart -k system/com.zcode.guard
 `0` means unlimited — do not set that on a public endpoint.
 
 ---
+
+## Serving it over Tailscale, from a Mac
+
+The public deployment wants a cloud Mac and a domain.  Until there is one,
+the site can be served **from a Mac over Tailscale**: the guard and both
+models run on the Mac, Caddy runs beside them, and the whole thing is
+reachable from any device on the tailnet — and from nowhere else.
+
+```bash
+# 1. the guard, the upstream model and the generation model, under launchd
+bash scripts/install_guard.sh --dir "$PWD" --session-cookie-secure false --trust-proxy
+
+# 2. the edge: Caddy with the rate_limit module, bound to the tailnet address
+bash scripts/install_tailscale_edge.sh --dir "$PWD"
+```
+
+The second script ends with the checks it made:
+
+```
+    ok   the site is served on http://100.80.211.36:8443/
+    ok   a visitor gets a session and a real reading (harm_excess 0.09772376)
+    ok   the edge limiter refuses the excess (200 200 200 … 429 429)
+    ok   the listener is bound to the tailnet address (100.80.211.36:8443)
+    ok   the edge does NOT answer on the LAN address (10.0.0.242)
+```
+
+### Why it is plain HTTP
+
+The tailnet's WireGuard tunnel already encrypts the connection end to end,
+so there is no certificate to obtain and no ACME contact to set up.  The
+cost is that the session cookie cannot carry `Secure` — a browser drops a
+Secure cookie from a plain-HTTP page — so the guard is installed with
+`--session-cookie-secure false`.  The cookie still travels only inside the
+encrypted tunnel.
+
+Two obvious alternatives were measured on this tailnet and rejected:
+
+- **`tailscale cert` / `tailscale serve`** — this account cannot issue TLS
+  certificates: `500 Internal Server Error: your Tailscale account does not
+  support getting TLS certs`.
+- **`tailscale serve --tcp`** — a TCP forward collapses every client to
+  `127.0.0.1` at the listener, which would leave the edge's rate limiter
+  with ONE bucket for the whole tailnet.  It also opened the port on the
+  local LAN, which is the opposite of what this is for.
+
+### Why the edge binds the tailnet address
+
+Because the limiter keys on the address Caddy saw on the socket.  On a
+tailnet that address is the peer's own `100.x` number, so the limit is per
+device — which is what "keyed by client IP" has to mean here.  Binding to
+the LAN interface instead would put every device in the house into one
+bucket, and would expose the edge to the LAN at all.
+
+`deploy/Caddyfile` therefore takes the bind address from the environment:
+
+```
+bind {$BIND_ADDR:0.0.0.0}
+```
+
+The public box binds every IPv4 interface (its VPC carries no IPv6
+association, so there are no IPv6 clients to lose).  The Tailscale edge
+sets `BIND_ADDR` to the tailnet address.  `evals/caddy_edge.py` checks
+both shapes.
+
+### What it costs
+
+The Mac has to be awake and on the network.  `caffeinate` can hold it
+awake; Tailscale reconnects by itself.  A real public deployment still
+wants the cloud Mac.
 
 ## Troubleshooting
 

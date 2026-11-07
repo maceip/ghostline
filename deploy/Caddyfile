@@ -70,7 +70,7 @@
 #  The limits are in the ENVIRONMENT, like everything else that differs per
 #  machine, so an operator can tune them without touching this file:
 #
-#    RL_TOOL_CALL_EVENTS   /v1/* per IP per window   (default 10)
+#    RL_TOOL_CALL_EVENTS   /v1/* per IP per window   (default 30)
 #    RL_TOOL_CALL_WINDOW   /v1/* window              (default 1m)
 #    RL_API_EVENTS         /api/* per IP per window  (default 60)
 #    RL_API_WINDOW         /api/* window             (default 1m)
@@ -116,6 +116,20 @@
 # HTTPS on its own.  The certificate is obtained and renewed by ACME
 # (HTTP-01 / TLS-ALPN-01) — there is no certificate file to manage here.
 {$CLEF_DOMAIN} {
+	# The address to listen on.
+	#
+	# The default binds every IPv4 interface, which is what a public box
+	# wants — and what the box actually has: its VPC carries no IPv6
+	# association, so there are no IPv6 clients to lose.
+	#
+	# The Tailscale edge on a Mac sets this to the tailnet address, so the
+	# edge is reachable ONLY over the tailnet and not from the local LAN.
+	# That matters for more than tidiness: the edge's rate limiter keys on
+	# the address Caddy saw on the socket, and on a tailnet that address
+	# is the peer's own 100.x number — which is exactly the per-client
+	# keying the limiter is supposed to have.
+	bind {$BIND_ADDR:0.0.0.0}
+
 	# The static site.  `clef-site/` from the repository is copied here at
 	# install time: index.html, js/, styles.css, data/ and vendor/ are all
 	# served from the same origin as the API below.
@@ -205,7 +219,7 @@
 			}
 			key {remote_host}
 			window {$RL_TOOL_CALL_WINDOW:1m}
-			events {$RL_TOOL_CALL_EVENTS:10}
+			events {$RL_TOOL_CALL_EVENTS:30}
 			ipv6_prefix 64
 		}
 		zone api {

@@ -316,8 +316,9 @@ def main() -> int:
         "ACME_EMAIL": "ops@example.com",
         "GUARD_PORT": "8090",
         "GEN_PORT": "8080",
+        "BIND_ADDR": "0.0.0.0",
         "SITE_ROOT": "/opt/zcode/site",
-        "RL_TOOL_CALL_EVENTS": "10",
+        "RL_TOOL_CALL_EVENTS": "30",
         "RL_TOOL_CALL_WINDOW": "1m",
         "RL_API_EVENTS": "60",
         "RL_API_WINDOW": "1m",
@@ -369,11 +370,11 @@ def main() -> int:
     gen = zones.get("gen", {})
     gen_global = zones.get("gen_global", {})
     check(
-        tool_call.get("max_events") == 10
+        tool_call.get("max_events") == 30
         and tool_call.get("window") == 60_000_000_000
         and tool_call.get("match") == [{"path": ["/v1/*"]}]
         and tool_call.get("key") == "{http.request.remote.host}",
-        "the tool-call zone is /v1/* at 10 a minute, keyed by client IP",
+        "the tool-call zone is /v1/* at 30 a minute, keyed by client IP",
         json.dumps(tool_call),
     )
     check(
@@ -406,6 +407,42 @@ def main() -> int:
         and "/health" not in json.dumps(gen.get("match", [])),
         "the liveness probe is in no zone, so it is never throttled",
         "/health is proxied but unthrottled",
+    )
+
+    # The listen address.  The box binds every IPv4 interface; the
+    # Tailscale edge binds ONE address — the tailnet one — so the edge is
+    # reachable over the tailnet and not from the local LAN.
+    try:
+        servers = json.loads(adapted.stdout)["apps"]["http"]["servers"]
+        listen = [addr for srv in servers.values() for addr in srv.get("listen", [])]
+    except (KeyError, json.JSONDecodeError):
+        listen = []
+    check(
+        listen == ["0.0.0.0:443"],
+        "the deployed config listens on every IPv4 interface",
+        f"listen={listen}",
+    )
+    tailnet_env = dict(deployed_env)
+    tailnet_env["BIND_ADDR"] = "100.64.0.7"
+    tailnet_envfile = tmp / "tailnet.env"
+    tailnet_envfile.write_text("".join(f"{k}={v}\n" for k, v in tailnet_env.items()))
+    tailnet_adapted = subprocess.run(
+        [caddy, "adapt", "--config", str(CADDYFILE), "--envfile", str(tailnet_envfile)],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        tailnet_listen = [
+            addr
+            for srv in json.loads(tailnet_adapted.stdout)["apps"]["http"]["servers"].values()
+            for addr in srv.get("listen", [])
+        ]
+    except (KeyError, json.JSONDecodeError):
+        tailnet_listen = []
+    check(
+        tailnet_listen == ["100.64.0.7:443"],
+        "the same config can be bound to ONE address — the tailnet one",
+        f"listen={tailnet_listen}",
     )
 
     # The ORDER of the handlers is the part that is easy to get wrong and

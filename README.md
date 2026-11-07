@@ -470,15 +470,36 @@ curl -fsSL https://raw.githubusercontent.com/maceip/zune-code/main/scripts/insta
 
 It checks the platform, installs `cargo` and `uv` if they are missing, clones
 the repository, builds the release binary, downloads
-`Qwen/Qwen2.5-0.5B-Instruct`, writes a bearer token, installs two launchd
-agents — the upstream model server and the guard — waits for both to answer,
-and prints the URLs. It never runs `sudo` and never writes outside `$HOME`.
+`Qwen/Qwen2.5-0.5B-Instruct` and the 4B generation model, writes a bearer
+token and a session secret, installs three launchd agents — the upstream
+model server, the generation model server and the guard — waits for all of
+them to answer, and prints the URLs. It never runs `sudo` and never writes
+outside `$HOME`.
 
 ```bash
 bash scripts/install_guard.sh --dry-run        # print the plan, touch nothing
 bash scripts/install_guard.sh --dir ~/zune-code --port 8090 --rate-limit 60
 bash scripts/install_guard.sh --help
 ```
+
+### Serving it over Tailscale, without a cloud box
+
+To reach the site from your own devices before there is a public box, a
+second installer puts Caddy — with the `rate_limit` module — in front of the
+guard on this Mac and binds it to the **tailnet address**:
+
+```bash
+bash scripts/install_guard.sh --dir "$PWD" --session-cookie-secure false --trust-proxy
+bash scripts/install_tailscale_edge.sh --dir "$PWD"
+```
+
+The edge is reachable from any device on the tailnet and from nowhere else,
+and its rate limiter keys on each device's own `100.x` address — which is
+what "keyed by client IP" means on a tailnet. It ends by measuring that:
+the site is served, a visitor gets a session and a real reading, the
+limiter refuses the excess, the listener is on the tailnet address, and the
+LAN address gets nothing. `deploy/README.md` has the details, including why
+it is plain HTTP and why Tailscale Serve was measured and rejected.
 
 ### Putting it on the internet
 

@@ -21,11 +21,17 @@
 #      repository is refused, never clobbered.
 #   4. Builds the guard: cargo build --release inside qwen-clef-repe-guard/.
 #   5. Downloads Qwen2.5-0.5B-Instruct into a stable cache so a second run
-#      never re-downloads it.
-#   6. Writes a bearer token to ~/.config/zcode/guard.token (mode 0600).
-#   7. Installs two launchd agents under ~/Library/LaunchAgents:
-#      com.zcode.upstream (the mlx_lm server) and com.zcode.guard.
-#   8. Waits for the upstream port and for the guard's /health, and prints
+#      never re-downloads it, and the 4B generation model the site's glass
+#      room writes code with (both caches are searched first, so a machine
+#      that already has them downloads nothing).
+#   6. Writes a bearer token to ~/.config/zcode/guard.token (mode 0600)
+#      and a session secret to ~/.config/zcode/session.secret (mode 0600),
+#      so sessions survive a restart.
+#   7. Installs three launchd agents under ~/Library/LaunchAgents:
+#      com.zcode.upstream (the mlx_lm server the guard reads with),
+#      com.zcode.gen (the mlx_lm server that WRITES code on the site) and
+#      com.zcode.guard.
+#   8. Waits for the model ports and for the guard's /health, and prints
 #      the summary.
 #
 # IT NEVER RUNS sudo AND NEVER WRITES OUTSIDE THE USER'S HOME.
@@ -43,22 +49,39 @@ ZCODE_DIR="${ZCODE_DIR:-}"
 DIR_EXPLICIT=0
 GUARD_PORT="${ZCODE_GUARD_PORT:-8090}"
 UPSTREAM_PORT="${ZCODE_UPSTREAM_PORT:-8123}"
+# The generation model server: a SECOND, larger model.  The guard READS
+# activations with the 0.5B model on UPSTREAM_PORT; the site's glass room
+# has a 4B model WRITE code, token by token, into the page.
+GEN_PORT="${ZCODE_GEN_PORT:-8080}"
 RATE_LIMIT="${ZCODE_RATE_LIMIT:-60}"
 MODE="${ZCODE_GUARD_MODE:-enforce}"
 THRESHOLD="${ZCODE_GUARD_THRESHOLD:-0.45}"
 MODEL_REPO="Qwen/Qwen2.5-0.5B-Instruct"
+GEN_MODEL_REPO="${ZCODE_GEN_MODEL_REPO:-mlx-community/Qwen3-4B-Instruct-2507-4bit}"
 REPE_REL="qwen-clef-repe-guard/artifacts/repe_vectors_qwen2_5_0_5b.safetensors"
 TOKEN_FILE="${ZCODE_TOKEN_FILE:-$HOME/.config/zcode/guard.token}"
 # The HMAC key that signs the session cookies.  Without a file the guard
 # makes one per process, so every restart ends every session — which for
 # a launchd service with KeepAlive means a crash logs everybody out.
 SESSION_SECRET_FILE="${ZCODE_SESSION_SECRET_FILE:-$HOME/.config/zcode/session.secret}"
+# The session cookies carry `Secure` by default, because the public
+# deployment is behind TLS.  A browser DROPS a Secure cookie from a
+# plain-HTTP page — so an edge that serves plain HTTP (a Tailscale
+# tailnet, for instance) has to turn this off, or every session is
+# silently discarded and the site reads as "ENGINE OFFLINE".
+SESSION_COOKIE_SECURE="${ZCODE_SESSION_COOKIE_SECURE:-true}"
+# Whether the guard honours a forwarded client address.  On by default
+# when a proxy sits in front on this same machine.
+TRUST_PROXY="${ZCODE_TRUST_PROXY:-0}"
 HF_HOME="${ZCODE_HF_HOME:-$HOME/.cache/zcode/huggingface}"
 MODEL_DIR_OVERRIDE="${ZCODE_MODEL_DIR:-}"
+GEN_MODEL_DIR_OVERRIDE="${ZCODE_GEN_MODEL_DIR:-}"
+GEN_ENABLED="${ZCODE_GEN_SERVER:-1}"
 LOG_DIR="$HOME/Library/Logs/zcode"
 LOG_FILE="$LOG_DIR/install.log"
 
 UPSTREAM_LABEL="com.zcode.upstream"
+GEN_LABEL="com.zcode.gen"
 GUARD_LABEL="com.zcode.guard"
 
 DRY_RUN=0
@@ -109,6 +132,16 @@ install_guard.sh — install the MLX tool-call safety guard on macOS/arm64.
   --mode <enforce|monitor>   the guard's mode (default enforce)
   --threshold <f>       the harm-cosine threshold (default 0.45)
   --model-dir <path>    use an existing model snapshot instead of downloading
+  --gen-port <n>        the generation model server's port (default 8080)
+  --no-gen-model        do not install the generation model server; the
+                        site's glass room then says the model is unavailable
+  --gen-model-dir <path>  use an existing generation model snapshot
+  --session-cookie-secure <true|false>
+                        whether the session cookies carry `Secure` (default
+                        true).  Turn it off for a plain-HTTP edge, or the
+                        browser will drop every session cookie.
+  --trust-proxy         honour the forwarded client address from a proxy on
+                        this same machine
   --no-service          build and install, but do not install launchd agents
   --dry-run             print the plan and touch nothing
   -h, --help            this text
@@ -134,6 +167,14 @@ while [ $# -gt 0 ]; do
         --threshold=*)    THRESHOLD="${1#*=}"; shift ;;
         --model-dir)      MODEL_DIR_OVERRIDE="${2:-}"; shift 2 ;;
         --model-dir=*)    MODEL_DIR_OVERRIDE="${1#*=}"; shift ;;
+        --gen-port)       GEN_PORT="${2:-}"; shift 2 ;;
+        --gen-port=*)     GEN_PORT="${1#*=}"; shift ;;
+        --no-gen-model)   GEN_ENABLED=0; shift ;;
+        --gen-model-dir)  GEN_MODEL_DIR_OVERRIDE="${2:-}"; shift 2 ;;
+        --gen-model-dir=*) GEN_MODEL_DIR_OVERRIDE="${1#*=}"; shift ;;
+        --session-cookie-secure) SESSION_COOKIE_SECURE="${2:-}"; shift 2 ;;
+        --session-cookie-secure=*) SESSION_COOKIE_SECURE="${1#*=}"; shift ;;
+        --trust-proxy)    TRUST_PROXY=1; shift ;;
         --no-service)     NO_SERVICE=1; shift ;;
         --dry-run)        DRY_RUN=1; shift ;;
         -h|--help)        usage; exit 0 ;;
@@ -277,17 +318,20 @@ REPE_PATH="$ZCODE_DIR/$REPE_REL"
 # 4. the model
 # ---------------------------------------------------------------------------
 cached_snapshot_dir() {
-    local snapshots="$HF_HOME/hub/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots"
+    # Both huggingface caches: this installer's own, and the standard one.
+    # A machine that already has the model must not download it again.
     local newest
-    [ -d "$snapshots" ] || return 1
-    # The newest snapshot directory, by modification time.  find + stat
-    # instead of ls, so a path with an unusual name cannot confuse it.
-    newest="$(find "$snapshots" -mindepth 1 -maxdepth 1 -type d \
-        -exec stat -f '%m %N' {} + 2>/dev/null \
-        | sort -rn | head -n 1 | cut -d' ' -f2-)"
-    [ -n "$newest" ] || return 1
-    [ -d "$newest" ] || return 1
-    printf '%s\n' "$newest"
+    for cache in "$HF_HOME/hub" "$HOME/.cache/huggingface/hub"; do
+        local snapshots="$cache/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots"
+        [ -d "$snapshots" ] || continue
+        # The newest snapshot directory, by modification time.  find + stat
+        # instead of ls, so a path with an unusual name cannot confuse it.
+        newest="$(find "$snapshots" -mindepth 1 -maxdepth 1 -type d \
+            -exec stat -f '%m %N' {} + 2>/dev/null \
+            | sort -rn | head -n 1 | cut -d' ' -f2-)"
+        [ -n "$newest" ] && [ -d "$newest" ] && { printf '%s\n' "$newest"; return 0; }
+    done
+    return 1
 }
 
 download_model() {
@@ -320,6 +364,58 @@ else
     MODEL_DIR="$(download_model)" || die "the model download failed — see $LOG_FILE"
     [ -d "$MODEL_DIR" ] || die "the download reported $MODEL_DIR, which is not a directory"
     ok "model  $MODEL_DIR"
+fi
+
+# ---------------------------------------------------------------------------
+# 4b. the generation model
+#
+# A second, bigger model.  The guard READS with the 0.5B above; the site's
+# glass room has a 4B model WRITE code into the page.  It is a separate
+# server on its own port.
+#
+# It is looked for in BOTH huggingface caches — this installer's own and
+# the standard one — so a machine that already has it does not download
+# 2.5 GB again.
+# ---------------------------------------------------------------------------
+cached_gen_snapshot_dir() {
+    local newest
+    for cache in "$HF_HOME/hub" "$HOME/.cache/huggingface/hub"; do
+        local snapshots="$cache/models--mlx-community--Qwen3-4B-Instruct-2507-4bit/snapshots"
+        [ -d "$snapshots" ] || continue
+        newest="$(find "$snapshots" -mindepth 1 -maxdepth 1 -type d \
+            -exec stat -f '%m %N' {} + 2>/dev/null \
+            | sort -rn | head -n 1 | cut -d' ' -f2-)"
+        [ -n "$newest" ] && [ -d "$newest" ] && { printf '%s\n' "$newest"; return 0; }
+    done
+    return 1
+}
+
+log "4b. the generation model"
+GEN_MODEL_DIR=""
+if [ "$GEN_ENABLED" -eq 0 ]; then
+    warn "the generation model server is disabled (--no-gen-model); the site's glass room will say the model is unavailable"
+elif [ -n "$GEN_MODEL_DIR_OVERRIDE" ]; then
+    [ -d "$GEN_MODEL_DIR_OVERRIDE" ] \
+        || die "--gen-model-dir points at $GEN_MODEL_DIR_OVERRIDE, which is not a directory"
+    GEN_MODEL_DIR="$GEN_MODEL_DIR_OVERRIDE"
+    ok "using the generation model at $GEN_MODEL_DIR"
+elif cached="$(cached_gen_snapshot_dir)"; then
+    GEN_MODEL_DIR="$cached"
+    ok "using the cached generation model at $GEN_MODEL_DIR"
+elif [ "$DRY_RUN" -eq 1 ]; then
+    GEN_MODEL_DIR="$HF_HOME/hub/models--mlx-community--Qwen3-4B-Instruct-2507-4bit/snapshots/<revision>"
+    plan "download $GEN_MODEL_REPO (~2.5 GB) into $HF_HOME with uv + huggingface_hub"
+else
+    info "downloading $GEN_MODEL_REPO (~2.5 GB) into $HF_HOME — this takes a while"
+    need_network "https://huggingface.co" "the generation model download"
+    if ! GEN_MODEL_DIR="$(uv run --python 3.12 --with huggingface_hub python \
+            -c "from huggingface_hub import snapshot_download; print(snapshot_download(\"$GEN_MODEL_REPO\"))" \
+            2>>"$LOG_FILE")"; then
+        die "the generation model download failed — see $LOG_FILE"
+    fi
+    GEN_MODEL_DIR="$(printf '%s\n' "$GEN_MODEL_DIR" | tail -n 1)"
+    [ -d "$GEN_MODEL_DIR" ] || die "the download reported $GEN_MODEL_DIR, which is not a directory"
+    ok "generation model  $GEN_MODEL_DIR"
 fi
 
 # ---------------------------------------------------------------------------
@@ -435,6 +531,59 @@ write_upstream_plist() {
 PLIST
 }
 
+write_gen_plist() {
+    local plist="$1" uv_bin="$2" model_dir="$3" workdir="$4"
+    cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>${GEN_LABEL}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$(xml_escape "$uv_bin")</string>
+		<string>run</string>
+		<string>--python</string>
+		<string>3.12</string>
+		<string>--with</string>
+		<string>mlx-lm</string>
+		<string>mlx_lm.server</string>
+		<string>--model</string>
+		<string>$(xml_escape "$model_dir")</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>${GEN_PORT}</string>
+		<string>--temp</string>
+		<string>0.2</string>
+		<string>--max-tokens</string>
+		<string>256</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>$(xml_escape "$workdir")</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>$(xml_escape "$LOG_DIR/gen.log")</string>
+	<key>StandardErrorPath</key>
+	<string>$(xml_escape "$LOG_DIR/gen.err.log")</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>$(xml_escape "$HOME")</string>
+		<key>HF_HOME</key>
+		<string>$(xml_escape "$HF_HOME")</string>
+		<key>PATH</key>
+		<string>$(xml_escape "${PATH}")</string>
+	</dict>
+</dict>
+</plist>
+PLIST
+}
+
 write_guard_plist() {
     local plist="$1" binary="$2" model_dir="$3" workdir="$4" token_file="$5"
     cat > "$plist" <<PLIST
@@ -467,6 +616,9 @@ write_guard_plist() {
 		<string>$(xml_escape "$SESSION_SECRET_FILE")</string>
 		<string>--rate-limit-rpm</string>
 		<string>${RATE_LIMIT}</string>
+		<string>--session-cookie-secure</string>
+		<string>${SESSION_COOKIE_SECURE}</string>
+$(if [ "$TRUST_PROXY" = "1" ]; then printf '\t\t<string>--trust-proxy</string>'; fi)
 	</array>
 	<key>WorkingDirectory</key>
 	<string>$(xml_escape "$workdir")</string>
@@ -533,6 +685,7 @@ bootstrap_agent() {
 log "7. launchd agents"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 UPSTREAM_PLIST="$AGENTS_DIR/$UPSTREAM_LABEL.plist"
+GEN_PLIST="$AGENTS_DIR/$GEN_LABEL.plist"
 GUARD_PLIST="$AGENTS_DIR/$GUARD_LABEL.plist"
 UV_BIN="$(command -v uv || printf '%s' "$HOME/.local/bin/uv")"
 
@@ -541,25 +694,43 @@ if [ "$NO_SERVICE" -eq 1 ]; then
 else
     if [ "$DRY_RUN" -eq 1 ]; then
         plan "write $UPSTREAM_PLIST  (mlx_lm.server on 127.0.0.1:$UPSTREAM_PORT)"
+        if [ "$GEN_ENABLED" -eq 1 ]; then
+            plan "write $GEN_PLIST        (the generation model server on 127.0.0.1:$GEN_PORT)"
+        fi
         plan "write $GUARD_PLIST     (the guard on 127.0.0.1:$GUARD_PORT, token file $TOKEN_FILE)"
         plan "launchctl bootout gui/$UID_NUM/$UPSTREAM_LABEL ; launchctl bootstrap gui/$UID_NUM $UPSTREAM_PLIST ; launchctl kickstart -k gui/$UID_NUM/$UPSTREAM_LABEL"
         plan "launchctl bootout gui/$UID_NUM/$GUARD_LABEL    ; launchctl bootstrap gui/$UID_NUM $GUARD_PLIST    ; launchctl kickstart -k gui/$UID_NUM/$GUARD_LABEL"
     else
         mkdir -p "$AGENTS_DIR"
         write_upstream_plist "$UPSTREAM_PLIST" "$UV_BIN" "$MODEL_DIR" "$ZCODE_DIR"
+        if [ "$GEN_ENABLED" -eq 1 ]; then
+            write_gen_plist "$GEN_PLIST" "$UV_BIN" "$GEN_MODEL_DIR" "$ZCODE_DIR"
+        fi
         write_guard_plist "$GUARD_PLIST" "$GUARD_BIN" "$MODEL_DIR" "$ZCODE_DIR" "$TOKEN_FILE"
 
         # bootout first so a second run replaces the agent instead of
         # failing with "service already loaded".
         bootout_agent "$UPSTREAM_LABEL"
+        bootout_agent "$GEN_LABEL"
         bootout_agent "$GUARD_LABEL"
         bootstrap_agent "$UPSTREAM_LABEL" "$UPSTREAM_PLIST"
+        if [ "$GEN_ENABLED" -eq 1 ]; then
+            bootstrap_agent "$GEN_LABEL" "$GEN_PLIST"
+        fi
         bootstrap_agent "$GUARD_LABEL" "$GUARD_PLIST"
         launchctl enable "gui/$UID_NUM/$UPSTREAM_LABEL" >/dev/null 2>&1 || true
+        launchctl enable "gui/$UID_NUM/$GEN_LABEL" >/dev/null 2>&1 || true
         launchctl enable "gui/$UID_NUM/$GUARD_LABEL" >/dev/null 2>&1 || true
         launchctl kickstart -k "gui/$UID_NUM/$UPSTREAM_LABEL"
+        if [ "$GEN_ENABLED" -eq 1 ]; then
+            launchctl kickstart -k "gui/$UID_NUM/$GEN_LABEL"
+        fi
         launchctl kickstart -k "gui/$UID_NUM/$GUARD_LABEL"
-        ok "$UPSTREAM_LABEL and $GUARD_LABEL are loaded"
+        if [ "$GEN_ENABLED" -eq 1 ]; then
+            ok "$UPSTREAM_LABEL, $GEN_LABEL and $GUARD_LABEL are loaded"
+        else
+            ok "$UPSTREAM_LABEL and $GUARD_LABEL are loaded"
+        fi
     fi
 fi
 
@@ -601,6 +772,14 @@ else
     fi
     ok "upstream is listening on 127.0.0.1:$UPSTREAM_PORT"
 
+    if [ "$GEN_ENABLED" -eq 1 ]; then
+        if ! wait_for_tcp "$GEN_PORT" 600; then
+            tail -n 40 "$LOG_DIR/gen.err.log" >&2 2>/dev/null || true
+            die "the generation mlx_lm.server never opened port $GEN_PORT — see $LOG_DIR/gen.err.log"
+        fi
+        ok "the generation model is listening on 127.0.0.1:$GEN_PORT"
+    fi
+
     if ! wait_for_health "http://127.0.0.1:$GUARD_PORT/health" 90; then
         tail -n 40 "$LOG_DIR/guard.err.log" >&2 2>/dev/null || true
         die "the guard never answered /health — see $LOG_DIR/guard.err.log"
@@ -618,6 +797,7 @@ cat <<SUMMARY
     tool-call probe   POST http://127.0.0.1:${GUARD_PORT}/v1/guard/tool-call
     health            http://127.0.0.1:${GUARD_PORT}/health
     upstream model    http://127.0.0.1:${UPSTREAM_PORT}
+    generation model  http://127.0.0.1:${GEN_PORT}${GEN_MODEL_DIR:+   ($GEN_MODEL_DIR)}
     token             ${TOKEN_FILE}      (mode 0600)
     session secret    ${SESSION_SECRET_FILE}      (mode 0600; keeps sessions across restarts)
     model             ${MODEL_DIR}
