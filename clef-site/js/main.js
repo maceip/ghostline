@@ -10,8 +10,7 @@ hydrateIcons();
 const $ = (id) => document.getElementById(id);
 
 const stored = localStorage.getItem("clef-theme");
-const initialTheme =
-  stored || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+const initialTheme = stored || "dark";
 document.documentElement.setAttribute("data-theme", initialTheme);
 
 const field = new ResidualField($("field"), {

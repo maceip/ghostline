@@ -20,8 +20,7 @@ const $ = (id) => document.getElementById(id);
 
 /* ---------- theme & logo assets ---------- */
 const storedTheme = localStorage.getItem("clef-theme");
-const initialTheme =
-  storedTheme || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+const initialTheme = storedTheme || "dark";
 document.documentElement.setAttribute("data-theme", initialTheme);
 
 function setLogo(theme) {
@@ -718,6 +717,13 @@ function bindControls() {
   const lockBtn = $("btn-lock-session");
   if (lockBtn) {
     lockBtn.addEventListener("click", () => lockDashboard());
+  }
+
+  const skipBtn = $("auth-skip-btn");
+  if (skipBtn) {
+    skipBtn.addEventListener("click", () => {
+      tryUnauthenticatedOrSessionBoot();
+    });
   }
 
   const thr = $("thr");

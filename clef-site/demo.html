@@ -43,15 +43,18 @@
             type="password"
             spellcheck="false"
             autocomplete="off"
-            placeholder="Enter password or bearer token…"
+            placeholder="Enter password (clef-live-2026)…"
             required
           />
           <button id="auth-submit-btn" type="submit">UNLOCK LIVE TRACES →</button>
         </div>
         <p class="auth-error" id="auth-error" role="alert" hidden></p>
-        <p class="auth-hint">
-          Verifies via <code>GET /api/info</code> with <code>Authorization: Bearer &lt;token&gt;</code> against the live guard service.
-        </p>
+        <div class="auth-skip-row">
+          <p class="auth-hint">
+            Operator password: <code>clef-live-2026</code> — or skip straight to the unauthenticated public demo:
+          </p>
+          <button id="auth-skip-btn" type="button" class="btn-lock">CONTINUE UNAUTHENTICATED DEMO →</button>
+        </div>
       </form>
     </div>
   </section>
@@ -68,7 +71,8 @@
       <span class="live-dot" aria-hidden="true"></span>
       <span id="source-chip-text">LIVE ENGINE · READ-ONLY TRACES</span>
     </span>
-    <button type="button" class="btn-lock" id="btn-lock-session" title="Lock console session">LOCK</button>
+    <a class="btn-lock" href="./index.html">← PAGE 1: STORY &amp; PAPERS</a>
+    <button type="button" class="btn-lock" id="btn-lock-session" title="Lock console session" hidden>LOCK</button>
     <div class="seg seg-theme" id="seg-theme" role="group" aria-label="Theme">
       <button type="button" class="seg-btn is-on" data-theme="dark">DARK</button>
       <button type="button" class="seg-btn" data-theme="light">LIGHT</button>
@@ -96,7 +100,7 @@
         <span class="label" id="live-engine-meta">QWEN2FORCAUSALLM · 24 LAYERS · d_model = 896 · PROBE LAYER 16</span>
       </div>
 
-      <h1 class="ex-h1">Test the model’s brain <span class="acc">in real time.</span></h1>
+      <h1 class="ex-h1">TEST THE MODEL’S BRAIN <span class="acc">IN REAL TIME.</span></h1>
       <p class="ex-lede">
         When an AI agent gets prompt-injected, the shell command it proposes can look routine on the
         surface—so text filters miss it. Instead of trusting words, we read <strong>Layer 16 of 24

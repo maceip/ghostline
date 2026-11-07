@@ -38,6 +38,26 @@ body.exhibit {
 .ex-title {
   margin-right: auto;
 }
+.live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: var(--label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+.auth-skip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
 .btn-lock {
   font-family: var(--mono);
   font-size: var(--label);
@@ -49,6 +69,10 @@ body.exhibit {
   border: 1px solid var(--border-visible);
   border-radius: 4px;
   cursor: pointer;
+  text-decoration: none;
+}
+.btn-lock[hidden] {
+  display: none !important;
 }
 .btn-lock:hover {
   color: var(--text-display);
@@ -92,6 +116,7 @@ body.exhibit {
   font-size: var(--display-xl);
   line-height: 0.96;
   letter-spacing: -0.01em;
+  text-transform: uppercase;
   color: var(--text-display);
   margin: 0 0 18px;
 }
@@ -232,7 +257,8 @@ body.exhibit {
   font-family: var(--mono);
   font-size: var(--caption);
   color: var(--text-display);
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 .ex-spec-prompt {
   font-size: var(--caption);
@@ -367,7 +393,8 @@ body.exhibit {
   color: var(--text-display);
   background: var(--surface-raised);
   border-radius: 4px;
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 .ex-tl-node-verdict {
   font-family: var(--display);

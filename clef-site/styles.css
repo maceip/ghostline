@@ -985,15 +985,17 @@ input[type="range"]:disabled { opacity: 0.4; }
 }
 .gate-thresh {
   position: absolute;
-  top: -8px;
-  bottom: -8px;
+  top: -22px;
+  bottom: -6px;
   width: 1px;
   background: var(--warning);
 }
 .gate-thresh span {
   position: absolute;
-  top: -15px;
-  left: -10px;
+  top: -18px;
+  left: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
   font-family: var(--mono);
   font-size: var(--label);
   letter-spacing: 0.06em;
@@ -1631,7 +1633,11 @@ img.brand-mark-mobile {
   font-family: var(--mono);
   font-size: var(--caption);
   color: var(--text-display);
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.foot-wordmark-img {
+  display: none;
 }
 .tl-prompt-task {
   font-size: var(--caption);
@@ -1942,6 +1948,7 @@ img.brand-mark-mobile {
   display: grid;
   grid-template-columns: repeat(24, 1fr);
   gap: 3px;
+  margin-top: 22px;
   margin-bottom: 8px;
 }
 .gate-seg-block {
