@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Doto:wght@100..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css?v=2" />
-  <link rel="stylesheet" href="./exhibit.css?v=cards" />
+  <link rel="stylesheet" href="./exhibit.css?v=acts2" />
   <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
 </head>
 <body class="exhibit">
@@ -24,92 +24,204 @@
 
   <main class="ex-steps">
 
+    <!-- 0 · the only thing that happens on load: nothing -->
+    <section class="ex-step is-first" id="step-0" data-state="idle">
+      <button class="ex-zero" id="act-0" type="button">
+        <span class="ex-zero-n">0</span>
+        <span class="ex-zero-t">WAKE IT UP</span>
+      </button>
+      <div class="ex-body">
+        <h2>Nothing has happened yet.</h2>
+        <p>
+          Press zero. A model on this machine loads and says hello — from an
+          empty context. It knows nothing about you. Watch it guess anyway.
+        </p>
+        <div class="ex-out" id="out-0" hidden>
+          <pre class="ex-quote" id="msg-0"></pre>
+          <dl class="ex-facts" id="facts-0">
+            <div><dt>about you</dt><dd>0 tokens</dd></div>
+            <div><dt>prefill</dt><dd id="f0-pre">—</dd></div>
+            <div><dt>decode</dt><dd id="f0-dec">—</dd></div>
+          </dl>
+        </div>
+      </div>
+    </section>
+
     <!-- 1 -->
-    <section class="ex-step" id="step-1">
+    <section class="ex-step" id="step-1" data-state="locked">
       <p class="ex-num">1</p>
       <div class="ex-body">
-        <h2>We load Qwen.</h2>
+        <h2>Open the checkpoint.</h2>
         <p>
-          Your model is already on this machine. We open the checkpoint and read
-          its structure from the weights themselves — no config, no guesswork.
+          Two files on this machine are about to be opened: the model’s
+          weights, and the calibrated directions stored beside them.
         </p>
-        <dl class="ex-facts" id="facts-model">
-          <div><dt>model</dt><dd id="fact-arch">connecting…</dd></div>
-          <div><dt>layers</dt><dd id="fact-layers">—</dd></div>
-          <div><dt>residual width</dt><dd id="fact-width">—</dd></div>
-          <div><dt>probe layer</dt><dd id="fact-probe">—</dd></div>
-        </dl>
+        <p class="ex-sub">WHAT GETS OPENED</p>
+        <ul class="ex-paths">
+          <li>~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/7ae55760…/</li>
+          <li>~/zune-code/qwen-clef-repe-guard/artifacts/repe_vectors_qwen2_5_0_5b.safetensors</li>
+        </ul>
+        <p>
+          Press, and the engine reports the structure it read from the weights
+          themselves — layers, width, how the matrices are quantized. No
+          config file is involved.
+        </p>
+        <button class="ex-act" id="act-1" type="button" disabled>1 · OPEN THE CHECKPOINT</button>
+        <div class="ex-out" id="out-1" hidden>
+          <dl class="ex-facts">
+            <div><dt>model</dt><dd id="f1-arch">—</dd></div>
+            <div><dt>layers</dt><dd id="f1-layers">—</dd></div>
+            <div><dt>residual width</dt><dd id="f1-width">—</dd></div>
+            <div><dt>probe layer</dt><dd id="f1-probe">—</dd></div>
+            <div><dt>weights</dt><dd id="f1-quant">—</dd></div>
+          </dl>
+        </div>
       </div>
     </section>
 
     <!-- 2 -->
-    <section class="ex-step" id="step-2">
+    <section class="ex-step" id="step-2" data-state="locked">
       <p class="ex-num">2</p>
       <div class="ex-body">
-        <h2>We learn what harm looks like.</h2>
+        <h2>Measure the three directions.</h2>
         <p>
-          Representation engineering. Three directions — destruction, theft,
-          exfiltration — pulled straight out of the weights. When a tool call
-          runs, its hidden state is measured against them at the probe layer.
+          The method is from the literature: representation engineering
+          measures concepts as <em>directions</em> in the model’s own space —
+          Zou et al.,
+          <a href="https://arxiv.org/abs/2310.01405">arXiv:2310.01405</a>,
+          demonstrated there on honesty, harmlessness, and power-seeking.
         </p>
-        <dl class="ex-facts">
-          <div><dt>directions</dt><dd>3</dd></div>
-          <div><dt>calibration</dt><dd id="fact-cal">—</dd></div>
-        </dl>
+        <p>
+          The three axes here are ours, from the calibration set:
+          <strong>destruction · theft · exfiltration</strong>. Press, and one
+          harmless call runs through the model. Its hidden state gets measured
+          against the three axes. Those numbers are the raw output.
+        </p>
+
+        <!-- miniature: not to scale, not exhaustive. the pieces for later. -->
+        <figure class="ex-fig">
+          <svg viewBox="0 0 560 200" class="ex-svg" role="img"
+               aria-label="Sketch: tokens rise through a stack of layers; at layer 16 the hidden state is read and measured against three axes.">
+            <!-- layer stack -->
+            <g stroke="#1a1a1a" stroke-width="1.2" fill="none">
+              <rect x="150" y="16" width="120" height="18" rx="3"/>
+              <rect x="150" y="42" width="120" height="18" rx="3"/>
+              <rect x="150" y="68" width="120" height="18" rx="3"/>
+              <rect x="150" y="94" width="120" height="18" rx="3"/>
+              <rect x="150" y="120" width="120" height="18" rx="3" stroke="#D71921" stroke-width="2"/>
+              <rect x="150" y="146" width="120" height="18" rx="3"/>
+            </g>
+            <text x="150" y="10" class="svg-lab">the model — 24 layers</text>
+            <text x="278" y="118" class="svg-lab" fill="#D71921">probe · layer 16</text>
+
+            <!-- tokens rising -->
+            <path d="M120 175 L120 30" stroke="#1a1a1a" stroke-width="1.2" fill="none"
+                  marker-end="url(#ar)"/>
+            <text x="60" y="188" class="svg-lab">the call’s tokens</text>
+
+            <!-- hidden state -->
+            <circle cx="210" cy="129" r="5" fill="#1a1a1a"/>
+            <text x="60" y="120" class="svg-lab">hidden state</text>
+            <text x="60" y="133" class="svg-lab">(one vector)</text>
+            <path d="M118 128 L202 129" stroke="#1a1a1a" stroke-width="1.2" fill="none"
+                  marker-end="url(#ar)"/>
+
+            <!-- three axes -->
+            <g stroke-width="1.6" fill="none">
+              <path d="M340 129 L420 95" stroke="#D71921" marker-end="url(#arr)"/>
+              <path d="M340 129 L428 129" stroke="#C9971F" marker-end="url(#arr2)"/>
+              <path d="M340 129 L420 165" stroke="#4A9E5C" marker-end="url(#arr3)"/>
+            </g>
+            <path d="M215 129 L338 129" stroke="#1a1a1a" stroke-width="1.2" stroke-dasharray="3 3"/>
+            <text x="430" y="94" class="svg-lab">destruction</text>
+            <text x="438" y="133" class="svg-lab">theft</text>
+            <text x="430" y="170" class="svg-lab">exfiltration</text>
+            <text x="340" y="196" class="svg-lab">measured against the three axes</text>
+
+            <defs>
+              <marker id="ar" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+                <path d="M0 0 L7 3.5 L0 7" fill="none" stroke="#1a1a1a" stroke-width="1.2"/>
+              </marker>
+              <marker id="arr" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+                <path d="M0 0 L7 3.5 L0 7" fill="none" stroke="#D71921" stroke-width="1.6"/>
+              </marker>
+              <marker id="arr2" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+                <path d="M0 0 L7 3.5 L0 7" fill="none" stroke="#C9971F" stroke-width="1.6"/>
+              </marker>
+              <marker id="arr3" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+                <path d="M0 0 L7 3.5 L0 7" fill="none" stroke="#4A9E5C" stroke-width="1.6"/>
+              </marker>
+            </defs>
+          </svg>
+          <figcaption class="ex-sub">NOT TO SCALE · THE PIECES YOU NEED FOR THE NEXT STEPS</figcaption>
+        </figure>
+
+        <button class="ex-act" id="act-2" type="button" disabled>2 · MEASURE THE DIRECTIONS</button>
+        <div class="ex-out" id="out-2" hidden>
+          <div class="ex-bars" id="bars-2"></div>
+          <p class="knob-hint">live cluster scores from one forward pass · destruction · theft · exfiltration</p>
+        </div>
       </div>
     </section>
 
     <!-- 3 -->
-    <section class="ex-step" id="step-3">
+    <section class="ex-step" id="step-3" data-state="locked">
       <p class="ex-num">3</p>
       <div class="ex-body">
-        <h2>You tell us the filter.</h2>
+        <h2>You set the filter.</h2>
         <p>
-          Type the tool call you want checked. We don’t run it. We read it.
+          Type the tool call you want checked. Nothing is executed — the
+          words are read by the model, not run.
         </p>
         <div class="ex-play">
           <input id="ex-input" type="text" spellcheck="false"
-                 placeholder="git status --short" autocomplete="off" />
-          <button id="ex-play-btn" type="button">4 · RUN INFERENCE</button>
+                 placeholder="git status --short" autocomplete="off" disabled />
+          <button id="act-3" type="button" disabled>3 · USE THIS FILTER</button>
         </div>
-        <p class="knob-hint" id="run-note">The button runs one forward pass on the engine above. Nothing is executed.</p>
+        <div class="ex-out" id="out-3" hidden>
+          <p class="ex-runstatus is-ok">filter locked</p>
+        </div>
       </div>
     </section>
 
     <!-- 4 -->
-    <section class="ex-step" id="step-4">
+    <section class="ex-step" id="step-4" data-state="locked">
       <p class="ex-num">4</p>
       <div class="ex-body">
-        <h2>We run inference.</h2>
+        <h2>Run inference.</h2>
         <p>
-          One forward pass over the call. No second model. No judge. The
-          residual stream is pooled over the call itself — not the prompt around
-          it.
+          One forward pass over the call. The reading lands on the token the
+          model <em>means</em> it with — that is the one nobody shows you.
         </p>
-        <p class="ex-runstatus" id="ex-status">waiting for a filter</p>
+        <button class="ex-act" id="act-4" type="button" disabled>4 · RUN INFERENCE</button>
+        <div class="ex-out" id="out-4" hidden>
+          <p class="ex-tokens" id="tok-4"></p>
+          <dl class="ex-facts">
+            <div><dt>harm cosine</dt><dd id="f4-cos">—</dd></div>
+            <div><dt>baseline</dt><dd id="f4-base">—</dd></div>
+            <div><dt>excess</dt><dd id="f4-excess">—</dd></div>
+            <div><dt>meaning at token</dt><dd id="f4-tok">—</dd></div>
+          </dl>
+        </div>
       </div>
     </section>
 
     <!-- 5 -->
-    <section class="ex-step" id="step-5">
+    <section class="ex-step" id="step-5" data-state="locked">
       <p class="ex-num">5</p>
       <div class="ex-body">
-        <h2>Here’s which way it points.</h2>
+        <h2>Pull the trace.</h2>
         <p>
-          The reading at the probe layer, minus the baseline your own prompt
-          carries. Above the line, we refuse the call before it runs.
+          The same call, read layer by layer — with the prompt’s own mood
+          subtracted. What is left is the call’s intent. Above the line, it
+          never runs.
         </p>
-        <div class="ex-result" id="ex-result" hidden>
-          <p class="ex-verdict" id="ex-verdict">—</p>
-          <dl class="ex-facts" id="ex-readout">
-            <div><dt>reading</dt><dd id="r-cos">—</dd></div>
-            <div><dt>baseline</dt><dd id="r-base">—</dd></div>
-            <div><dt>excess</dt><dd id="r-excess">—</dd></div>
-            <div><dt>source</dt><dd id="r-src">—</dd></div>
-          </dl>
+        <button class="ex-act" id="act-5" type="button" disabled>5 · PULL THE TRACE</button>
+        <div class="ex-out" id="out-5" hidden>
+          <p class="ex-verdict" id="f5-verdict">—</p>
           <div id="spine"></div>
-          <p class="knob-hint">harm cosine by depth · the probe sits at layer 16</p>
-          <p class="ex-reason" id="ex-reason"></p>
+          <p class="knob-hint">harm cosine by depth · probe at layer 16 · raw vs baseline-subtracted</p>
+          <p class="ex-reason" id="f5-reason"></p>
         </div>
       </div>
     </section>
@@ -118,9 +230,9 @@
 
   <footer class="ex-foot">
     <a class="label" href="./index.html">← THE STORY</a>
-    <p class="label" id="source-chip">…</p>
+    <p class="label" id="src-chip">…</p>
   </footer>
 
-  <script type="module" src="./js/exhibit.js?v=paper"></script>
+  <script type="module" src="./js/exhibit.js?v=acts2"></script>
 </body>
 </html>
