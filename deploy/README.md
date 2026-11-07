@@ -705,6 +705,34 @@ The Mac has to be awake and on the network.  `caffeinate` can hold it
 awake; Tailscale reconnects by itself.  A real public deployment still
 wants the cloud Mac.
 
+### If the tailnet breaks DNS
+
+Measured on this tailnet, and worth knowing before it costs an afternoon:
+Tailscale's DNS proxy answers *every* query on the Mac, and if the tailnet
+has **no global resolvers configured** it has nowhere to forward an
+external name — so the whole machine loses DNS, not just the tailnet:
+
+```
+$ dig @100.100.100.100 github.com
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL
+$ curl https://github.com
+curl: (6) Could not resolve host
+```
+
+The durable fix is in the tailnet's admin console: **DNS → Global
+nameservers** (8.8.8.8 and 1.1.1.1).  Then MagicDNS and external names
+both work, on every device.
+
+The local stopgap, on the affected machine only, is:
+
+```bash
+tailscale set --accept-dns=false      # back to the system's resolvers
+```
+
+That restores external DNS immediately, at the cost of the tailnet's
+*names* not resolving on that machine — the site is still reachable at its
+`100.x` address, which is how the edge is bound anyway.
+
 ## Troubleshooting
 
 ### Health checks
