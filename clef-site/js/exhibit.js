@@ -12,9 +12,9 @@ import { hydrateIcons } from "./icons.js";
 hydrateIcons();
 
 /* ---------- theme ---------- */
-const stored = localStorage.getItem("clef-theme");
-const initialTheme =
-  stored || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+// This page is the paper treatment: light · cream · gray bands, always.
+// Force the light token layer so instruments read dark ink on those bands.
+const initialTheme = "light";
 document.documentElement.setAttribute("data-theme", initialTheme);
 
 function setLogo(theme) {
