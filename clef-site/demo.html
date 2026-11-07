@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Doto:wght@100..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css?v=2" />
-  <link rel="stylesheet" href="./exhibit.css?v=acts2" />
+  <link rel="stylesheet" href="./exhibit.css?v=session" />
   <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
 </head>
 <body class="exhibit">
@@ -85,17 +85,16 @@
       <div class="ex-body">
         <h2>Measure the three directions.</h2>
         <p>
-          The method is from the literature: representation engineering
-          measures concepts as <em>directions</em> in the model’s own space —
-          Zou et al.,
+          Harm is a direction in the model’s own space, not a word list.
+          The three axes here — <strong>destruction · theft · exfiltration</strong>
+          — are ours, from the calibration set. The method is Zou et al.,
           <a href="https://arxiv.org/abs/2310.01405">arXiv:2310.01405</a>,
           demonstrated there on honesty, harmlessness, and power-seeking.
         </p>
         <p>
-          The three axes here are ours, from the calibration set:
-          <strong>destruction · theft · exfiltration</strong>. Press, and one
-          harmless call runs through the model. Its hidden state gets measured
-          against the three axes. Those numbers are the raw output.
+          Press, and one harmless call runs through the model. Its hidden
+          state gets measured against the three axes. Those numbers are the
+          raw output.
         </p>
 
         <!-- miniature: not to scale, not exhaustive. the pieces for later. -->
@@ -170,8 +169,8 @@
       <div class="ex-body">
         <h2>You set the filter.</h2>
         <p>
-          Type the tool call you want checked. Nothing is executed — the
-          words are read by the model, not run.
+          Type the tool call you want checked. We never run it — the model
+          reads it.
         </p>
         <div class="ex-play">
           <input id="ex-input" type="text" spellcheck="false"
@@ -233,6 +232,6 @@
     <p class="label" id="src-chip">…</p>
   </footer>
 
-  <script type="module" src="./js/exhibit.js?v=acts2"></script>
+  <script type="module" src="./js/exhibit.js?v=session"></script>
 </body>
 </html>
