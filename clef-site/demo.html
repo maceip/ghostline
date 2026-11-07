@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Doto:wght@100..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css?v=2" />
-  <link rel="stylesheet" href="./exhibit.css?v=quiet" />
+  <link rel="stylesheet" href="./exhibit.css?v=chat" />
   <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
 </head>
 <body class="exhibit">
@@ -35,9 +35,11 @@
         </p>
         <button class="ex-act" id="act-0" type="button">0 · WAKE IT UP</button>
         <div class="ex-out from-llm" id="out-0" hidden>
-          <span class="llm-tag" id="tag-0">FROM QWEN</span>
-          <div class="ex-tokstrip" id="tokstrip-0"></div>
-          <pre class="ex-quote" id="msg-0"></pre>
+          <div class="llm-chat">
+            <span class="llm-tag" id="tag-0">FROM QWEN</span>
+            <div class="ex-tokstrip" id="tokstrip-0"></div>
+            <pre class="ex-quote" id="msg-0"></pre>
+          </div>
           <dl class="ex-facts" id="facts-0">
             <div><dt>about you</dt><dd>0 tokens</dd></div>
             <div><dt>prefill</dt><dd id="f0-pre">—</dd></div>
@@ -184,8 +186,7 @@
           model <em>means</em> it with — that is the one nobody shows you.
         </p>
         <button class="ex-act" id="act-4" type="button" disabled>4 · RUN INFERENCE</button>
-        <div class="ex-out from-llm" id="out-4" hidden>
-          <span class="llm-tag">FROM QWEN</span>
+        <div class="ex-out" id="out-4" hidden>
           <p class="ex-tokens" id="tok-4"></p>
           <div class="ex-meter" id="meter-4">
             <div class="ex-meter-track"><i id="meter-4-fill"></i><span class="ex-meter-thr"></span></div>
@@ -213,7 +214,6 @@
         </p>
         <button class="ex-act" id="act-5" type="button" disabled>5 · PULL THE TRACE</button>
         <div class="ex-out from-llm" id="out-5" hidden>
-          <span class="llm-tag">FROM QWEN</span>
           <p class="ex-verdict" id="f5-verdict">—</p>
           <div id="spine"></div>
           <p class="knob-hint">harm cosine by depth · probe at layer 16 · raw vs baseline-subtracted</p>
@@ -229,6 +229,6 @@
     <p class="label" id="src-chip">…</p>
   </footer>
 
-  <script type="module" src="./js/exhibit.js?v=quiet"></script>
+  <script type="module" src="./js/exhibit.js?v=chat"></script>
 </body>
 </html>

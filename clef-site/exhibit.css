@@ -412,8 +412,19 @@ body.exhibit {
   color: #7a746a;
 }
 
-/* ---- FROM QWEN: wherever the model's own mind is on display.
-   the fog carries the signal; one plain label, never a control shape. ---- */
+/* ---- the chat box: where the model actually speaks ---- */
+.llm-chat {
+  position: relative;
+  padding: 22px 20px 14px;
+  border-radius: 16px 16px 16px 4px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(124, 58, 237, 0.35);
+}
+.llm-chat .llm-tag {
+  position: absolute;
+  top: -22px;
+  left: 4px;
+}
 .from-llm {
   position: relative;
   margin-top: 40px;
@@ -433,19 +444,11 @@ body.exhibit {
   z-index: -1;
 }
 .llm-tag {
-  position: absolute;
-  top: 10px;
-  right: 14px;
-  z-index: 2;
   font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: #7c3aed;
-  background: none;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
   white-space: nowrap;
 }
 .llm-tag::before {
@@ -466,8 +469,12 @@ body.exhibit {
   50% { opacity: 0.35; }
 }
 .from-llm .ex-quote {
-  background: rgba(255, 255, 255, 0.6);
-  border-left-color: #7c3aed;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  border-radius: 0;
+  color: #2a1a4a;
 }
 .from-llm .ex-tokstrip i { background: #7c3aed; }
 
