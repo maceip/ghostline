@@ -191,6 +191,14 @@ check_no_secrets() {
   echo "no credential patterns committed"
 }
 
+# The public site states numbers ("17/18 findings blocked").  Those numbers
+# have to be the ones its own shipped dataset supports, or the page is
+# making a claim nothing backs.  This is pure Python, so it runs here as
+# well as on the Mac suite.
+check_site_claims() {
+  python3 evals/site_claims.py
+}
+
 # ===========================================================================
 printf '\n\n'
 printf '  zode — local verification\n'
@@ -205,6 +213,7 @@ run "library: in sync across platforms" check_library_sync
 run "python: all files compile"         check_python_compiles
 run "shell: syntax"                     check_shell_syntax
 run "security: no committed credentials" check_no_secrets
+run "site: the headline numbers match the data" check_site_claims
 run "release: workflow + installer"      check_release_tooling
 run "swift: every source parses"         check_swift_parses
 run "csharp: every source parses"        check_csharp_parses

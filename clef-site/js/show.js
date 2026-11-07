@@ -85,10 +85,31 @@ function freezeLayers(profile) {
 }
 buildLayers();
 
+/* ---------- admission ---------- */
+/*
+ * The guard admits a caller in one of two ways: the operator's bearer token,
+ * or a device-bound session.  A visitor of the public site has neither, so
+ * the page asks for a session before it reads anything.
+ *
+ * The session is a cookie the guard signs and binds to this browser, so it
+ * is not a credential anybody can copy into another browser.  The edge (not
+ * this page) is what decides whether the request is allowed at all; this is
+ * only the handshake that turns "a stranger" into "a visitor".
+ */
+async function admit() {
+  const res = await fetch("/api/session", {
+    method: "POST",
+    credentials: "same-origin",
+  });
+  if (!res.ok) throw new Error("session refused (" + res.status + ")");
+  return res.json();
+}
+
 /* ---------- real generation ---------- */
 async function generate(onToken, prompt) {
   const res = await fetch("/gen/v1/chat/completions", {
     method: "POST",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "local",
@@ -105,6 +126,10 @@ async function generate(onToken, prompt) {
       ],
     }),
   });
+  // A missing model server answers 404 (or 502 if the edge cannot reach it).
+  // Reading the body anyway would produce an empty pane that looks like a
+  // model that had nothing to say, so the status is checked first.
+  if (!res.ok) throw new Error("model server returned " + res.status);
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -129,16 +154,33 @@ async function generate(onToken, prompt) {
 
 /* ---------- real judgment ---------- */
 async function judge(cmd) {
-  const res = await fetch("/v1/guard/tool-call", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      prompt: "Ad-hoc proposal from the live show.",
-      tool_name: "shell",
-      tool_args: { cmd },
-      questions: [],
-    }),
-  });
+  const send = () =>
+    fetch("/v1/guard/tool-call", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "Ad-hoc proposal from the live show.",
+        tool_name: "shell",
+        tool_args: { cmd },
+        questions: [],
+      }),
+    });
+
+  let res = await send();
+  // 401 means the session is not (or no longer) good: the guard has an
+  // operator token configured and this browser has no live session, or the
+  // session expired.  Ask for one more and try exactly once — a guard that
+  // is genuinely refusing must not be retried into agreeing.
+  if (res.status === 401) {
+    try {
+      await admit();
+      res = await send();
+    } catch {
+      /* fall through to the error below */
+    }
+  }
+  if (!res.ok) throw new Error("guard returned " + res.status);
   return res.json();
 }
 
@@ -159,6 +201,55 @@ function addRow({ cmd, meaning, outcome, num }) {
 
 function escapeHtml(s) {
   return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/* Which token carried the signal.
+ *
+ * The guard does not only answer "how harmful" — it answers "which token".
+ * The token in the tool call that points hardest at harm is attributed to
+ * a cluster, and that token is the one worth showing: it is the difference
+ * between "this command scores badly" and "THIS word in it is why".
+ */
+function attribution(v) {
+  if (v.attribution_token_index == null) return "";
+  const tok = v.attribution_token && v.attribution_token !== "-"
+    ? ` "${v.attribution_token}"`
+    : "";
+  return ` · token ${v.attribution_token_index}${tok} · cluster ${v.attribution_cluster}`;
+}
+
+/* The live readings, so the lens can be changed without reading again. */
+const readings = [];
+
+/* Render one reading under the CURRENT lens.
+ *
+ * Two lenses over ONE reading, and neither of them invents anything.
+ *
+ * OBSERVE says what the call MEANS: it points at harm, or it does not.
+ * DETER adds what the ENGINE actually did with it — refused, or allowed.
+ * The engine's decision comes from the guard's own `allowed` field, which
+ * depends on the mode the guard was started in; this page does not switch
+ * that, and it does not pretend to.
+ *
+ * An earlier version of this row said "would run" in observe mode, which
+ * is not true of a guard running in enforce mode: it refused the call, so
+ * it did not run.  Both lenses now state only what is true.
+ */
+function renderReading(row, v) {
+  const harm = v.harm_excess != null && v.harm_excess >= 0.001;
+  const refused = !v.allowed;
+  const deterring = mode === "deter";
+  const verdict = harm ? "POINTS AT HARM" : "LOOKS BENIGN";
+  const engine = deterring
+    ? (refused ? "the engine refused it" : "the engine allowed it")
+    : "observe";
+  row.className = "tape-row " + (refused || harm ? "is-flag" : "is-pass");
+  row.querySelector(".t-mean").textContent =
+    harm ? "this points at harm" : "this looks benign";
+  row.querySelector(".t-out").innerHTML =
+    `${verdict} · ${engine}` +
+    `<span class="t-num">excess ${fmt(v.harm_excess)} · cos ${fmt(v.harm_cosine)}` +
+    `${escapeHtml(attribution(v))}</span>`;
 }
 
 /* ---------- the sequence ---------- */
@@ -190,6 +281,14 @@ async function runSequence() {
   btn.disabled = true;
   $("tape").textContent = "";
 
+  // 0 — be admitted.  On a box with an operator token configured, a visitor
+  // has no credential until the guard issues this browser a session.
+  try {
+    await admit();
+  } catch {
+    $("glass-note").textContent = "no session — readings are unavailable";
+  }
+
   // 1 — a real model writes code
   $("chat-code").innerHTML = '<span class="caret"></span>';
   $("chat-note").textContent = "generating with Qwen3-4B on this machine…";
@@ -197,6 +296,7 @@ async function runSequence() {
   $("glass-note").textContent = "tokens streaming · 24 decoder layers";
   const wobble = setInterval(() => pulseLayers(true), 160);
   let text = "";
+  let generated = true;
   try {
     await generate((tok) => {
       text += tok;
@@ -204,17 +304,23 @@ async function runSequence() {
         escapeHtml(text) + '<span class="caret"></span>';
     }, "Fix the failing test in src/auth.rs. Show the patch.");
   } catch (err) {
+    generated = false;
     text = "(model unavailable — " + String(err).slice(0, 40) + ")";
     $("chat-code").textContent = text;
   }
   clearInterval(wobble);
   pulseLayers(false);
   $("chat-code").innerHTML = escapeHtml(text);
-  $("chat-note").textContent = "generated · " + text.split(/\s+/).length + " tokens";
+  // If the model did not answer, the pane says so.  It does not claim a
+  // token count for text that was never generated.
+  $("chat-note").textContent = generated
+    ? "generated · " + text.split(/\s+/).length + " tokens"
+    : "no model on this host";
   $("chat-note").classList.add("is-done");
 
   // 2 — the agent proposes actions; each is read BEFORE it would run
   $("glass-note").textContent = "reading proposed actions at layer 16";
+  readings.length = 0;
   for (const item of SCRIPT) {
     const row = addRow({
       cmd: item.cmd,
@@ -232,20 +338,8 @@ async function runSequence() {
       continue;
     }
     if (v.layer_profile) freezeLayers(v.layer_profile);
-    const harm = v.harm_excess != null && v.harm_excess >= 0.001;
-    const refused = !v.allowed;
-    const deterring = mode === "deter";
-    const verdict = refused
-      ? deterring ? "REFUSED" : "WOULD REFUSE"
-      : harm ? "FLAGGED" : "CLEARED";
-    const cls = refused || harm ? "is-flag" : "is-pass";
-    row.className = "tape-row " + cls;
-    row.querySelector(".t-mean").textContent =
-      harm ? "this points at harm" : "this looks benign";
-    row.querySelector(".t-out").innerHTML =
-      `${verdict} · ${deterring ? "deter" : "observe"} · ` +
-      (refused && deterring ? "did not run" : "would run") +
-      `<span class="t-num">excess ${fmt(v.harm_excess)} · cos ${fmt(v.harm_cosine)}</span>`;
+    readings.push({ row, v });
+    renderReading(row, v);
     await wait(700);
   }
 
@@ -269,20 +363,28 @@ async function readYour() {
   try {
     const v = await judge(cmd);
     if (v.layer_profile) freezeLayers(v.layer_profile);
-    $("yours-verdict").textContent = v.allowed
-      ? "it points benign"
-      : "it points at harm — we would refuse";
+    // The reading and the engine's decision are two different things, and
+    // the page says both.  A guard in monitor mode ALLOWS a harmful call
+    // and still reads it as harmful; a page that took `allowed` as the
+    // verdict would call that call benign.
+    const harm = v.harm_excess != null && v.harm_excess >= 0.001;
+    $("yours-verdict").textContent = harm
+      ? v.allowed
+        ? "it points at harm — the engine allowed it"
+        : "it points at harm — the engine refused it"
+      : "it looks benign";
     $("yours-verdict").className =
-      "yours-verdict " + (v.allowed ? "is-ok" : "is-blocked");
+      "yours-verdict " + (harm ? "is-blocked" : "is-ok");
     $("yours-nums").textContent =
-      `cosine ${fmt(v.harm_cosine)}   baseline ${fmt(v.harm_baseline)}   excess ${fmt(v.harm_excess)}`;
+      `cosine ${fmt(v.harm_cosine)}   baseline ${fmt(v.harm_baseline)}   excess ${fmt(v.harm_excess)}` +
+      attribution(v);
     $("yours-reason").textContent = v.reason || "";
     addRow({
       cmd,
       meaning: "your call — read live",
       outcome: {
-        text: v.allowed ? "CLEARED" : "REFUSED",
-        cls: v.allowed ? "is-pass" : "is-flag",
+        text: harm ? "POINTS AT HARM" : "LOOKS BENIGN",
+        cls: harm ? "is-flag" : "is-pass",
       },
       num: `excess ${fmt(v.harm_excess)}`,
     });
@@ -301,8 +403,12 @@ for (const btn of document.querySelectorAll("#seg-mode .seg-btn")) {
       b.classList.toggle("is-on", b === btn));
     $("mon-sub").innerHTML =
       mode === "deter"
-        ? "In <em>deter</em> mode the calls that point at harm are refused before anything runs. The readings below are live engine output."
-        : "In <em>observe</em> mode we only tell you what each call means. The readings below are live engine output.";
+        ? "In <em>deter</em> mode you see the reading and what the engine did with it: refused, or allowed. The readings below are live engine output."
+        : "In <em>observe</em> mode we show you what each call means — the reading, before the action. Switch to deter to see what the engine did with it.";
+    // The rows that were already read are re-read under the new lens —
+    // from the readings already in hand, so nothing is fetched twice and
+    // nothing changes its mind.
+    for (const r of readings) renderReading(r.row, r.v);
   });
 }
 $("btn-replay").addEventListener("click", runSequence);
@@ -314,7 +420,13 @@ $("ex-input").addEventListener("keydown", (e) => {
 /* source chip: who is answering */
 (async () => {
   try {
-    const r = await fetch("/api/info");
+    // /api/info is behind the same admission as the judgments, so the
+    // session has to come first — otherwise a protected guard answers 401
+    // and the chip would claim the engine is offline when it is merely
+    // locked.
+    await admit();
+    const r = await fetch("/api/info", { credentials: "same-origin" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
     const info = await r.json();
     $("src-chip").textContent =
       `[ LIVE ENGINE · ${info.architecture} · JUDGMENTS FROM THIS MACHINE ]`;

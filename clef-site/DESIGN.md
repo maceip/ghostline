@@ -1,5 +1,17 @@
 # CLEF — product site design
 
+> **STATUS — this describes the site as it stood on 2026-11-06 13:35, before
+> the rewrite.** The shipped pages are now a two-page site: `index.html` is
+> the story ("PEEK INTO THE MODEL'S BRAIN") and `demo.html` is **the glass
+> room**, where a real model streams code into the page while the guard
+> reads what each proposed action means. The wordmark is AGENTVECTOR.
+>
+> The reason this file is kept rather than rewritten: it is the record of
+> what the copy was derived from and why, and that derivation does not
+> change when the pages do. But where it describes a page, a wordmark, a
+> hero statement or a control that the rewrite removed, it is history.
+> **The pages themselves are the source of truth for what the site is.**
+
 Internal design doc for the website at `clef-site/`. Source of truth for name,
 copy, UX, and the new visualization component. Do not confuse with the Rust
 implementation, which is owned by the active feature agent and untouched here.
@@ -20,7 +32,7 @@ residual stream and tells you, before a tool call executes, whether the model
 - Hero statement: **READ THE RESIDUAL, NOT THE PROMPT.**
 - Deck: "Clef sits between your agent and its tools. Instead of grepping
   command strings or running a second LLM judge, it reads the model’s residual
-  stream at 68% depth and blocks destructive calls before they execute. Zero
+  stream at 67% depth and blocks destructive calls before they execute. Zero
   generation tokens. One forward pass."
 - Voice: direct, concrete systems engineering prose (matching the Rust/MLX
   guard documentation). No compliance buzzwords, pentest-scanner jargon
@@ -52,7 +64,8 @@ numbers from real captures and the repo's published benchmarks.
   one signal color as an interrupt.
 - **Security tooling dashboards** (Wireshark dark, Grafana, k9s): data density,
   tabular figures, a live tape of events.
-- **The residual stream itself**: 24 stacked layers, a probe at 68% depth,
+- **The residual stream itself**: 24 stacked layers, a probe at 67% depth
+  (layer 16 of 24),
   a harm axis written into geometry. This is the site's primary visual —
   not an illustration of it, the actual structure.
 
@@ -97,7 +110,7 @@ Hydrated via `data-icon="name"` + `data-icon-size`.
 ### Logo
 
 `assets/mark.svg` — the product's one real shape: the residual ring with the
-probe interrupt at 68% depth (gap in the ring, accent bead). Used in the
+probe interrupt at 67% depth (gap in the ring, accent bead). Used in the
 status strip and footer lockup; `assets/favicon.svg` is the favicon
 derivative. The wordmark is `CLEF` in Doto, tracked tight, always uppercase.
 
@@ -138,12 +151,12 @@ identity + the live console (their site has no interactive equivalent).
 1. **Hero · manifesto** — kicker `ACTIVATION-LEVEL TOOL-CALL GUARD`,
    H1 **READ THE RESIDUAL, NOT THE PROMPT.** (accent on the "not" clause),
    kicker `intercepted at layer 16 · before the shell runs`, deck with the
-   value prop (reads the residual stream at 68% depth → blocks destructive calls
+   value prop (reads the residual stream at 67% depth → blocks destructive calls
    before they execute → zero generation tokens → one forward pass), CTAs `OPEN
    THE CONSOLE` / `HOW IT WORKS`, hero stats, base64 stamp that decodes to the
    real decision rule, WebGL residual-stream field.
 2. **01 · WHY GEOMETRY** — three pillars as contrast pairs: `TOOL SPAN, NOT
-   PROMPT` (68% depth) · `PER-PROMPT BASELINE` (5 benign calls in the baseline)
+   PROMPT` (67% depth) · `PER-PROMPT BASELINE` (5 benign calls in the baseline)
    · `NO SECOND MODEL` (1 forward pass).
 3. **02 · MEASURED** — giant proof claim `17/18 harmful calls blocked. 0/18
    false positives.` with `*` footnote and console link; CLEF vs LLM-AS-JUDGE

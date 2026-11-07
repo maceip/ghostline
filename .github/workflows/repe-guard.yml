@@ -121,4 +121,10 @@ jobs:
 
       - name: evaluation scripts parse
         run: |
-          python3 -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ['evals/canonical_40.py','evals/real_upstream_20.py','evals/access_control.py','evals/session_guard.py','evals/caddy_edge.py']]; print('eval scripts parse')"
+          python3 -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ['evals/canonical_40.py','evals/real_upstream_20.py','evals/access_control.py','evals/session_guard.py','evals/caddy_edge.py','evals/site_claims.py']]; print('eval scripts parse')"
+
+      # The public site states numbers ("17/18 findings blocked").  Those
+      # numbers have to be the ones its own shipped dataset supports, or
+      # the page is making a claim nothing backs.
+      - name: the site's headline numbers match the shipped data
+        run: python3 evals/site_claims.py

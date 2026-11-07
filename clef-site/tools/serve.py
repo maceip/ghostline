@@ -168,10 +168,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(msg)
 
     model_id = "local"  # rewritten to the server's loaded path below
+    model_base = "http://127.0.0.1:8080"  # the generation model server
 
     def _proxy_model(self, method: str) -> None:
         """Forward /gen/* to the model server, streaming chunks as they land."""
-        target = "http://127.0.0.1:8080" + self.path[4:]  # strip "/gen"
+        target = self.model_base + self.path[4:]  # strip "/gen"
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
         if body and self.model_id:
@@ -263,9 +264,15 @@ def main() -> int:
     ap.add_argument("--guard", default="http://127.0.0.1:8090")
     ap.add_argument("--auth-token", default=None)
     ap.add_argument("--require-auth", action="store_true")
+    ap.add_argument(
+        "--model-server",
+        default=os.environ.get("MODEL_SERVER", "http://127.0.0.1:8080"),
+        help="the generation model server the /gen/* path is forwarded to",
+    )
     args = ap.parse_args()
 
     Handler.guard = args.guard
+    Handler.model_base = args.model_server
     Handler.auth_token = args.auth_token
     Handler.require_auth = bool(args.require_auth or args.auth_token)
     Handler.model_id = os.environ.get(
@@ -275,7 +282,7 @@ def main() -> int:
     with Server((args.bind, args.port), Handler) as httpd:
         print(
             f"CLEF site on http://{args.bind}:{args.port}/ "
-            f"(guard proxy → {args.guard})"
+            f"(guard proxy → {args.guard}, /gen → {args.model_server})"
         )
         try:
             httpd.serve_forever()

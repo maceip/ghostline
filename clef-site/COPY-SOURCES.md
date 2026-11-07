@@ -1,5 +1,17 @@
 # COPY-SOURCES.md — phrase provenance for `index.html`
 
+> **STATUS — this describes the site as it stood on 2026-11-06 13:35, before
+> the rewrite.** The shipped pages are now a two-page site: `index.html` is
+> the story ("PEEK INTO THE MODEL'S BRAIN") and `demo.html` is **the glass
+> room**, where a real model streams code into the page while the guard
+> reads what each proposed action means. The wordmark is AGENTVECTOR.
+>
+> The reason this file is kept rather than rewritten: it is the record of
+> what the copy was derived from and why, and that derivation does not
+> change when the pages do. But where it describes a page, a wordmark, a
+> hero statement or a control that the rewrite removed, it is history.
+> **The pages themselves are the source of truth for what the site is.**
+
 Every rhetorical phrase on the page is drawn from one of four sources. Product
 nouns and measured values are marked **[P]** (they describe this product and
 appear in no external copy). Connector words and grammar are the joinery.
@@ -63,7 +75,7 @@ appear in no external copy). Connector words and grammar are the joinery.
 | h2 accent `Backed by quantitative data.` | BT | exact (Evaluate outcome) |
 | label `EVIDENCE-BASED FINDINGS` | XB | exact |
 | body `The platform validates exploitable vulnerabilities and provides evidence-based findings to help you prioritize the most urgent findings to fix.` | XB | exact (Introduction) |
-| body `Readings pool the residual state over the tool-call span at 68% depth.` | [P] | product mechanics |
+| body `Readings pool the residual state over the tool-call span at 67% depth.` | [P] | product mechanics |
 | label `AN AUDIT TRAIL` | XB | “An audit trail of assessment activity” |
 | body `An audit trail of assessment activity.` | XB | exact |
 | body `Traces record inputs, outputs, model parameters, latency, token usage, and other metadata for every request.` | BT | exact (Instrument) |

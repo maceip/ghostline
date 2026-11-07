@@ -45,15 +45,15 @@ record() {
     fi
 }
 
-step "1/10 regenerate the project from repe-mods/"
+step "1/11 regenerate the project from repe-mods/"
 (cd "$ROOT" && python3 repe-compose.py && bash upgrade_generic_viz.sh)
-record "1/10 regenerate the project" $?
+record "1/11 regenerate the project" $?
 
-step "2/10 build and unit tests"
+step "2/11 build and unit tests"
 (cd "$PROJ" && cargo build --all-targets 2>&1 | tail -3 && cargo test --lib 2>&1 | grep -E "test result")
-record "2/10 build and unit tests" $?
+record "2/11 build and unit tests" $?
 
-step "3/10 start the upstream model server"
+step "3/11 start the upstream model server"
 if ! curl -s -o /dev/null "http://127.0.0.1:${UPSTREAM}/v1/models"; then
   (cd "$PROJ" && nohup uv run --python 3.12 --with mlx-lm mlx_lm.server \
       --model "$MODEL" --host 127.0.0.1 --port "$UPSTREAM" --temp 0.0 --max-tokens 128 \
@@ -64,9 +64,9 @@ if ! curl -s -o /dev/null "http://127.0.0.1:${UPSTREAM}/v1/models"; then
   done
 fi
 curl -s -o /dev/null -w "upstream http=%{http_code}\n" "http://127.0.0.1:${UPSTREAM}/v1/models"
-record "3/10 start the upstream model server" $?
+record "3/11 start the upstream model server" $?
 
-step "4/10 start the guard"
+step "4/11 start the guard"
 pkill -f "qwen-clef-repe-guard --port ${PORT}" 2>/dev/null || true
 sleep 2
 (cd "$PROJ" && nohup ./target/debug/qwen-clef-repe-guard --port "$PORT" \
@@ -78,40 +78,40 @@ for _ in $(seq 1 40); do
   sleep 2
 done
 grep -E "cached vectors match|no cached vectors" /tmp/guard_verify.log || true
-record "4/10 start the guard" $?
+record "4/11 start the guard" $?
 
-step "5/10 canonical benchmark (40 cases, held out from calibration)"
+step "5/11 canonical benchmark (40 cases, held out from calibration)"
 python3 "$ROOT/evals/canonical_40.py" "$PORT" | grep -E "^  =>|TOTAL"
-record "5/10 canonical benchmark" $?
+record "5/11 canonical benchmark" $?
 
-step "6/10 real upstream benchmark (10 goals, real model traffic)"
+step "6/11 real upstream benchmark (10 goals, real model traffic)"
 python3 "$ROOT/evals/real_upstream_20.py" "$PORT" | tail -3
-record "6/10 real upstream benchmark" $?
+record "6/11 real upstream benchmark" $?
 
-step "7/10 parity suites"
+step "7/11 parity suites"
 (cd "$ROOT" && timeout 900 uv run --python 3.12 --with mlx-lm python3 check_render_parity.py | tail -2)
-record "7/10 render parity" $?
+record "7/11 render parity" $?
 (cd "$PROJ" && timeout 1800 cargo run --release --quiet --bin gdn_probe -- "$CLEF" artifacts/gdn_probe >/dev/null 2>&1 \
   && timeout 900 uv run --python 3.12 --with mlx-lm python3 tools/compare_gdn.py | grep -E "layer 0|max_abs =|relative error|PASS|FAIL" | tail -6)
-record "7/10 GDN parity" $?
+record "7/11 GDN parity" $?
 (cd "$PROJ" && timeout 1800 uv run --python 3.12 --with torch --with mlx-lm python3 tools/joint_head_reference.py >/dev/null 2>&1 \
   && timeout 600 cargo run --quiet --bin joint_head_probe -- --input tools/fixtures/input --output tools/fixtures/rust >/dev/null 2>&1 \
   && timeout 900 uv run --python 3.12 --with torch --with mlx-lm python3 tools/joint_head_reference.py | tail -3)
-record "7/10 joint head parity" $?
+record "7/11 joint head parity" $?
 
-step "8/10 access control (auth, rate limit, proxy trust, header provenance, safety rail)"
+step "8/11 access control (auth, rate limit, proxy trust, header provenance, safety rail)"
 python3 "$ROOT/evals/access_control.py"
-record "8/10 access control" $?
+record "8/11 access control" $?
 
-step "9/10 device-bound sessions (admission, binding, forgery, operator token, restart)"
+step "9/11 device-bound sessions (admission, binding, forgery, operator token, restart)"
 python3 "$ROOT/evals/session_guard.py"
-record "9/10 device-bound sessions" $?
+record "9/11 device-bound sessions" $?
 
 # The public edge.  This one SKIPS rather than fails when the machine has
 # no Caddy with the rate_limit module — it needs a Caddy built with
 # xcaddy, which is a deployment-time dependency, not a build-time one.
 # Exit code 3 means "no such Caddy"; anything else is a real failure.
-step "10/10 the Caddy edge (rate limit by client IP, forged X-Forwarded-For)"
+step "10/11 the Caddy edge (rate limit by client IP, forged X-Forwarded-For)"
 edge_status=0
 python3 "$ROOT/evals/caddy_edge.py" || edge_status=$?
 if [ "$edge_status" -eq 3 ]; then
@@ -119,8 +119,12 @@ if [ "$edge_status" -eq 3 ]; then
     printf '           Build one with:  xcaddy build --with github.com/mholt/caddy-ratelimit --output /tmp/caddy-rl/caddy\n'
     printf '           then:  ZCODE_CADDY_BIN=/tmp/caddy-rl/caddy python3 evals/caddy_edge.py\n'
 elif [ "$edge_status" -ne 0 ]; then
-    record "10/10 the Caddy edge" "$edge_status"
+    record "10/11 the Caddy edge" "$edge_status"
 fi
+
+step "11/11 the site's headline numbers (claims vs the shipped data)"
+python3 "$ROOT/evals/site_claims.py"
+record "11/11 the site's headline numbers" $?
 
 if [ "${#FAILED_STEPS[@]}" -gt 0 ]; then
     printf '\n\033[1;31m%d step(s) FAILED:\033[0m\n' "${#FAILED_STEPS[@]}"
@@ -130,5 +134,4 @@ if [ "${#FAILED_STEPS[@]}" -gt 0 ]; then
     printf '\n\033[1mdone — the guard is still running on port %s\033[0m\n' "$PORT"
     exit 1
 fi
-
 printf '\n\033[1mdone — every step passed, and the guard is still running on port %s\033[0m\n' "$PORT"

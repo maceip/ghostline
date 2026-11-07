@@ -1,5 +1,17 @@
 # CLEF — design audit
 
+> **STATUS — this describes the site as it stood on 2026-11-06 13:35, before
+> the rewrite.** The shipped pages are now a two-page site: `index.html` is
+> the story ("PEEK INTO THE MODEL'S BRAIN") and `demo.html` is **the glass
+> room**, where a real model streams code into the page while the guard
+> reads what each proposed action means. The wordmark is AGENTVECTOR.
+>
+> The reason this file is kept rather than rewritten: it is the record of
+> what the copy was derived from and why, and that derivation does not
+> change when the pages do. But where it describes a page, a wordmark, a
+> hero statement or a control that the rewrite removed, it is history.
+> **The pages themselves are the source of truth for what the site is.**
+
 Nothing-design system audit of the CLEF product surface (`clef-site/`):
 marketing page, console, visualization component, logo, iconography, imagery,
 and tokens. Reviewed at 1280×800 against `nothing-design/references/tokens.md`
@@ -111,7 +123,7 @@ The **size and weight budget does not**.
   from a generic red dash.
 - **Lockup:** no composed logo/lockup asset for OG, docs, or external use.
 - Recommendation: derive a mark from the product's one real shape — the probe
-  ring on the residual stream (a ring with one bright bead at the 68% point) —
+  ring on the residual stream (a ring with one bright bead at the 67% point) —
   as a 2px monoline glyph. That becomes favicon, OG image, and the field's
   visual anchor.
 
