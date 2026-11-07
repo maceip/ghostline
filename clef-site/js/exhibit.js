@@ -424,6 +424,28 @@ async function act5() {
 
       if (ev && ev.layer_profile) {
         spine.render(ev);
+        // the peek: the curve draws itself, layer by layer
+        const path = document.querySelector("#spine svg path");
+        if (path) {
+          const len = path.getTotalLength();
+          path.style.strokeDasharray = `${len}`;
+          path.style.strokeDashoffset = `${len}`;
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              path.style.transition = "stroke-dashoffset 900ms var(--ease)";
+              path.style.strokeDashoffset = "0";
+            })
+          );
+        }
+        for (const dot of document.querySelectorAll("#spine svg circle")) {
+          dot.style.opacity = "0";
+          dot.style.transition = "opacity 300ms var(--ease)";
+        }
+        setTimeout(() => {
+          for (const dot of document.querySelectorAll("#spine svg circle")) {
+            dot.style.opacity = "";
+          }
+        }, 850);
       } else {
         $("spine").innerHTML =
           `<p class="knob-hint">no layer profile on the event stream for this run</p>`;
@@ -435,6 +457,11 @@ async function act5() {
       $("f5-verdict").className = "ex-verdict " + (v.allowed ? "is-ok" : "is-blocked");
       $("f5-reason").textContent = v.reason || "";
       reveal($("out-5"));
+      const tag5 = $("out-5").querySelector(".llm-tag");
+      if (tag5) tag5.textContent = "FROM QWEN · INSIDE ITS HEAD";
+      const panel = $("out-5");
+      panel.classList.add("is-peek");
+      setTimeout(() => panel.classList.remove("is-peek"), 1400);
     } catch (err) {
       fail("step-5", err);
     }

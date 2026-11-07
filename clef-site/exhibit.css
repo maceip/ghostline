@@ -460,8 +460,24 @@ body.exhibit {
 }
 .from-llm .ex-tokstrip i { background: #7c3aed; }
 
+/* the peek: fog deepens while the brain is being read */
+.from-llm.is-peek {
+  background: rgba(124, 58, 237, 0.14);
+  border-color: rgba(124, 58, 237, 0.55);
+}
+.from-llm.is-peek::before {
+  background: radial-gradient(closest-side, rgba(124, 58, 237, 0.22), transparent 82%);
+  filter: blur(16px);
+  inset: -22px;
+}
+.from-llm.is-peek .llm-tag {
+  animation: tag-pulse 700ms var(--ease) infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .llm-tag.is-writing { animation: none; }
+  .llm-tag.is-writing,
+  .from-llm.is-peek .llm-tag { animation: none; }
+  .from-llm.is-peek { transition: none; }
 }
 
 /* ---- motion: real values arriving ---- */
