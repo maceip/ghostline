@@ -591,6 +591,58 @@ than intended rather than absent. If you put a proxy on *another* host, add
 `--trust-proxy-any-peer`, and only then, if that proxy rewrites the header
 itself.
 
+### Known rough edge: two flags, one word apart
+
+**OPEN — this is the shape of a decision, not a decision.**  The concern
+raised on 2026-11-06: *people are not going to go for this.*  The reasoning
+is on the table here so the conversation starts from facts.
+
+What it costs today:
+
+- `--trust-proxy` trusts the forwarded address **only from a peer on this
+  machine**; `--trust-proxy-any-peer` trusts it from anywhere.  The two
+  differ by one word, and picking the wrong one is **silent**: every client
+  through that proxy collapses into one shared bucket.  The limit is
+  stricter than intended, not absent — so nothing errors, and the operator
+  just sees one bucket and does not know why.
+- The startup line says `trust_proxy=true` and stops there.  It does not
+  say *which* trust is in force, nor what the key ended up being.
+- `/api/info` does not expose the policy at all.
+
+The arrangement that catches people is the ordinary one: the guard in a
+container, the proxy in another container or another host.  That is
+`--trust-proxy-any-peer`, and nobody arrives there by reading the docs —
+they arrive there by reading the source.
+
+What it buys: a header is not evidence.  If the guard is reachable from the
+network and honours `X-Forwarded-For`, whoever is on the other end can put
+whatever they like in it, and the rate limiter — the thing standing between
+them and the model's time — can be walked around by rotating the header.
+
+The options worth arguing about:
+
+1. **Make the consequence visible.**  The startup line and `/api/info` name
+   the key source: *forwarded address (any peer)*, *forwarded address (local
+   peer only)*, or *socket peer — every client shares one bucket*.  An
+   operator who sees the third one knows immediately what to change.  This
+   is the cheapest fix and the one that removes the silent failure.
+2. **One flag with an explicit value** — `--trust-proxy=local|any|off` —
+   so the choice is visible in the process list and impossible to misread.
+3. **Name the proxy instead of trusting everyone** — `--trusted-proxy
+   10.0.0.5`, nginx's `set_real_ip_from` model.  The operator declares
+   which peer is allowed to speak for the client; the guard trusts the
+   header from that peer and nobody else.  It scales to several proxies
+   and it turns "does my proxy rewrite the header?" from folklore into a
+   declaration.
+4. **Change the default.**  With a bearer token configured the guard is
+   meant to sit behind an edge, so not trusting the header there is a
+   functional bug rather than a security posture.  Defaulting to *any*
+   peer when a token is present would be friendlier and slightly less safe
+   for a guard that is also directly reachable.
+
+Nothing here has been changed.  The behaviour that ships today is the
+conservative one, and it is what the access-control suite pins.
+
 Allowed responses carry the budget:
 
 ```
