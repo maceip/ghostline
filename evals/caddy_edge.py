@@ -34,6 +34,9 @@ Environment:
                      /tmp/caddy-rl/caddy, then to `caddy` on PATH if that
                      build has the module.
     ZCODE_CADDY_STOCK  a stock Caddy, used only to prove the refusal.
+    ZCODE_CADDYFILE  a different Caddyfile to test.  Used to prove that
+                     these checks FAIL on a broken configuration; the default
+                     is the shipped deploy/Caddyfile.
 """
 from __future__ import annotations
 
@@ -51,11 +54,22 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CADDYFILE = ROOT / "deploy" / "Caddyfile"
+# The shipped file.  ZCODE_CADDYFILE points it somewhere else so that a
+# DELIBERATELY BROKEN copy can be run against these same checks — a check
+# that has never been seen to fail is a check nobody knows what it proves.
+CADDYFILE = pathlib.Path(os.environ.get("ZCODE_CADDYFILE") or (ROOT / "deploy" / "Caddyfile"))
 
 # Small on purpose: the test has to be able to exhaust a budget quickly.
 TOOL_CALL_EVENTS = 3
 API_EVENTS = 5
+# The generation path has two budgets: one per client IP, and one shared by
+# everybody.  The first run below exhausts the per-IP one (the global one is
+# deliberately generous); a second run exhausts the global one (the per-IP one
+# is deliberately generous).  That way BOTH zones are proved live instead of
+# one of them hiding behind the other.
+GEN_EVENTS = 3
+GEN_GLOBAL_EVENTS = 50
+GEN_GLOBAL_EVENTS_SECOND_RUN = 2
 
 results: list[tuple[bool, str, str]] = []
 
@@ -122,6 +136,17 @@ def http_get(port: int, path: str, headers: dict[str, str] | None = None):
         conn.close()
 
 
+def http_post(port: int, path: str, body: bytes = b"{}"):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        conn.request("POST", path, body=body, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        payload = resp.read()
+        return resp.status, dict(resp.getheaders()), payload
+    finally:
+        conn.close()
+
+
 class Backend:
     """A tiny HTTP backend that counts what actually reached it."""
 
@@ -136,7 +161,7 @@ class Backend:
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
-            def do_GET(self):  # noqa: N802
+            def _record(self):
                 with backend._lock:
                     backend.hits[self.path] = backend.hits.get(self.path, 0) + 1
                     backend.last_headers = {k.lower(): v for k, v in self.headers.items()}
@@ -146,6 +171,15 @@ class Backend:
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+
+            def do_GET(self):  # noqa: N802
+                self._record()
+
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                self._record()
 
             def log_message(self, *args):
                 pass
@@ -210,6 +244,13 @@ def main() -> int:
         "RL_TOOL_CALL_WINDOW": "1m",
         "RL_API_EVENTS": str(API_EVENTS),
         "RL_API_WINDOW": "1m",
+        "RL_GEN_EVENTS": str(GEN_EVENTS),
+        "RL_GEN_WINDOW": "1m",
+        "RL_GEN_GLOBAL_EVENTS": str(GEN_GLOBAL_EVENTS),
+        "RL_GEN_GLOBAL_WINDOW": "1m",
+        # The generation model server.  The backend above stands in for it,
+        # so the request still has to arrive with its prefix stripped.
+        "GEN_PORT": str(backend_port),
     }
     envfile = tmp / "caddy.env"
     envfile.write_text("".join(f"{k}={v}\n" for k, v in env.items()))
@@ -274,11 +315,16 @@ def main() -> int:
         "CLEF_DOMAIN": "clef.example.com",
         "ACME_EMAIL": "ops@example.com",
         "GUARD_PORT": "8090",
+        "GEN_PORT": "8080",
         "SITE_ROOT": "/opt/zcode/site",
         "RL_TOOL_CALL_EVENTS": "10",
         "RL_TOOL_CALL_WINDOW": "1m",
         "RL_API_EVENTS": "60",
         "RL_API_WINDOW": "1m",
+        "RL_GEN_EVENTS": "6",
+        "RL_GEN_WINDOW": "1m",
+        "RL_GEN_GLOBAL_EVENTS": "20",
+        "RL_GEN_GLOBAL_WINDOW": "1m",
         "CADDY_ACCESS_LOG": str(tmp / "deployed-access.log"),
         "CADDY_STORAGE": str(tmp / "deployed-acme"),
     }
@@ -320,6 +366,8 @@ def main() -> int:
             pass
     tool_call = zones.get("tool_call", {})
     api = zones.get("api", {})
+    gen = zones.get("gen", {})
+    gen_global = zones.get("gen_global", {})
     check(
         tool_call.get("max_events") == 10
         and tool_call.get("window") == 60_000_000_000
@@ -337,11 +385,66 @@ def main() -> int:
         json.dumps(api),
     )
     check(
+        gen.get("max_events") == 6
+        and gen.get("window") == 60_000_000_000
+        and gen.get("match") == [{"path": ["/gen/*"]}]
+        and gen.get("key") == "{http.request.remote.host}",
+        "the generation zone is /gen/* at 6 a minute, keyed by client IP",
+        json.dumps(gen),
+    )
+    check(
+        gen_global.get("max_events") == 20
+        and gen_global.get("window") == 60_000_000_000
+        and gen_global.get("match") == [{"path": ["/gen/*"]}]
+        and gen_global.get("key") != "{http.request.remote.host}",
+        "the generation path also has ONE budget for everybody, not one per address",
+        f"key={gen_global.get('key')!r} — a static key is a single shared counter",
+    )
+    check(
         "/health" not in json.dumps(api.get("match", []))
-        and "/health" not in json.dumps(tool_call.get("match", [])),
+        and "/health" not in json.dumps(tool_call.get("match", []))
+        and "/health" not in json.dumps(gen.get("match", [])),
         "the liveness probe is in no zone, so it is never throttled",
         "/health is proxied but unthrottled",
     )
+
+    # The ORDER of the handlers is the part that is easy to get wrong and
+    # impossible to see by reading the Caddyfile.  Caddy applies `uri`
+    # before `rate_limit`, so a limiter that sits NEXT TO a path rewrite
+    # would be matched against the rewritten path — and a zone that does not
+    # match is skipped silently, which means no limit at all.  Measured: with
+    # the limiter inside the /gen handle, the zone never fired.
+    #
+    # In the adapted JSON the handlers of a route appear in the order they
+    # run, so the limiter has to come before the rewrite.
+    sequence: list[str] = []
+
+    def handler_order(node):
+        if isinstance(node, dict):
+            if "handler" in node:
+                sequence.append(node["handler"])
+            for value in node.values():
+                handler_order(value)
+        elif isinstance(node, list):
+            for value in node:
+                handler_order(value)
+
+    try:
+        handler_order(json.loads(adapted.stdout))
+    except json.JSONDecodeError:
+        pass
+    if "rate_limit" in sequence and "rewrite" in sequence:
+        check(
+            sequence.index("rate_limit") < sequence.index("rewrite"),
+            "the limiter runs BEFORE the path rewrite, so its zones match the original path",
+            f"order: rate_limit at {sequence.index('rate_limit')}, rewrite at {sequence.index('rewrite')}",
+        )
+    else:
+        check(
+            False,
+            "the limiter runs BEFORE the path rewrite, so its zones match the original path",
+            f"handlers seen: {sequence[:12]}",
+        )
 
     print("\n2. the edge, running the shipped configuration")
     caddy_proc = subprocess.Popen(
@@ -424,12 +527,91 @@ def main() -> int:
             "the liveness probe is never rate limited",
             f"codes={codes}",
         )
+
+        # The generation path.  This is the most expensive thing on the
+        # site: a 4B model writing code, token by token, for every visitor
+        # who loads the page.
+        backend.hits.clear()
+        codes = [http_post(edge_port, "/gen/v1/chat/completions")[0] for _ in range(GEN_EVENTS + 2)]
+        check(
+            codes.count(200) == GEN_EVENTS and codes.count(429) == 2,
+            f"the generation path allows {GEN_EVENTS} per minute and refuses the rest",
+            f"codes={codes}",
+        )
+        with backend._lock:
+            gen_hits = backend.hits.get("/v1/chat/completions", 0)
+        check(
+            gen_hits == GEN_EVENTS,
+            "the refused generations never reached the model — the load is shed at the edge",
+            f"the model server saw {gen_hits} of {len(codes)}",
+        )
+        check(
+            "/gen/v1/chat/completions" not in backend.hits,
+            "the /gen prefix is stripped before the request reaches the model server",
+            f"the model server saw {sorted(backend.hits)}",
+        )
     finally:
         caddy_proc.terminate()
         try:
             caddy_proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             caddy_proc.kill()
+
+    # ------------------------------------------------------------------
+    # The shared generation budget.
+    #
+    # A per-IP limit does not bound the total work: an attacker with a
+    # thousand addresses is a thousand buckets, and each of those buckets
+    # can still make the box generate code.  So the generation path has a
+    # second zone with a STATIC key — one counter for everybody.
+    #
+    # It is proved with a second edge whose per-IP budget is generous and
+    # whose shared budget is tiny.  If the shared zone were not live, the
+    # requests would sail through.
+    # ------------------------------------------------------------------
+    print("\n3. the shared generation budget (one counter for everybody)")
+    global_env = dict(env)
+    global_env["RL_GEN_EVENTS"] = "100"
+    global_env["RL_GEN_GLOBAL_EVENTS"] = str(GEN_GLOBAL_EVENTS_SECOND_RUN)
+    global_port = free_port()
+    global_env["CLEF_DOMAIN"] = f"http://127.0.0.1:{global_port}"
+    global_envfile = tmp / "caddy-global.env"
+    global_envfile.write_text("".join(f"{k}={v}\n" for k, v in global_env.items()))
+
+    global_caddy = subprocess.Popen(
+        [caddy, "run", "--config", str(CADDYFILE), "--envfile", str(global_envfile)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        if not wait_for_port(global_port):
+            print("the second caddy never opened its port", file=sys.stderr)
+            return 2
+        backend.hits.clear()
+        codes = [
+            http_post(global_port, "/gen/v1/chat/completions")[0]
+            for _ in range(GEN_GLOBAL_EVENTS_SECOND_RUN + 2)
+        ]
+        check(
+            codes.count(200) == GEN_GLOBAL_EVENTS_SECOND_RUN
+            and codes.count(429) == 2,
+            f"the whole site shares one generation budget of {GEN_GLOBAL_EVENTS_SECOND_RUN} a minute",
+            f"codes={codes}",
+        )
+        with backend._lock:
+            shared_hits = backend.hits.get("/v1/chat/completions", 0)
+        check(
+            shared_hits == GEN_GLOBAL_EVENTS_SECOND_RUN,
+            "the shared budget sheds the load too — the model server is not reached",
+            f"the model server saw {shared_hits} of {len(codes)}",
+        )
+    finally:
+        global_caddy.terminate()
+        try:
+            global_caddy.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            global_caddy.kill()
         httpd.shutdown()
 
     passed = sum(1 for ok, _, _ in results if ok)

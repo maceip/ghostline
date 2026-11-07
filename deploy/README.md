@@ -73,12 +73,14 @@ the box will run it with.
 | **Caddy** | `/opt/zcode/caddy/Caddyfile` | Terminates TLS, serves the static site at `/`, forwards the API to the guard. Holds no secret. |
 | **Caddy environment** | `/opt/zcode/caddy/caddy.env` | The `KEY=VALUE` file the Caddy service loads with `--envfile`. Domain, ports, paths and the ACME contact — no token. |
 | **The guard** | `com.zcode.guard` (launchd daemon) | The Rust binary from `qwen-clef-repe-guard/`. Scores tool calls against the calibrated RepE vectors and refuses the harmful ones. Listens on `127.0.0.1:8090`. |
-| **The upstream** | `com.zcode.upstream` (launchd daemon) | `mlx_lm.server` with `Qwen/Qwen2.5-0.5B-Instruct`. Listens on `127.0.0.1:8123`. |
+| **The upstream** | `com.zcode.upstream` (launchd daemon) | `mlx_lm.server` with `Qwen/Qwen2.5-0.5B-Instruct`. Listens on `127.0.0.1:8123`. This is the model the guard *reads*. |
+| **The generation model** | `com.zcode.gen` (launchd daemon) | `mlx_lm.server` with `mlx-community/Qwen3-4B-Instruct-2507-4bit`. Listens on `127.0.0.1:8080`. This is the model that *writes* the code in the site's glass room. Optional: `--no-gen-server` installs everything else without it, and the page then says the model is unavailable. |
 | **The static site** | `/opt/zcode/site` | A copy of `clef-site/` from the repository. |
 | **The token** | `/opt/zcode/guard.token` | The operator's bearer token, mode `0640`, owned by the `zcode` service user. **Only the guard reads it** — Caddy never sees it. |
 
-The guard and the upstream both listen on loopback only. **Caddy is the only
-thing the internet can reach**, and it holds no secret at all.
+The guard, the upstream and the generation model all listen on loopback
+only. **Caddy is the only thing the internet can reach**, and it holds no
+secret at all.
 
 ### How Caddy is started
 
@@ -108,9 +110,26 @@ bootout system/com.zcode.caddy`) or the two will fight over the ports.
 
 ```
 browser ──https──> Caddy ──http──> guard (127.0.0.1:8090) ──http──> mlx_lm (127.0.0.1:8123)
+                    │                    (reads activations with the 0.5B model)
+                    │
+                    ├── /gen/* ──http──> generation model (127.0.0.1:8080)
+                    │                    (writes code with the 4B model)
                     │
                     └── Cookie: zcode_sid + zcode_dev   ← a device-bound session
 ```
+
+`/gen/*` is the site's **glass room**: the page in which a real model writes
+a patch, token by token, while the guard reads what each proposed action
+means. It is a separate model server from the guard's upstream, because the
+two jobs are different — the guard READS activations with a 0.5B model, the
+glass room GENERATES code with a 4B one. The prefix exists so the two
+OpenAI-shaped path spaces (`/v1/*`) do not collide on one origin; Caddy
+strips it before proxying.
+
+The site asks for a session before it reads anything (`POST /api/session`),
+because a box with an operator token configured admits nobody else. That is
+the same gate a direct client meets — the browser just goes through the
+session instead of the token.
 
 There are **two** credentials, and they belong to different callers:
 
@@ -162,6 +181,7 @@ path never starts it.
 |---|---|---|
 | `CLEF_DOMAIN` | The public hostname this site serves. **Required** — no default, so a missing value fails loudly at parse time. | `clef.example.com` |
 | `GUARD_PORT` | The port the guard listens on. | `8090` (default) |
+| `GEN_PORT` | The port the generation model server listens on. | `8080` (default) |
 | `SITE_ROOT` | The directory holding the static site. | `/opt/zcode/site` (default) |
 | `ACME_EMAIL` | The contact address for the ACME account. **Required.** | `ops@example.com` |
 
@@ -375,9 +395,10 @@ already there and already has the module. It then uses that binary for both
 `caddy validate` and the launchd daemon — so the config that is validated is
 the config that is served.
 
-### The zone
+### The zones, and why the limiter sits ABOVE the routes
 
-`deploy/Caddyfile` carries two zones inside the `handle @guard` block:
+`deploy/Caddyfile` carries four zones, in a `rate_limit` block that sits at
+the **top level of the site block** — above every `handle`:
 
 ```caddyfile
 rate_limit {
@@ -399,13 +420,49 @@ rate_limit {
 		events       {$RL_API_EVENTS:60}
 		ipv6_prefix  64
 	}
+	zone gen {
+		match {
+			path /gen/*
+		}
+		key          {remote_host}
+		window       {$RL_GEN_WINDOW:1m}
+		events       {$RL_GEN_EVENTS:6}
+		ipv6_prefix  64
+	}
+	zone gen_global {
+		match {
+			path /gen/*
+		}
+		key          gen-global
+		window       {$RL_GEN_GLOBAL_WINDOW:1m}
+		events       {$RL_GEN_GLOBAL_EVENTS:20}
+	}
 }
 ```
 
-Two zones because the two halves cost very different amounts: `/v1/*` runs
-the model, `/api/*` is JSON and the event stream. The **static site and
-`/health` are in neither zone** — a visitor is never throttled for loading a
-page, and the liveness probe is never throttled.
+Four zones because the work costs very different amounts: `/v1/*` runs the
+model on a tool call, `/api/*` is JSON and the event stream, and `/gen/*`
+runs a 4B model to write code — the most expensive thing on the site. The
+**static site and `/health` are in no zone at all** — a visitor is never
+throttled for loading a page, and the liveness probe is never throttled.
+
+**Why the position matters.** Caddy applies directives in a fixed order, not
+in the order they are written: `uri` (which strips the `/gen` prefix) runs
+*before* `rate_limit`. A zone is matched against the path as it is *after*
+the rewrite, and a zone that does not match is skipped **silently** — which
+means no limit at all. Measured on this machine: with the limiter inside the
+`/gen` handle, the `/gen` zone never fired, and so did `/v1/*` and `/api/*`,
+because the stripped path `/v1/chat/completions` landed in the wrong zone
+instead. Putting the limiter above the routes means every zone sees the
+original path. `evals/caddy_edge.py` checks both the order in the adapted
+config and the behaviour at runtime.
+
+**Why `gen_global` exists.** A per-IP limit does not bound the *total*
+work: an attacker with a thousand addresses is a thousand buckets, and each
+can still make the box generate code. `gen_global` has a **static key**, so
+it is one counter for the whole site — which is what actually caps the GPU
+time a visitor can spend. Both zones match `/gen/*`, and the module refuses
+the request when *either* budget is spent.
 
 The limits live in the environment, so an operator can tune them without
 editing the file. The bootstrap writes them into `/opt/zcode/caddy/caddy.env`:
@@ -416,6 +473,10 @@ editing the file. The bootstrap writes them into `/opt/zcode/caddy/caddy.env`:
 | `RL_TOOL_CALL_WINDOW` | `1m` | the window for `/v1/*` |
 | `RL_API_EVENTS` | `60` | `/api/*` requests per IP per window |
 | `RL_API_WINDOW` | `1m` | the window for `/api/*` |
+| `RL_GEN_EVENTS` | `6` | `/gen/*` requests per IP per window |
+| `RL_GEN_WINDOW` | `1m` | the window for `/gen/*` |
+| `RL_GEN_GLOBAL_EVENTS` | `20` | `/gen/*` requests per window for **everybody at once** |
+| `RL_GEN_GLOBAL_WINDOW` | `1m` | the window for that shared budget |
 
 Notes on that configuration:
 
@@ -455,13 +516,23 @@ HTTP backend, and asserts that:
 3. the file is `caddy fmt` clean;
 4. **the configuration as the box will run it validates** — a bare
    hostname, `:443`, `/opt/zcode/site` — and the *adapted* config (the
-   thing that actually runs) really carries the two zones with the
-   documented limits, keyed by client IP, with `/health` in neither;
-5. a client that sends its own `X-Forwarded-For` has it **replaced** with
+   thing that actually runs) really carries the four zones with the
+   documented limits, keyed by client IP, with `/health` in none;
+5. the limiter runs **before** the path rewrite, so a zone's matcher sees
+   the original path (see above — this is the arrangement that works);
+6. a client that sends its own `X-Forwarded-For` has it **replaced** with
    the address Caddy saw, so it cannot choose its own bucket;
-6. the limit sheds load **before** the backend — the refused requests never
+7. the limit sheds load **before** the backend — the refused requests never
    arrive, and the `429` carries a `Retry-After`;
-7. the static site and `/health` are in no zone and are never throttled.
+8. the static site and `/health` are in no zone and are never throttled;
+9. the generation route is limited per client IP, the **shared** budget is
+   one counter for the whole site, and the `/gen` prefix is stripped before
+   the model server sees the request.
+
+The script also takes `ZCODE_CADDYFILE`, so a deliberately broken copy can
+be run against the same checks — a check that has never been seen to fail is
+a check nobody knows what it proves. Moving the limiter next to the rewrite
+fails eight of them.
 
 Check 4 is the one that matters for the box: everything else in this list
 runs the config with values chosen to make it runnable on a laptop, while
@@ -621,6 +692,7 @@ Restart one:
 sudo launchctl kickstart -k system/com.zcode.caddy
 sudo launchctl kickstart -k system/com.zcode.guard
 sudo launchctl kickstart -k system/com.zcode.upstream
+sudo launchctl kickstart -k system/com.zcode.gen
 ```
 
 Stop one (it comes back at the next boot, because `KeepAlive` is on and the
@@ -651,6 +723,8 @@ set, a bad `Content-Security-Policy`.
 | Symptom | Cause | What to do |
 |---|---|---|
 | `502` from the browser | The guard is not running, or it crashed. | `sudo launchctl print system/com.zcode.guard`, then `sudo tail -40 /var/log/zcode/guard.err.log`. |
+| The glass room says "no model on this host" | The generation model server is not running. | `sudo launchctl print system/com.zcode.gen`, then `sudo tail -40 /var/log/zcode/gen.err.log`. The rest of the site still works — only the pane that streams code is empty. |
+| Every reading says "ENGINE OFFLINE" | The browser has no session. The site asks for one on load; a cookie-stripping proxy would break that. | Check that `Set-Cookie` from `POST /api/session` survives the hop to the browser. |
 | `401` for a direct API call | Missing or wrong bearer token. | `sudo cat /opt/zcode/guard.token` and send `Authorization: Bearer <it>`. |
 | `429` | Over the per-IP rate limit. | Wait for `retry-after`, or raise `--rate-limit-rpm`. |
 | `413` | The request body is over 1 MB. | The API takes JSON probes, not uploads. |

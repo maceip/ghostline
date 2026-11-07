@@ -8,8 +8,9 @@
 #    2. Serves the static demo site (clef-site/) from the SAME ORIGIN as the
 #       API, so the browser never makes a cross-origin request and the
 #       guard never has to relax CORS.
-#    3. Rate limits by client IP, and forwards /api/*, /v1/* and /health to
-#       the local guard process.
+#    3. Rate limits by client IP, forwards /api/*, /v1/* and /health to the
+#       local guard process, and forwards /gen/* to the local generation
+#       model server.
 #
 #  Everything that differs per machine lives in the ENVIRONMENT, not in this
 #  file.  The service loads /opt/zcode/caddy/caddy.env (KEY=VALUE) before it
@@ -17,6 +18,10 @@
 #
 #    CLEF_DOMAIN   public hostname, e.g. clef.example.com   (required)
 #    GUARD_PORT    local port the guard listens on   (default 8090)
+#    GEN_PORT      local port the generation model server listens on
+#                  (default 8080).  This is the model that WRITES the code
+#                  in the site's glass room; the guard's own upstream is a
+#                  different, much smaller model.
 #    SITE_ROOT     directory holding the static site (default /opt/zcode/site)
 #    ACME_EMAIL    contact address for the ACME account        (required)
 #    RL_*          the edge rate limits (see the header below)
@@ -69,6 +74,27 @@
 #    RL_TOOL_CALL_WINDOW   /v1/* window              (default 1m)
 #    RL_API_EVENTS         /api/* per IP per window  (default 60)
 #    RL_API_WINDOW         /api/* window             (default 1m)
+#    RL_GEN_EVENTS         /gen/* per IP per window  (default 6)
+#    RL_GEN_WINDOW         /gen/* window             (default 1m)
+#    RL_GEN_GLOBAL_EVENTS  /gen/* per window for EVERYONE at once (default 20)
+#    RL_GEN_GLOBAL_WINDOW  that global window       (default 1m)
+#  ---------------------------------------------------------------------------
+#
+#  THE LIMITER SITS ABOVE THE ROUTES, NOT INSIDE ONE.  This is not a style
+#  choice; it is the only arrangement that works.
+#
+#  Caddy applies directives in a fixed order, not in the order they are
+#  written: `uri` (which strips a path prefix) runs BEFORE `rate_limit`.  A
+#  zone whose matcher names a path is therefore matched against the path as
+#  it is AFTER the rewrite — and a zone that does not match is silently
+#  skipped, which means NO LIMIT AT ALL.  Measured on this machine: a
+#  `match { path /gen/* }` zone behind a `uri strip_prefix /gen` never
+#  fires, while the same zone above the rewrite fires on every request.
+#
+#  So the rate_limit block below the header sits at the top level of the
+#  site block, ahead of every `handle`.  It sees the ORIGINAL request
+#  path, and each zone names the paths it covers.  Requests that match no
+#  zone — the static site, /health — pass through untouched.
 #  ---------------------------------------------------------------------------
 #
 #  The variables marked "required" above have NO default on purpose.  An
@@ -136,92 +162,149 @@
 	# Everything the browser asks the GUARD for:
 	#   /api/info          the model's facts
 	#   /api/events        the live telemetry stream (SSE)
+	#   /api/session       the admission handshake (a visitor's session)
 	#   /v1/guard/tool-call the tool-call probe
 	#   /health            the liveness probe
 	#
 	# Everything here is expensive enough to need an edge rate limit keyed
 	# by client IP.  See the header of this file and deploy/README.md —
-	# "Rate limiting belongs at THIS layer, keyed by IP".  The zones live
-	# INSIDE the handle block below, so they apply to the guarded routes
-	# and to nothing else: the static site is served outside it.
+	# "Rate limiting belongs at THIS layer, keyed by IP".
 	@guard path /api/* /v1/* /health
 
-	handle @guard {
-		# The edge rate limit, keyed by the address Caddy saw on the
-		# socket.  {remote_host} is that address — it is not a header, so
-		# a client cannot choose its own bucket by sending one.
-		#
-		# Two zones because the two halves cost very different amounts:
-		# /v1/* runs the model, /api/* is JSON and an event stream.  The
-		# static site and /health are in NEITHER zone, so a visitor
-		# loading the page is never throttled and the liveness probe is
-		# never throttled.
-		#
-		# ipv6_prefix 64 puts every address in an IPv6 /64 into ONE
-		# bucket, because a /64 is what an ISP hands to a household and
-		# cycling addresses inside it is free.  There is deliberately NO
-		# ipv4_prefix: masking IPv4 to a /24 would put an entire
-		# university or office NAT into one bucket and throttle every
-		# student behind it.
-		rate_limit {
-			zone tool_call {
-				match {
-					path /v1/*
-				}
-				key {remote_host}
-				window {$RL_TOOL_CALL_WINDOW:1m}
-				events {$RL_TOOL_CALL_EVENTS:10}
-				ipv6_prefix 64
+	# ---------------------------------------------------------------------
+	# THE EDGE LIMITER.
+	#
+	# It is HERE, above the routes, and not inside `handle @guard`, because
+	# of Caddy's directive order: `uri` runs before `rate_limit`, so a zone
+	# that lives next to a path rewrite would be matched against the
+	# REWRITTEN path and would never fire.  See the header.
+	#
+	# The zones are keyed by {remote_host} — the address Caddy saw on the
+	# socket.  It is not a header, so a client cannot choose its own bucket
+	# by sending one.
+	#
+	# There are three kinds of work, and they cost very different amounts:
+	#
+	#   tool_call  /v1/* runs the model on a tool call.
+	#   api        /api/* is JSON and an event stream.
+	#   gen        /gen/* runs a 4B model to WRITE CODE, token by token.
+	#              That is the most expensive thing on the site, so it gets
+	#              two budgets: one per client IP and one shared by
+	#              everybody.
+	#
+	# ipv6_prefix 64 puts every address in an IPv6 /64 into ONE bucket,
+	# because a /64 is what an ISP hands to a household and cycling
+	# addresses inside it is free.  There is deliberately NO ipv4_prefix:
+	# masking IPv4 to a /24 would put an entire university or office NAT
+	# into one bucket and throttle every student behind it.
+	# ---------------------------------------------------------------------
+	rate_limit {
+		zone tool_call {
+			match {
+				path /v1/*
 			}
-			zone api {
-				match {
-					path /api/*
-				}
-				key {remote_host}
-				window {$RL_API_WINDOW:1m}
-				events {$RL_API_EVENTS:60}
-				ipv6_prefix 64
-			}
+			key {remote_host}
+			window {$RL_TOOL_CALL_WINDOW:1m}
+			events {$RL_TOOL_CALL_EVENTS:10}
+			ipv6_prefix 64
 		}
+		zone api {
+			match {
+				path /api/*
+			}
+			key {remote_host}
+			window {$RL_API_WINDOW:1m}
+			events {$RL_API_EVENTS:60}
+			ipv6_prefix 64
+		}
+		zone gen {
+			match {
+				path /gen/*
+			}
+			key {remote_host}
+			window {$RL_GEN_WINDOW:1m}
+			events {$RL_GEN_EVENTS:6}
+			ipv6_prefix 64
+		}
+		# One budget for EVERYONE, on top of the per-IP one.  A per-IP
+		# limit alone does not bound the total work: an attacker with a
+		# thousand addresses is a thousand buckets.  This zone has a
+		# STATIC key, so it is one shared counter for the whole site —
+		# which is what actually caps the GPU time a visitor can spend.
+		zone gen_global {
+			match {
+				path /gen/*
+			}
+			key gen-global
+			window {$RL_GEN_GLOBAL_WINDOW:1m}
+			events {$RL_GEN_GLOBAL_EVENTS:20}
+		}
+	}
 
+	handle @guard {
+		# NO Authorization header is injected here, and that is deliberate.
+		#
+		# The guard accepts two credentials: the operator's bearer token,
+		# and a device-bound session cookie that a visitor gets from
+		# POST /api/session.  If this proxy injected the operator token
+		# on every request, the guard could not tell a visitor from the
+		# operator, and the session gate would be decorative.
+		#
+		# So the operator's token stays on the box — direct clients send
+		# it themselves — and the public path carries a session.
+		#
+		# The proxy passes cookies through untouched, which is what makes
+		# the session work: the browser sends zcode_sid and zcode_dev,
+		# and the guard checks that the pair belongs together.
+		#
+		# Cookies also have to survive the redirect from http to https,
+		# so do not strip them.
+
+		# X-Forwarded-For is NOT set here on purpose.  Caddy already
+		# replaces it with the address it saw on the socket, so a
+		# client that sends its own X-Forwarded-For gets it discarded
+		# rather than appended — which is exactly what the guard's
+		# right-most-XFF rule depends on.  Setting it here as well
+		# would be a second copy of the same value and Caddy warns
+		# about it.
+		#
+		# X-Real-IP is NOT a Caddy default, so this one earns its
+		# place: it is the address Caddy saw on the socket, which
+		# is what the access log and anything else downstream
+		# reads.  The guard does NOT read it — the guard keys its
+		# own backstop limiter on the right-most X-Forwarded-For
+		# entry above, which Caddy fills with the same address.
 		reverse_proxy 127.0.0.1:{$GUARD_PORT:8090} {
-			# NO Authorization header is injected here, and that is deliberate.
-			#
-			# The guard accepts two credentials: the operator's bearer token,
-			# and a device-bound session cookie that a visitor gets from
-			# POST /api/session.  If this proxy injected the operator token
-			# on every request, the guard could not tell a visitor from the
-			# operator, and the session gate would be decorative.
-			#
-			# So the operator's token stays on the box — direct clients send
-			# it themselves — and the public path carries a session.
-			#
-			# The proxy passes cookies through untouched, which is what makes
-			# the session work: the browser sends zcode_sid and zcode_dev,
-			# and the guard checks that the pair belongs together.
-			#
-			# Cookies also have to survive the redirect from http to https,
-			# so do not strip them.
-
-			# X-Forwarded-For is NOT set here on purpose.  Caddy already
-			# replaces it with the address it saw on the socket, so a
-			# client that sends its own X-Forwarded-For gets it discarded
-			# rather than appended — which is exactly what the guard's
-			# right-most-XFF rule depends on.  Setting it here as well
-			# would be a second copy of the same value and Caddy warns
-			# about it.
-			#
-			# X-Real-IP is NOT a Caddy default, so this one earns its
-			# place: it is the address Caddy saw on the socket, which
-			# is what the access log and anything else downstream
-			# reads.  The guard does NOT read it — the guard keys its
-			# own backstop limiter on the right-most X-Forwarded-For
-			# entry above, which Caddy fills with the same address.
 			header_up X-Real-IP {remote_host}
 
 			# Stream the response through, unbuffered, so the SSE endpoint
 			# (/api/events) arrives event by event instead of in one lump
 			# at the end.
+			flush_interval -1
+		}
+	}
+
+	# ---------------------------------------------------------------------
+	# THE GLASS ROOM: the model that writes the code on the page.
+	#
+	# The site's front page streams a real model's output, token by token,
+	# into the browser.  That model is a separate server from the guard:
+	# the guard reads activations with a small model, while this one
+	# GENERATES code with a 4B model.  It listens on 127.0.0.1 only and
+	# is reached exclusively through this route.
+	#
+	# The /gen prefix exists so the model server can keep its own
+	# OpenAI-shaped paths (/v1/chat/completions) without colliding with
+	# the guard's /v1/* on the same origin.  `uri strip_prefix` removes
+	# it before the request is proxied — and it runs AFTER the limiter
+	# above, which is why the limiter had to move up there.
+	# ---------------------------------------------------------------------
+	handle /gen/* {
+		uri strip_prefix /gen
+
+		reverse_proxy 127.0.0.1:{$GEN_PORT:8080} {
+			# Unbuffered, so the tokens arrive as the model produces
+			# them instead of in one lump at the end.
 			flush_interval -1
 		}
 	}

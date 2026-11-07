@@ -487,6 +487,10 @@ without a bearer token, so the public face is a reverse proxy in front of it:
 
 ```
 browser ──https──> Caddy ──http──> guard (127.0.0.1:8090) ──http──> mlx_lm (127.0.0.1:8123)
+                    │                    (reads activations with the 0.5B model)
+                    │
+                    ├── /gen/* ──http──> generation model (127.0.0.1:8080)
+                    │                    (writes the code in the site's glass room)
                     │
                     └── rate limit by client IP, before the request is proxied
 ```
@@ -518,11 +522,20 @@ in the guard. The edge limit sheds load before the model forward pass ever
 starts, and it keys on the address Caddy saw on the socket, so there is no
 forwarded header to forge.
 
-The zone is **already in `deploy/Caddyfile`** — two of them, one for the
-expensive `/v1/*` path and one for `/api/*`, with the static site and
-`/health` in neither so a visitor is never throttled for loading a page.
-The limits are environment variables (`RL_TOOL_CALL_EVENTS` and friends), so
-they can be tuned without editing the file.
+The zones are **already in `deploy/Caddyfile`** — one for the expensive
+`/v1/*` path, one for `/api/*`, and two for `/gen/*` (the page that streams a
+real model writing code): one per client IP and **one shared by everybody**,
+because a per-IP limit alone does not bound the total work. The static site
+and `/health` are in no zone at all, so a visitor is never throttled for
+loading a page. The limits are environment variables (`RL_TOOL_CALL_EVENTS`
+and friends), so they can be tuned without editing the file.
+
+The `rate_limit` block sits **above** the routes, not inside one, and that
+is not a style choice. Caddy applies `uri` — which strips the `/gen`
+prefix — *before* `rate_limit`, and a zone whose matcher no longer matches
+is skipped silently, which means no limit at all. Measured here: with the
+limiter next to the rewrite, the `/gen`, `/v1/*` and `/api/*` zones all
+stopped firing. `evals/caddy_edge.py` checks the order and the behaviour.
 
 One thing to know before the first deploy: **`rate_limit` is not a Caddyfile
 directive in the standard build.** It comes from the community module
@@ -537,8 +550,12 @@ Homebrew formula — it installs with `go install`.
 `python3 evals/caddy_edge.py` proves all of it against the **shipped**
 Caddyfile: it must load, a stock Caddy must refuse it, a forged
 `X-Forwarded-For` must be replaced with the real address, and the limit must
-shed load *before* the backend sees the request. The same check runs in CI,
-so a Caddyfile that would refuse to start on the box cannot be committed.
+shed load *before* the backend sees the request. It also checks the
+generation route — that `/gen/*` is limited per IP, that the shared budget
+is one counter for the whole site, that the prefix is stripped before the
+model server sees it, and that the limiter runs before the rewrite. The
+same check runs in CI, so a Caddyfile that would refuse to start on the box
+cannot be committed.
 The build command, the IPv6-prefix caveat and the tuning table are in
 `deploy/README.md`, under *Rate limiting belongs at THIS layer, keyed by IP*.
 

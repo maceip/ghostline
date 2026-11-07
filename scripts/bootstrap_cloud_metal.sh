@@ -68,25 +68,42 @@ CLEF_DOMAIN="${ZCODE_DOMAIN:-}"
 ACME_EMAIL="${ZCODE_ACME_EMAIL:-}"
 GUARD_PORT="${ZCODE_GUARD_PORT:-8090}"
 UPSTREAM_PORT="${ZCODE_UPSTREAM_PORT:-8123}"
+# The generation model server.  This is a SECOND, larger model: the guard
+# READS activations with the small model on UPSTREAM_PORT, while the site's
+# glass room has a 4B model WRITE code, token by token.  It is a separate
+# process with its own port, its own model and its own launchd label.
+GEN_PORT="${ZCODE_GEN_PORT:-8080}"
 RATE_LIMIT="${ZCODE_RATE_LIMIT:-30}"
 # The edge rate limit, in caddy.env.  /v1/* is the expensive path (it runs
-# the model); /api/* is JSON and the event stream.  The static site and
-# /health are in neither zone, so a visitor is never throttled for loading
-# a page and the liveness probe is never throttled.
+# the model); /api/* is JSON and the event stream; /gen/* is the most
+# expensive of all (a 4B model writing code), so it gets the tightest
+# budget — one per client IP and one shared by everybody.  The static site
+# and /health are in no zone at all, so a visitor is never throttled for
+# loading a page and the liveness probe is never throttled.
 RL_TOOL_CALL_EVENTS="${ZCODE_RL_TOOL_CALL_EVENTS:-10}"
 RL_TOOL_CALL_WINDOW="${ZCODE_RL_TOOL_CALL_WINDOW:-1m}"
 RL_API_EVENTS="${ZCODE_RL_API_EVENTS:-60}"
 RL_API_WINDOW="${ZCODE_RL_API_WINDOW:-1m}"
+RL_GEN_EVENTS="${ZCODE_RL_GEN_EVENTS:-6}"
+RL_GEN_WINDOW="${ZCODE_RL_GEN_WINDOW:-1m}"
+RL_GEN_GLOBAL_EVENTS="${ZCODE_RL_GEN_GLOBAL_EVENTS:-20}"
+RL_GEN_GLOBAL_WINDOW="${ZCODE_RL_GEN_GLOBAL_WINDOW:-1m}"
 MODE="${ZCODE_GUARD_MODE:-enforce}"
 THRESHOLD="${ZCODE_GUARD_THRESHOLD:-0.45}"
 MODEL_REPO="Qwen/Qwen2.5-0.5B-Instruct"
+# The generation model.  A 4-bit 4B instruct model: small enough to sit
+# next to the guard on a 24 GiB Mac, big enough to write a plausible patch.
+GEN_MODEL_REPO="${ZCODE_GEN_MODEL_REPO:-mlx-community/Qwen3-4B-Instruct-2507-4bit}"
 REPE_REL="qwen-clef-repe-guard/artifacts/repe_vectors_qwen2_5_0_5b.safetensors"
 SERVICE_USER="${ZCODE_SERVICE_USER:-zcode}"
 SERVICE_UID="${ZCODE_SERVICE_UID:-505}"
 MODEL_DIR_OVERRIDE="${ZCODE_MODEL_DIR:-}"
+GEN_MODEL_DIR_OVERRIDE="${ZCODE_GEN_MODEL_DIR:-}"
+GEN_ENABLED="${ZCODE_GEN_SERVER:-1}"
 CADDYFILE_SRC=""
 
 UPSTREAM_LABEL="com.zcode.upstream"
+GEN_LABEL="com.zcode.gen"
 GUARD_LABEL="com.zcode.guard"
 CADDY_LABEL="com.zcode.caddy"
 
@@ -122,6 +139,10 @@ bootstrap_cloud_metal.sh — provision a cloud macOS box for the MLX guard.
   --email <address>    the ACME contact address (required)
   --port <n>           the guard's port (default 8090)
   --upstream-port <n>  the mlx_lm server's port (default 8123)
+  --gen-port <n>       the generation model server's port (default 8080)
+  --no-gen-server      do not install the generation model server; the site's
+                       glass room then says the model is unavailable
+  --gen-model-dir <path>  use an existing generation model snapshot
   --rate-limit <n>     requests per minute per client IP (0 = unlimited)
   --mode <enforce|monitor>  the guard's mode (default enforce)
   --threshold <f>      the harm-cosine threshold (default 0.45)
@@ -156,6 +177,11 @@ while [ $# -gt 0 ]; do
         --port=*)        GUARD_PORT="${1#*=}"; shift ;;
         --upstream-port) UPSTREAM_PORT="${2:-}"; shift 2 ;;
         --upstream-port=*) UPSTREAM_PORT="${1#*=}"; shift ;;
+        --gen-port)      GEN_PORT="${2:-}"; shift 2 ;;
+        --gen-port=*)    GEN_PORT="${1#*=}"; shift ;;
+        --no-gen-server) GEN_ENABLED=0; shift ;;
+        --gen-model-dir) GEN_MODEL_DIR_OVERRIDE="${2:-}"; shift 2 ;;
+        --gen-model-dir=*) GEN_MODEL_DIR_OVERRIDE="${1#*=}"; shift ;;
         --rate-limit)    RATE_LIMIT="${2:-}"; shift 2 ;;
         --rate-limit=*)  RATE_LIMIT="${1#*=}"; shift ;;
         --mode)          MODE="${2:-}"; shift 2 ;;
@@ -174,6 +200,7 @@ done
 
 case "$GUARD_PORT" in ''|*[!0-9]*) die "--port must be a number" ;; esac
 case "$UPSTREAM_PORT" in ''|*[!0-9]*) die "--upstream-port must be a number" ;; esac
+case "$GEN_PORT" in ''|*[!0-9]*) die "--gen-port must be a number" ;; esac
 case "$RATE_LIMIT" in ''|*[!0-9]*) die "--rate-limit must be a number (0 = unlimited)" ;; esac
 case "$MODE" in enforce|monitor) ;; *) die "--mode must be enforce or monitor" ;; esac
 
@@ -453,6 +480,12 @@ fi
 
 cached_snapshot_dir() {
     local snapshots="$HF_HOME/hub/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots"
+    cached_dir_under "$snapshots"
+}
+
+# The newest snapshot under a models--ORG--NAME directory.
+cached_dir_under() {
+    local snapshots="$1"
     local newest
     [ -d "$snapshots" ] || return 1
     newest="$(find "$snapshots" -mindepth 1 -maxdepth 1 -type d \
@@ -489,6 +522,50 @@ else
     [ -d "$MODEL_DIR" ] || die "the download reported $MODEL_DIR, which is not a directory"
     as_root chmod -R a+rX "$MODEL_ROOT"
     ok "model  $MODEL_DIR"
+fi
+
+# ---------------------------------------------------------------------------
+# 5b. the generation model
+#
+# A second, bigger model: the guard READS with the 0.5B above, while the
+# site's glass room has a 4B model WRITE code, token by token, into the
+# page.  It is a separate server on its own port.
+#
+# This one is OPTIONAL on purpose.  A box that cannot spare the memory, or
+# an operator who does not want a public endpoint that generates text, can
+# run with --no-gen-server: the site still deploys, and its glass room says
+# the model is unavailable instead of pretending.
+# ---------------------------------------------------------------------------
+GEN_MODEL_DIR=""
+# The huggingface cache names a repo directory after its path: org/name
+# becomes models--org--name.
+GEN_CACHE_NAME="models--$(printf '%s' "$GEN_MODEL_REPO" | sed 's|/|--|')"
+if [ "$GEN_ENABLED" -eq 0 ]; then
+    warn "the generation model server is disabled (--no-gen-server); the site's glass room will say the model is unavailable"
+elif [ -n "$GEN_MODEL_DIR_OVERRIDE" ]; then
+    [ -d "$GEN_MODEL_DIR_OVERRIDE" ] \
+        || die "--gen-model-dir points at $GEN_MODEL_DIR_OVERRIDE, which is not a directory"
+    GEN_MODEL_DIR="$GEN_MODEL_DIR_OVERRIDE"
+    ok "using the generation model at $GEN_MODEL_DIR"
+elif cached="$(cached_dir_under "$HF_HOME/hub/$GEN_CACHE_NAME/snapshots")"; then
+    GEN_MODEL_DIR="$cached"
+    ok "using the cached generation model at $GEN_MODEL_DIR"
+elif [ "$DRY_RUN" -eq 1 ]; then
+    GEN_MODEL_DIR="$HF_HOME/hub/$GEN_CACHE_NAME/snapshots/<revision>"
+    plan "download $GEN_MODEL_REPO (~2.5 GB) into $HF_HOME with uv + huggingface_hub"
+else
+    info "downloading $GEN_MODEL_REPO (~2.5 GB) into $HF_HOME"
+    mkdir -p "$HF_HOME"
+    if ! uv run --python 3.12 --with huggingface_hub python \
+            -c "from huggingface_hub import snapshot_download; print(snapshot_download(\"$GEN_MODEL_REPO\"))" \
+            > /tmp/zcode-gen-model-path.txt 2>&1; then
+        tail -n 20 /tmp/zcode-gen-model-path.txt >&2 || true
+        die "the generation model download failed.  Re-run with --no-gen-server to deploy without it."
+    fi
+    GEN_MODEL_DIR="$(tail -n 1 /tmp/zcode-gen-model-path.txt)"
+    [ -d "$GEN_MODEL_DIR" ] || die "the download reported $GEN_MODEL_DIR, which is not a directory"
+    as_root chmod -R a+rX "$MODEL_ROOT"
+    ok "generation model  $GEN_MODEL_DIR"
 fi
 
 log "6. token"
@@ -643,12 +720,17 @@ if [ "$DRY_RUN" -eq 1 ]; then
     {
         printf 'CLEF_DOMAIN=%s\n' "$CLEF_DOMAIN"
         printf 'GUARD_PORT=%s\n' "$GUARD_PORT"
+        printf 'GEN_PORT=%s\n' "$GEN_PORT"
         printf 'SITE_ROOT=%s\n' "$SITE_ROOT"
         printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
         printf 'RL_TOOL_CALL_EVENTS=%s\n' "$RL_TOOL_CALL_EVENTS"
         printf 'RL_TOOL_CALL_WINDOW=%s\n' "$RL_TOOL_CALL_WINDOW"
         printf 'RL_API_EVENTS=%s\n' "$RL_API_EVENTS"
         printf 'RL_API_WINDOW=%s\n' "$RL_API_WINDOW"
+        printf 'RL_GEN_EVENTS=%s\n' "$RL_GEN_EVENTS"
+        printf 'RL_GEN_WINDOW=%s\n' "$RL_GEN_WINDOW"
+        printf 'RL_GEN_GLOBAL_EVENTS=%s\n' "$RL_GEN_GLOBAL_EVENTS"
+        printf 'RL_GEN_GLOBAL_WINDOW=%s\n' "$RL_GEN_GLOBAL_WINDOW"
         # The access log and the ACME storage are the two paths a
         # non-root machine cannot create, so they point at the scratch
         # directory for the check.
@@ -702,6 +784,7 @@ else
         printf '# There is no GUARD_TOKEN here on purpose — see deploy/README.md.\n'
         printf 'CLEF_DOMAIN=%s\n' "$CLEF_DOMAIN"
         printf 'GUARD_PORT=%s\n' "$GUARD_PORT"
+        printf 'GEN_PORT=%s\n' "$GEN_PORT"
         printf 'SITE_ROOT=%s\n' "$SITE_ROOT"
         printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
         # The edge rate limit.  /v1/* runs the model and is the expensive
@@ -711,6 +794,12 @@ else
         printf 'RL_TOOL_CALL_WINDOW=%s\n' "$RL_TOOL_CALL_WINDOW"
         printf 'RL_API_EVENTS=%s\n' "$RL_API_EVENTS"
         printf 'RL_API_WINDOW=%s\n' "$RL_API_WINDOW"
+        printf 'RL_GEN_EVENTS=%s\n' "$RL_GEN_EVENTS"
+        printf 'RL_GEN_WINDOW=%s\n' "$RL_GEN_WINDOW"
+        printf 'RL_GEN_GLOBAL_EVENTS=%s\n' "$RL_GEN_GLOBAL_EVENTS"
+        printf 'RL_GEN_GLOBAL_WINDOW=%s\n' "$RL_GEN_GLOBAL_WINDOW"
+        # The generation model server, when there is one.
+        printf 'GEN_PORT=%s\n' "$GEN_PORT"
     } > /tmp/zcode-caddy.env
     as_root install -m 0640 -o root -g wheel /tmp/zcode-caddy.env "$CADDY_ENV"
     ok "$CADDY_CONFIG and $CADDY_ENV"
@@ -775,6 +864,63 @@ write_upstream_plist() {
 	<string>$(xml_escape "$LOG_DIR/upstream.log")</string>
 	<key>StandardErrorPath</key>
 	<string>$(xml_escape "$LOG_DIR/upstream.err.log")</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>$(xml_escape "$SERVICE_HOME")</string>
+		<key>HF_HOME</key>
+		<string>$(xml_escape "$HF_HOME")</string>
+		<key>PATH</key>
+		<string>$(xml_escape "$PATH")</string>
+	</dict>
+</dict>
+</plist>
+PLIST
+}
+
+write_gen_plist() {
+    local plist="$1"
+    cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>${GEN_LABEL}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$(xml_escape "$UV_BIN")</string>
+		<string>run</string>
+		<string>--python</string>
+		<string>3.12</string>
+		<string>--with</string>
+		<string>mlx-lm</string>
+		<string>mlx_lm.server</string>
+		<string>--model</string>
+		<string>$(xml_escape "$GEN_MODEL_DIR")</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>${GEN_PORT}</string>
+		<string>--temp</string>
+		<string>0.2</string>
+		<string>--max-tokens</string>
+		<string>256</string>
+	</array>
+	<key>UserName</key>
+	<string>$(xml_escape "$SERVICE_USER")</string>
+	<key>GroupName</key>
+	<string>$(xml_escape "$SERVICE_USER")</string>
+	<key>WorkingDirectory</key>
+	<string>$(xml_escape "$INSTALL_DIR")</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>$(xml_escape "$LOG_DIR/gen.log")</string>
+	<key>StandardErrorPath</key>
+	<string>$(xml_escape "$LOG_DIR/gen.err.log")</string>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HOME</key>
@@ -889,6 +1035,9 @@ PLIST
 log "9. launchd daemons"
 if [ "$DRY_RUN" -eq 1 ]; then
     plan "write $LAUNCHD_DIR/$UPSTREAM_LABEL.plist  (mlx_lm.server, runs as $SERVICE_USER)"
+    if [ "$GEN_ENABLED" -eq 1 ]; then
+        plan "write $LAUNCHD_DIR/$GEN_LABEL.plist       (the generation model server, mlx_lm.server on port $GEN_PORT)"
+    fi
     plan "write $LAUNCHD_DIR/$GUARD_LABEL.plist     (the guard, runs as $SERVICE_USER, --trust-proxy)"
     plan "write $LAUNCHD_DIR/$CADDY_LABEL.plist      (caddy run --config ... --envfile ..., runs as root for :443)"
 
@@ -899,6 +1048,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
     # output path, so this is the same file the box would get.
     scratch="$(mktemp -d /tmp/zcode-plists.XXXXXX)"
     write_upstream_plist "$scratch/$UPSTREAM_LABEL.plist"
+    if [ "$GEN_ENABLED" -eq 1 ]; then
+        write_gen_plist "$scratch/$GEN_LABEL.plist"
+    fi
     write_guard_plist "$scratch/$GUARD_LABEL.plist"
     write_caddy_plist "$scratch/$CADDY_LABEL.plist"
     for plist_file in "$scratch"/*.plist; do
@@ -916,13 +1068,22 @@ $lint_out"
     rmdir "$scratch" 2>/dev/null || true
 
     plan "launchctl bootout system/$UPSTREAM_LABEL ; launchctl bootstrap system $LAUNCHD_DIR/$UPSTREAM_LABEL.plist ; launchctl kickstart -k system/$UPSTREAM_LABEL"
+    if [ "$GEN_ENABLED" -eq 1 ]; then
+        plan "launchctl bootout system/$GEN_LABEL      ; launchctl bootstrap system $LAUNCHD_DIR/$GEN_LABEL.plist      ; launchctl kickstart -k system/$GEN_LABEL"
+    fi
     plan "launchctl bootout system/$GUARD_LABEL    ; launchctl bootstrap system $LAUNCHD_DIR/$GUARD_LABEL.plist    ; launchctl kickstart -k system/$GUARD_LABEL"
     plan "launchctl bootout system/$CADDY_LABEL     ; launchctl bootstrap system $LAUNCHD_DIR/$CADDY_LABEL.plist     ; launchctl kickstart -k system/$CADDY_LABEL"
 else
     write_upstream_plist "/tmp/zcode-$UPSTREAM_LABEL.plist"
+    if [ "$GEN_ENABLED" -eq 1 ]; then
+        write_gen_plist "/tmp/zcode-$GEN_LABEL.plist"
+    fi
     write_guard_plist "/tmp/zcode-$GUARD_LABEL.plist"
     write_caddy_plist "/tmp/zcode-$CADDY_LABEL.plist"
     as_root install -m 0644 -o root -g wheel "/tmp/zcode-$UPSTREAM_LABEL.plist" "$LAUNCHD_DIR/$UPSTREAM_LABEL.plist"
+    if [ "$GEN_ENABLED" -eq 1 ]; then
+        as_root install -m 0644 -o root -g wheel "/tmp/zcode-$GEN_LABEL.plist" "$LAUNCHD_DIR/$GEN_LABEL.plist"
+    fi
     as_root install -m 0644 -o root -g wheel "/tmp/zcode-$GUARD_LABEL.plist" "$LAUNCHD_DIR/$GUARD_LABEL.plist"
     as_root install -m 0644 -o root -g wheel "/tmp/zcode-$CADDY_LABEL.plist" "$LAUNCHD_DIR/$CADDY_LABEL.plist"
 
@@ -931,7 +1092,7 @@ else
     # "Input/output error" — so re-running this script on a box that is
     # already deployed would die exactly where a fresh box succeeds.
     # Wait for each agent to be gone.
-    for label in "$UPSTREAM_LABEL" "$GUARD_LABEL" "$CADDY_LABEL"; do
+    for label in "$UPSTREAM_LABEL" "$GEN_LABEL" "$GUARD_LABEL" "$CADDY_LABEL"; do
         as_root launchctl bootout "system/$label" >/dev/null 2>&1 || true
         waited=0
         while [ "$waited" -lt 100 ]; do
@@ -959,12 +1120,19 @@ else
     }
 
     bootstrap_agent "$UPSTREAM_LABEL" "$LAUNCHD_DIR/$UPSTREAM_LABEL.plist"
+    if [ "$GEN_ENABLED" -eq 1 ]; then
+        bootstrap_agent "$GEN_LABEL" "$LAUNCHD_DIR/$GEN_LABEL.plist"
+    fi
     bootstrap_agent "$GUARD_LABEL" "$LAUNCHD_DIR/$GUARD_LABEL.plist"
     bootstrap_agent "$CADDY_LABEL" "$LAUNCHD_DIR/$CADDY_LABEL.plist"
-    for label in "$UPSTREAM_LABEL" "$GUARD_LABEL" "$CADDY_LABEL"; do
-        as_root launchctl kickstart -k "system/$label"
+    for label in "$UPSTREAM_LABEL" "$GEN_LABEL" "$GUARD_LABEL" "$CADDY_LABEL"; do
+        as_root launchctl kickstart -k "system/$label" >/dev/null 2>&1 || true
     done
-    ok "$UPSTREAM_LABEL, $GUARD_LABEL and $CADDY_LABEL are loaded"
+    if [ "$GEN_ENABLED" -eq 1 ]; then
+        ok "$UPSTREAM_LABEL, $GEN_LABEL, $GUARD_LABEL and $CADDY_LABEL are loaded"
+    else
+        ok "$UPSTREAM_LABEL, $GUARD_LABEL and $CADDY_LABEL are loaded"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -997,6 +1165,9 @@ wait_for_health() {
 log "10. health"
 if [ "$DRY_RUN" -eq 1 ]; then
     plan "wait for 127.0.0.1:$UPSTREAM_PORT to accept a connection"
+    if [ "$GEN_ENABLED" -eq 1 ]; then
+        plan "wait for 127.0.0.1:$GEN_PORT to accept a connection  (the generation model)"
+    fi
     plan "wait for http://127.0.0.1:$GUARD_PORT/health to answer"
 else
     if ! wait_for_tcp "$UPSTREAM_PORT" 300; then
@@ -1004,6 +1175,15 @@ else
         die "the upstream mlx_lm.server never opened port $UPSTREAM_PORT — see $LOG_DIR/upstream.err.log"
     fi
     ok "upstream is listening on 127.0.0.1:$UPSTREAM_PORT"
+
+    if [ "$GEN_ENABLED" -eq 1 ]; then
+        if ! wait_for_tcp "$GEN_PORT" 600; then
+            as_root tail -n 40 "$LOG_DIR/gen.err.log" >&2 2>/dev/null || true
+            die "the generation mlx_lm.server never opened port $GEN_PORT — see $LOG_DIR/gen.err.log
+       The site's glass room will say the model is unavailable until it is up."
+        fi
+        ok "the generation model is listening on 127.0.0.1:$GEN_PORT"
+    fi
 
     if ! wait_for_health "http://127.0.0.1:$GUARD_PORT/health" 120; then
         as_root tail -n 40 "$LOG_DIR/guard.err.log" >&2 2>/dev/null || true
@@ -1025,6 +1205,7 @@ cat <<SUMMARY
     public site        https://${DOMAIN_HOST}/
     guard API          https://${DOMAIN_HOST}/api/info
     tool-call probe    POST https://${DOMAIN_HOST}/v1/guard/tool-call
+    glass room         https://${DOMAIN_HOST}/demo.html
     health             https://${DOMAIN_HOST}/health
     ACME contact       ${EMAIL_HOST}
 
@@ -1045,6 +1226,7 @@ cat <<SUMMARY
       session secret    ${SESSION_SECRET_FILE}   (mode 0640, owner ${SERVICE_USER})
       static site       ${SITE_ROOT}
       model             ${MODEL_DIR}
+      generation model  ${GEN_MODEL_DIR:-(not installed — --no-gen-server)}
       install root      ${INSTALL_DIR}
 
     LOGS
@@ -1052,6 +1234,7 @@ cat <<SUMMARY
       ${LOG_DIR}/caddy-access.log
       ${LOG_DIR}/guard.log, ${LOG_DIR}/guard.err.log
       ${LOG_DIR}/upstream.log, ${LOG_DIR}/upstream.err.log
+      ${LOG_DIR}/gen.log, ${LOG_DIR}/gen.err.log
 
     CONTROLS
       reload the Caddy config      sudo caddy reload --config ${CADDY_CONFIG}
@@ -1059,6 +1242,7 @@ cat <<SUMMARY
         the token changes)
       restart the guard             sudo launchctl kickstart -k system/${GUARD_LABEL}
       restart the upstream          sudo launchctl kickstart -k system/${UPSTREAM_LABEL}
+      restart the generation model  sudo launchctl kickstart -k system/${GEN_LABEL}   (only if installed)
       stop everything               sudo launchctl bootout system/${CADDY_LABEL}
                                     sudo launchctl bootout system/${GUARD_LABEL}
                                     sudo launchctl bootout system/${UPSTREAM_LABEL}
@@ -1073,7 +1257,11 @@ cat <<SUMMARY
       and the daemon runs that binary.  The limits live in ${CADDY_ENV}:
           RL_TOOL_CALL_EVENTS  requests a minute on /v1/*  (default 10)
           RL_API_EVENTS        requests a minute on /api/*  (default 60)
-      The static site and /health are in neither zone, so a visitor is
+          RL_GEN_EVENTS        requests a minute on /gen/*  (default 6)
+          RL_GEN_GLOBAL_EVENTS requests a minute on /gen/* for EVERYONE at once
+                               (default 20) — a per-IP limit alone does not
+                               bound the total work
+      The static site and /health are in no zone at all, so a visitor is
       never throttled for loading a page.
       Check it is live with:
           sudo ${CADDY_BIN} list-modules | grep rate_limit
