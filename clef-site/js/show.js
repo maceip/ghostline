@@ -112,7 +112,11 @@ async function generate(onToken, prompt) {
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "local",
+      // The name the model server maps to the model it actually loaded.
+      // A made-up name like "local" makes the server go looking for it on
+      // the Hugging Face hub, which is a 404 — so the page would show
+      // "no model on this host" on a host that has one.
+      model: "default_model",
       stream: true,
       max_tokens: 220,
       temperature: 0.2,

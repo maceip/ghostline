@@ -177,10 +177,30 @@ async function main() {
     console.log("   the model wrote:", JSON.stringify(chatCode.slice(0, 60)) + "…");
 
     // The scripted sequence: four proposed actions, each read live.
+    //
+    // The edge rate limits /v1/* per client address, and the glass room
+    // spends five calls on a page load.  If the budget for this address
+    // is already spent — the installer's own limiter check does exactly
+    // that — the rows come back refused.  That is the limiter working, not
+    // a broken page, so wait for the window and run the sequence again
+    // rather than failing on it.
+    const rowsJudged = () => {
+      const rows = Array.from(document.querySelectorAll("#tape .tape-row"));
+      if (rows.length < 4) return false;
+      return !rows.some((r) =>
+        /ENGINE ERROR/.test(r.querySelector(".t-out")?.textContent || "")
+      );
+    };
     await page.waitForFunction(
       () => document.querySelectorAll("#tape .tape-row").length >= 4,
       { timeout: 120000 }
     );
+    if (!(await page.evaluate(rowsJudged))) {
+      console.log("   the edge rate limited this address — waiting for the window");
+      await page.waitForTimeout(65000);
+      await page.click("#btn-replay");
+      await page.waitForFunction(rowsJudged, { timeout: 120000 });
+    }
     await page.waitForTimeout(1500);
 
     const rows = await page.evaluate(() =>
