@@ -157,7 +157,6 @@ async function act0() {
       const strip = $("tokstrip-0");
       strip.textContent = "";
       const tag = $("tag-0");
-      tag.textContent = "FROM QWEN · WRITING…";
       tag.classList.add("is-writing");
       while (true) {
         const { done, value } = await reader.read();
@@ -191,7 +190,6 @@ async function act0() {
       $("f0-pre").textContent = "0 ctx about you";
       $("f0-dec").textContent =
         tokens > 0 ? `${(tokens / (ms / 1000)).toFixed(1)} tok/s` : "—";
-      tag.textContent = "FROM QWEN";
       tag.classList.remove("is-writing");
     } catch (err) {
       $("msg-0").textContent = `server did not answer — ${String(err).slice(0, 70)}`;
@@ -457,8 +455,6 @@ async function act5() {
       $("f5-verdict").className = "ex-verdict " + (v.allowed ? "is-ok" : "is-blocked");
       $("f5-reason").textContent = v.reason || "";
       reveal($("out-5"));
-      const tag5 = $("out-5").querySelector(".llm-tag");
-      if (tag5) tag5.textContent = "FROM QWEN · INSIDE ITS HEAD";
       const panel = $("out-5");
       panel.classList.add("is-peek");
       setTimeout(() => panel.classList.remove("is-peek"), 1400);

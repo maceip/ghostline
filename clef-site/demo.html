@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Doto:wght@100..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css?v=2" />
-  <link rel="stylesheet" href="./exhibit.css?v=peek" />
+  <link rel="stylesheet" href="./exhibit.css?v=quiet" />
   <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
 </head>
 <body class="exhibit">
@@ -185,7 +185,7 @@
         </p>
         <button class="ex-act" id="act-4" type="button" disabled>4 · RUN INFERENCE</button>
         <div class="ex-out from-llm" id="out-4" hidden>
-          <span class="llm-tag">FROM QWEN · WHERE IT MEANS IT</span>
+          <span class="llm-tag">FROM QWEN</span>
           <p class="ex-tokens" id="tok-4"></p>
           <div class="ex-meter" id="meter-4">
             <div class="ex-meter-track"><i id="meter-4-fill"></i><span class="ex-meter-thr"></span></div>
@@ -213,7 +213,7 @@
         </p>
         <button class="ex-act" id="act-5" type="button" disabled>5 · PULL THE TRACE</button>
         <div class="ex-out from-llm" id="out-5" hidden>
-          <span class="llm-tag">FROM QWEN · INSIDE ITS HEAD</span>
+          <span class="llm-tag">FROM QWEN</span>
           <p class="ex-verdict" id="f5-verdict">—</p>
           <div id="spine"></div>
           <p class="knob-hint">harm cosine by depth · probe at layer 16 · raw vs baseline-subtracted</p>
@@ -229,6 +229,6 @@
     <p class="label" id="src-chip">…</p>
   </footer>
 
-  <script type="module" src="./js/exhibit.js?v=peek"></script>
+  <script type="module" src="./js/exhibit.js?v=quiet"></script>
 </body>
 </html>
