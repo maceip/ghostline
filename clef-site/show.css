@@ -51,7 +51,8 @@ body.show {
   border-radius: 8px;
   padding: 20px;
   background: var(--surface);
-  min-height: 320px;
+  height: 380px;
+  overflow-y: auto;
 }
 .chat-user {
   font-family: var(--sans);
@@ -91,12 +92,12 @@ body.show {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
-  padding: 16px;
-  height: 320px;
+  padding: 20px 16px;
+  height: 380px;
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  gap: 3px;
+  gap: 4px;
 }
 .lay {
   flex: 1;
@@ -220,6 +221,49 @@ body.show {
   text-transform: none;
   margin-top: 4px;
   color: var(--text-disabled);
+}
+
+/* tool-call popover: the reading behind the call */
+.tape-row { position: relative; }
+.pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% - 6px);
+  z-index: 30;
+  width: 340px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-visible);
+  border-radius: 8px;
+  padding: 14px 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  display: none;
+}
+.tape-row:hover .pop,
+.tape-row.is-open .pop { display: block; }
+.pop-k {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+.pop-k span:first-child { color: var(--text-secondary); }
+.pop-k span:last-child { font-variant-numeric: tabular-nums; }
+.pop-reason {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.pop-cap {
+  color: var(--text-disabled);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
 }
 
 .mon-src {

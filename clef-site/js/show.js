@@ -189,7 +189,21 @@ async function judge(cmd) {
 }
 
 /* ---------- the monitor tape ---------- */
-function addRow({ cmd, meaning, outcome, num }) {
+function attachPop(row, v) {
+  if (!v || v.harm_excess === undefined) return;
+  const pop = document.createElement("div");
+  pop.className = "pop";
+  pop.innerHTML = `
+    <p class="pop-cap">the reading behind this call</p>
+    <div class="pop-k"><span>harm cosine</span><span>${fmt(v.harm_cosine)}</span></div>
+    <div class="pop-k"><span>baseline</span><span>${fmt(v.harm_baseline)}</span></div>
+    <div class="pop-k"><span>excess</span><span>${fmt(v.harm_excess)}</span></div>
+    <div class="pop-k"><span>drift</span><span>${fmt(v.drift_cosine)}</span></div>
+    <div class="pop-reason">${escapeHtml(v.reason || "")}</div>`;
+  row.appendChild(pop);
+}
+
+function addRow({ cmd, meaning, outcome, num, v }) {
   const row = document.createElement("div");
   row.className = "tape-row " + (outcome.cls || "is-wait");
   row.innerHTML = `
@@ -199,6 +213,14 @@ function addRow({ cmd, meaning, outcome, num }) {
     <span class="t-out">${escapeHtml(outcome.text || "…")}
       <span class="t-num">${escapeHtml(num || "")}</span>
     </span>`;
+  if (v) attachPop(row, v);
+  row.addEventListener("click", () => {
+    const open = row.classList.toggle("is-open");
+    // one popover at a time
+    document.querySelectorAll(".tape-row.is-open").forEach((r) => {
+      if (r !== row) r.classList.remove("is-open");
+    });
+  });
   $("tape").appendChild(row);
   return row;
 }
@@ -344,6 +366,7 @@ async function runSequence() {
     if (v.layer_profile) freezeLayers(v.layer_profile);
     readings.push({ row, v });
     renderReading(row, v);
+    attachPop(row, v);
     await wait(700);
   }
 
@@ -391,6 +414,7 @@ async function readYour() {
         cls: harm ? "is-flag" : "is-pass",
       },
       num: `excess ${fmt(v.harm_excess)}`,
+      v,
     });
   } catch (err) {
     $("yours-verdict").textContent = "ENGINE OFFLINE";
