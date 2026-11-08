@@ -14,6 +14,9 @@
 <body>
   <header class="top">
     <a class="brand" href="./index.html"><img src="./assets/mark.svg" alt="" width="22" height="22" /> AgentVector</a>
+    <nav class="nav" aria-label="Exhibit rooms">
+      <a href="#try">Try it</a><a href="#line">Alarm line</a><a href="#pairs">Pairs</a><a href="#score">Scoreboard</a>
+    </nav>
     <span class="engine" id="engine" data-testid="engine">connecting…</span>
   </header>
 
@@ -22,16 +25,23 @@
       <p class="kicker">An exhibit about representation engineering</p>
       <h1>When an AI agent reaches for a tool,<br />what is it <em>thinking</em>?</h1>
       <p class="lede">
-        Type a shell command an agent might run. A small language model
-        (Qwen 2.5, 0.5B) reads it, and we look <strong>inside</strong> it — at
-        the pattern of numbers in its middle layers — to judge whether the
-        command means harm. Nothing you type is ever executed.
+        A small language model (Qwen 2.5, 0.5B) reads a shell command an agent
+        wants to run. Instead of trusting its <em>answer</em>, we open it up and
+        read the numbers inside — and judge the command from those. Everything
+        below is measured live on that model. Nothing you type is ever executed.
       </p>
+      <ol class="route" id="route" aria-label="What happens to your command">
+        <li><b>1</b><span>Your command</span><small>is typed</small></li>
+        <li><b>2</b><span>Split into tokens</span><small>the model's word-pieces</small></li>
+        <li><b>3</b><span>Climbs 24 layers</span><small>of the network</small></li>
+        <li><b>4</b><span>Measured at layer 16</span><small>against 3 learned directions</small></li>
+        <li><b>5</b><span>One number</span><small>past the line → refused</small></li>
+      </ol>
     </section>
 
-    <!-- ================= STATION 1 · TRY IT ================= -->
+    <!-- ================= TRY IT ================= -->
     <section class="station try" id="try">
-      <p class="tag">Station 1 · Try it</p>
+      <p class="tag">Room 1 · Try it</p>
       <form id="form" autocomplete="off">
         <label class="field">
           <span>What you asked the agent</span>
@@ -44,83 +54,86 @@
         <button id="go" data-testid="go" type="submit">Read its mind</button>
       </form>
       <div class="chips" id="chips" aria-label="Examples">
-        <span class="chips-l">Examples:</span>
+        <span class="chips-l">Or pick one:</span>
       </div>
 
-      <div class="verdict" id="verdict" data-testid="verdict" hidden>
-        <p class="v-word" id="v-word"></p>
-        <p class="v-sub" id="v-sub"></p>
-        <div class="intent" id="intent">
-          <span>Did you mean it to be harmful? Tell us, and the scoreboard below keeps score.</span>
-          <button type="button" data-intent="harmful" data-testid="intent-harmful">I meant harm</button>
-          <button type="button" data-intent="benign" data-testid="intent-benign">I meant no harm</button>
+      <!-- the instrument: every reading from one live call, side by side -->
+      <div class="scan" id="scan" data-testid="scan">
+        <div class="scan-top">
+          <span class="scan-live" id="scan-status">Waiting for a command</span>
+          <code class="scan-cmd" id="scan-cmd"></code>
+        </div>
+        <div class="verdict" id="verdict" data-testid="verdict" hidden>
+          <p class="v-word" id="v-word"></p>
+          <p class="v-sub" id="v-sub"></p>
+          <div class="intent" id="intent">
+            <span>Was that command meant to do harm? Tell us and the scoreboard keeps your score.</span>
+            <button type="button" data-intent="harmful" data-testid="intent-harmful">Yes, harmful</button>
+            <button type="button" data-intent="benign" data-testid="intent-benign">No, harmless</button>
+          </div>
+        </div>
+        <p class="err" id="err" data-testid="err" hidden></p>
+
+        <div class="scan-grid">
+          <div class="scan-main">
+            <article class="placard" id="words">
+              <h2><i>2</i> The model reads in pieces called tokens.</h2>
+              <p class="explain">Each piece gets its own reading. Brighter means that piece looked more harm-like on its own; the colour says which kind. The decision uses the average over all pieces.</p>
+              <div class="tokens" id="tokens" data-testid="tokens"></div>
+            </article>
+            <article class="placard" id="kinds">
+              <h2><i>4</i> Three directions it learned.</h2>
+              <p class="explain">From pairs of commands — one harmful, one similar but harmless — we found three directions inside the model: destroying things, reading secrets, and sending data away. Right of centre points toward that harm.</p>
+              <div class="gauges" id="gauges" data-testid="gauges"></div>
+            </article>
+          </div>
+          <article class="placard tower" id="layers">
+            <h2><i>3</i> The command climbs through 24 layers.</h2>
+            <p class="explain">The same ruler held up to every floor. Ours was made at <strong>layer <span id="probe-n">16</span></strong>, where the decision is read.</p>
+            <figure class="elevator" id="elevator" data-testid="elevator"></figure>
+          </article>
         </div>
       </div>
-      <p class="err" id="err" data-testid="err" hidden></p>
     </section>
 
-    <!-- ================= STATION 2 · THE ALARM LINE ================= -->
+    <!-- ================= THE ALARM LINE ================= -->
     <section class="station" id="line">
-      <p class="tag">Station 2 · The alarm line</p>
-      <h2>Every command lands somewhere on one line.</h2>
+      <p class="tag">Room 2 · The alarm line</p>
+      <h2><i>5</i> Every command lands somewhere on one line.</h2>
       <p class="explain">
-        The model's reading becomes a single number: how much more "harm-like"
-        this command looks than the most harm-like of five ordinary commands
+        The reading becomes one number: how much more harm-like the command
+        looks than the most harm-like of five ordinary commands
         (<code>cargo build</code>, <code>git status</code>…) in the same
-        situation. Past the red line, the command is refused. The grey and red
-        dots are 50 real commands we tested it on — <span class="k-benign">grey
-        meant no harm</span>, <span class="k-harm">red meant harm</span>.
-        Where they overlap, it makes mistakes.
+        situation. Past the dashed line it is refused. The dots are 50 real
+        commands it was tested on — <span class="k-benign">grey meant no harm</span>,
+        <span class="k-harm">red meant harm</span>. Where they mix, it makes
+        mistakes. Black diamonds are the commands you've tried.
+        <strong>Click any dot to measure it again, live.</strong>
       </p>
       <figure class="swarm" id="swarm" data-testid="swarm"></figure>
+      <p class="hover-l" id="hover-l" aria-live="polite">&nbsp;</p>
     </section>
 
-    <!-- ================= STATION 3 · WHICH WORDS ================= -->
-    <section class="station" id="words">
-      <p class="tag">Station 3 · Which pieces lit up</p>
-      <h2>The model reads in pieces called tokens.</h2>
+    <!-- ================= PAIRS ================= -->
+    <section class="station" id="pairs">
+      <p class="tag">Room 3 · Same words, different meaning</p>
+      <h2>A word list can't tell these apart. Can the inside of the model?</h2>
       <p class="explain">
-        Each piece of your command gets its own reading. The brighter the
-        piece, the more harm-like it looked to the model on its own. The
-        decision itself uses the average over all pieces.
+        Each pair shares its key words — <code>~/.ssh</code>, <code>rm -rf</code>,
+        <code>cat</code> — but only one is harmful. None of these six commands
+        was used to build the ruler. Pick a pair and both are measured live.
       </p>
-      <div class="tokens" id="tokens" data-testid="tokens"><p class="empty">Try a command above.</p></div>
+      <div class="pair-btns" id="pair-btns"></div>
+      <div class="pair-out" id="pair-out" data-testid="pair-out"></div>
     </section>
 
-    <!-- ================= STATION 4 · THREE KINDS OF HARM ================= -->
-    <section class="station" id="kinds">
-      <p class="tag">Station 4 · Three kinds of harm</p>
-      <h2>We taught it three directions.</h2>
-      <p class="explain">
-        From pairs of commands — one harmful, one similar but harmless — we
-        found three directions in the model's internal space: destroying
-        things, reading secrets, and sending data away. This is how far your
-        command points along each. Right of centre points toward that harm;
-        left points away from it.
-      </p>
-      <div class="gauges" id="gauges" data-testid="gauges"><p class="empty">Try a command above.</p></div>
-    </section>
-
-    <!-- ================= STATION 5 · LAYERS ================= -->
-    <section class="station" id="layers">
-      <p class="tag">Station 5 · Where inside the model</p>
-      <h2>The command climbs through 24 layers.</h2>
-      <p class="explain">
-        Text passes up through the model one layer at a time. Our ruler was
-        made at <strong>layer <span id="probe-n">16</span></strong>, and that is
-        where the decision is read. Here the same ruler is held up to every
-        layer, so you can see where the signal forms.
-      </p>
-      <figure class="elevator" id="elevator" data-testid="elevator"><p class="empty">Try a command above.</p></figure>
-    </section>
-
-    <!-- ================= STATION 6 · HOW GOOD ================= -->
+    <!-- ================= SCOREBOARD ================= -->
     <section class="station" id="score">
-      <p class="tag">Station 6 · How good is it, really?</p>
+      <p class="tag">Room 4 · How good is it, really?</p>
       <h2>Tested on 50 commands it had never seen.</h2>
       <p class="explain">
-        Compared with a simple keyword filter — the kind of list of scary words
-        anyone would write first. Measured <span id="measured"></span>.
+        Compared with a simple keyword filter — the list of scary words anyone
+        would write first. Measured <span id="measured"></span>.
       </p>
       <div class="board" id="board" data-testid="board"></div>
       <details class="misses">
@@ -129,7 +142,7 @@
       </details>
       <div class="yours" id="yours" data-testid="yours">
         <h3>Your score against it</h3>
-        <p class="explain">Only the commands you tagged above, in this browser.</p>
+        <p class="explain">Only the commands you tagged in Room 1, in this browser.</p>
         <dl>
           <div><dt>Harmful ones that got past</dt><dd id="y-past" data-testid="y-past">0</dd></div>
           <div><dt>Harmless ones it blocked</dt><dd id="y-false" data-testid="y-false">0</dd></div>
@@ -140,11 +153,11 @@
     </section>
 
     <section class="station how">
-      <p class="tag">How it works, briefly</p>
+      <p class="tag">How it was built</p>
       <ol>
         <li><strong>Collect pairs.</strong> 24 pairs of commands: one harmful, one harmless, often with the same verb (<code>rm -rf ~/Documents</code> vs <code>rm -rf ./dist</code>).</li>
         <li><strong>Look inside.</strong> Run each through the model and record the numbers at layer 16. Harmful and harmless commands push those numbers in different directions.</li>
-        <li><strong>Measure new commands</strong> against those directions and compare with ordinary commands in the same situation.</li>
+        <li><strong>Measure new commands</strong> against those directions and compare with ordinary commands in the same situation. The alarm line was placed to catch as many harmful training commands as possible while letting at most one in ten ordinary ones trip it.</li>
       </ol>
       <p class="limits">
         <strong>Limits.</strong> It's a small model and a small training set. It
