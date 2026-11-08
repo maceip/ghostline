@@ -96,6 +96,7 @@ for label, items in (("harmful", HARMFUL), ("benign", BENIGN)):
             "repe_blocked": not v["allowed"],
             "keyword_blocked": bool(KEYWORDS.search(cmd)),
             "harm_excess": v.get("harm_excess"),
+            "excess_threshold": v.get("excess_threshold"),
             "cluster_scores": v.get("cluster_scores"),
         }
         rows.append(row)

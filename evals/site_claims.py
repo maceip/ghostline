@@ -1,144 +1,45 @@
 #!/usr/bin/env python3
-"""Check that the site's headline numbers are the ones the data supports.
+"""Check that every number the exhibit states in its static copy is backed.
 
-The public site states things like "17/18 findings blocked, 0/18 false
-positives".  A number on a marketing page is a claim, and a claim is only
-worth what backs it.  The backing here is `clef-site/data/replay.json` —
-36 real readings captured from a running guard, shipped with the site.
+Live numbers come from the guard at request time and the scoreboard is rendered
+from clef-site/data/heldout.json, so the page itself should carry only a few
+static claims. Each one is recomputed here from its source:
 
-So this recomputes the claims from that file and compares them with what the
-page actually says.  If the dataset is re-captured and the numbers move,
-this fails until the page is updated — which is the point.  A page whose
-numbers have drifted away from its own evidence is worse than a page with no
-numbers.
+  * "Tested on N commands"  <- len(heldout.json rows)
+  * "N pairs of commands"   <- len(HARM_CONTRASTIVE_PAIRS) in extract_repe_vectors.py
+  * "24 layers"             <- heldout.json engine.num_layers
+  * no hardcoded "a/b" scoreboard ratios in index.html
 
-Usage:
-    python3 evals/site_claims.py
+Usage: python3 evals/site_claims.py
 """
-from __future__ import annotations
-
-import json
-import pathlib
-import re
-import sys
+import ast, json, pathlib, re, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-DATASET = ROOT / "clef-site" / "data" / "replay.json"
-INDEX = ROOT / "clef-site" / "index.html"
-DESIGN = ROOT / "clef-site" / "DESIGN.md"
+INDEX = (ROOT / "clef-site" / "index.html").read_text()
+HELD = json.loads((ROOT / "clef-site" / "data" / "heldout.json").read_text())
+SRC = (ROOT / "extract_repe_vectors.py").read_text()
 
-results: list[tuple[bool, str, str]] = []
+pairs = None
+for node in ast.parse(SRC).body:
+    target = getattr(node, "target", None) or (getattr(node, "targets", [None])[0])
+    if getattr(target, "id", None) == "HARM_CONTRASTIVE_PAIRS":
+        pairs = len(node.value.elts)
 
+checks = []
+def check(ok, what):
+    checks.append(ok)
+    print(("PASS " if ok else "FAIL ") + what)
 
-def check(ok: bool, name: str, detail: str = "") -> bool:
-    results.append((ok, name, detail))
-    print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  — {detail}" if detail else ""))
-    return ok
+n_rows = len(HELD["rows"])
+check(f"Tested on {n_rows} commands" in INDEX, f"page says 'Tested on {n_rows} commands'")
+check(f"{n_rows} real commands" in INDEX, f"page says '{n_rows} real commands' on the alarm line")
+check(pairs is not None and f"{pairs} pairs of commands" in INDEX, f"page says '{pairs} pairs of commands'")
+layers = HELD["engine"]["num_layers"]
+check(f"climbs through {layers} layers" in INDEX, f"page says 'climbs through {layers} layers'")
+check(not re.search(r"\b\d{1,3}\s*/\s*\d{1,3}\b", re.sub(r"https?://\S+", "", INDEX)),
+      "no hardcoded a/b ratios in index.html (the scoreboard renders from heldout.json)")
+r = HELD["repe"]
+check(r["harmful_total"] + r["benign_total"] == n_rows, "heldout.json totals add up")
+check("calibrated" in HELD["engine"].get("calibration_mode", ""), "held-out run used calibrated vectors")
 
-
-def main() -> int:
-    if not DATASET.is_file():
-        print(f"no dataset at {DATASET}", file=sys.stderr)
-        return 2
-    if not INDEX.is_file():
-        print(f"no story page at {INDEX}", file=sys.stderr)
-        return 2
-
-    data = json.loads(DATASET.read_text())
-    records = data.get("records", [])
-    if not records:
-        print("the dataset has no records", file=sys.stderr)
-        return 2
-
-    harmful = [r for r in records if r.get("label") == "harmful"]
-    benign = [r for r in records if r.get("label") == "benign"]
-    blocked = [r for r in harmful if not r.get("verdict", {}).get("allowed", True)]
-    false_positives = [r for r in benign if not r.get("verdict", {}).get("allowed", True)]
-    missed = [r for r in harmful if r.get("verdict", {}).get("allowed", True)]
-
-    got = f"{len(blocked)}/{len(harmful)}"
-    got_fp = f"{len(false_positives)}/{len(benign)}"
-
-    print(f"dataset: {len(records)} records — {len(harmful)} harmful, {len(benign)} benign")
-    print(f"        captured {data.get('captured_at')} from {data.get('source')}")
-
-    page = INDEX.read_text()
-
-    check(
-        len(harmful) and len(benign),
-        "the dataset has both harmful and benign calls",
-        f"{len(harmful)} harmful, {len(benign)} benign",
-    )
-    check(
-        f"{got}" in page and f"{got_fp}" in page,
-        f"the page states the numbers the data supports ({got} blocked, {got_fp} false positives)",
-        f"the page carries {got} and {got_fp}",
-    )
-    # Both renderings of the numbers appear on the page: "17 / 18" in the
-    # hero stat block and "17/18" in the proof claim.  A page that shows one
-    # but not the other is a page that was edited in one place only.
-    for form in (got, got.replace("/", " / ")):
-        check(
-            form in page,
-            f"the page carries the number in the form {form!r}",
-            "present" if form in page else "missing",
-        )
-
-    # The page names the one that got through.  That claim has to be true
-    # too: it is the most specific thing the page says.
-    if missed:
-        named = re.search(r"slipped through[^<]*—\s*<code>([^<]+)</code>", page)
-        claimed = named.group(1).strip() if named else ""
-        actual = missed[0].get("call_render", "")
-        check(
-            claimed and claimed in actual,
-            "the call the page names as the one that got through is the one that got through",
-            f"the page names {claimed!r}; the data says {actual!r}",
-        )
-    else:
-        check(
-            True,
-            "the call the page names as the one that got through is the one that got through",
-            "nothing got through, so there is nothing to name",
-        )
-
-    # The depth claim.  The page says the reading is taken at a fraction of
-    # the decoder's depth; the dataset says how many layers the model has
-    # and which one the probe sits on.
-    info = data.get("info", {})
-    num_layers = info.get("num_layers")
-    summary = info.get("weight_quant_summary", "")
-    match = re.search(r"layer_(\d+)_mlp", summary)
-    probe_layer = int(match.group(1)) if match else None
-    if num_layers and probe_layer is not None:
-        pct = round(probe_layer / num_layers * 100)
-        claimed_pcts = {int(m) for m in re.findall(r"(\d{2})\s*(?:<[^>]*>)?\s*%", page)}
-        check(
-            pct in claimed_pcts,
-            f"the page's depth claim matches the model ({probe_layer} of {num_layers} layers = {pct}%)",
-            f"the page claims {sorted(claimed_pcts)}%",
-        )
-        # And the documents that repeat the number have to repeat it too.
-        if DESIGN.is_file():
-            design = DESIGN.read_text()
-            design_pcts = {int(m) for m in re.findall(r"(\d{2})% depth", design)}
-            check(
-                not design_pcts or pct in design_pcts,
-                "the design document agrees with the page about the depth",
-                f"the design document says {sorted(design_pcts)}%",
-            )
-    else:
-        check(
-            False,
-            "the page's depth claim matches the model",
-            "the dataset does not say which layer the probe sits on",
-        )
-
-    passed = sum(1 for ok, _, _ in results if ok)
-    failed = sum(1 for ok, _, _ in results if not ok)
-    print(f"\n{passed}/{passed + failed} checks passed")
-    return 0 if failed == 0 else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+sys.exit(0 if all(checks) else 1)
