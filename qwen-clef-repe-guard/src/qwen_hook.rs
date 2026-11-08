@@ -295,3 +295,112 @@ impl<L: QwenDecoderLayer> HookedQwenClefEngine<L> {
         Ok(multiply(&normed, &weight.as_type::<f32>()?)?)
     }
 }
+
+/// An engine whose backbone runs in mlx_lm (`tools/backbone_server.py`).
+///
+/// The hand-written Rust decoder drifted from the reference (it dropped the
+/// Qwen2 q/k/v biases), so the model's forward pass is delegated to the
+/// library the calibration itself runs on. Only the residual states cross
+/// the socket; every reading is still computed by the same `RepeSensor`.
+///
+/// The provenance reading needs attention probabilities, which mlx_lm's
+/// fused attention does not expose, so `attention_probs` is always `None`
+/// and the ratio is reported as unavailable rather than invented.
+pub struct RemoteBackboneEngine {
+    pub addr: String,
+    pub repe_sensor: RepeSensor,
+    pub num_layers: usize,
+    pub vocab_size: i32,
+}
+
+impl RemoteBackboneEngine {
+    fn fetch(&self, ids: &[u32]) -> Result<(Vec<Array>, Array)> {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(&self.addr)
+            .map_err(|e| anyhow::anyhow!("backbone server {} unreachable: {e}", self.addr))?;
+        let mut req = Vec::with_capacity(4 + 4 * ids.len());
+        req.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+        for id in ids {
+            req.extend_from_slice(&id.to_le_bytes());
+        }
+        s.write_all(&req)?;
+        let mut hdr = [0u8; 12];
+        s.read_exact(&mut hdr)?;
+        let dim = |i: usize| u32::from_le_bytes(hdr[i * 4..i * 4 + 4].try_into().unwrap()) as usize;
+        let (l, seq, d) = (dim(0), dim(1), dim(2));
+        let mut body = vec![0u8; (l + 1) * seq * d * 4];
+        s.read_exact(&mut body)?;
+        let floats: Vec<f32> = body
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let shape = [1, seq as i32, d as i32];
+        let per = seq * d;
+        let layers = (0..l)
+            .map(|i| Array::from_slice(&floats[i * per..(i + 1) * per], &shape))
+            .collect();
+        let final_state = Array::from_slice(&floats[l * per..], &shape);
+        Ok((layers, final_state))
+    }
+}
+
+impl GuardableEngine for RemoteBackboneEngine {
+    fn run_hooked(
+        &mut self,
+        input_ids: &Array,
+        _enable_clef_lora: bool,
+        lock_as_user_anchor: bool,
+        _clef_questions: Option<(&[ClefQuestion], &[Array])>,
+        probe_span_start: Option<usize>,
+    ) -> Result<HookedForwardOutput> {
+        let ids: Vec<u32> = input_ids
+            .as_type::<i32>()?
+            .as_slice::<i32>()
+            .iter()
+            .map(|&v| v as u32)
+            .collect();
+        let (layers, h_final) = self.fetch(&ids)?;
+        self.repe_sensor.layer_profile.clear();
+        let hook_layer = self.repe_sensor.target_layer;
+        let mut repe_telemetry = None;
+        for (idx, h) in layers.into_iter().enumerate() {
+            let mut h = h;
+            if lock_as_user_anchor {
+                if idx == hook_layer {
+                    self.repe_sensor.record_user_anchor(&h)?;
+                }
+                continue;
+            }
+            let cosine = self.repe_sensor.probe_cosine(&h, probe_span_start)?;
+            self.repe_sensor.layer_profile.push(cosine);
+            if idx == hook_layer {
+                // Reading only: a clamp here would edit a copy nothing decodes from.
+                repe_telemetry = Some(
+                    self.repe_sensor
+                        .inspect_and_maybe_clamp(&mut h, probe_span_start)?,
+                );
+            }
+        }
+        Ok(HookedForwardOutput {
+            h_final,
+            repe_telemetry,
+            clef_decisions: None,
+            attention_probs: None,
+        })
+    }
+    fn target_layer(&self) -> usize { self.repe_sensor.target_layer }
+    fn d_model(&self) -> i32 { self.repe_sensor.v_harm.shape()[0] }
+    fn vocab_size(&self) -> i32 { self.vocab_size }
+    fn calibrated_harm_threshold(&self) -> Option<f32> { self.repe_sensor.calibrated_harm_threshold }
+    fn calibrated_drift_threshold(&self) -> Option<f32> { self.repe_sensor.calibrated_drift_threshold }
+    fn calibrated_harm_excess_threshold(&self) -> Option<f32> { self.repe_sensor.calibrated_harm_excess_threshold }
+    fn static_benign_baseline(&self) -> Option<f32> { self.repe_sensor.static_benign_baseline }
+    fn compliance_excess_thresholds(&self) -> (Option<f32>, Option<f32>) {
+        (self.repe_sensor.harm_excess_threshold_obeys, self.repe_sensor.harm_excess_threshold_violates)
+    }
+    fn clef_head_calibrated(&self) -> bool { false }
+    fn layer_profile(&self) -> &[f32] { &self.repe_sensor.layer_profile }
+    fn pca_coordinates(&self) -> Vec<f32> { self.repe_sensor.last_pca_coords.clone() }
+    fn num_layers(&self) -> usize { self.num_layers }
+    fn set_capture_attention(&mut self, _on: bool) {}
+}

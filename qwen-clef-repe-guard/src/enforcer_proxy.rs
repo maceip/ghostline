@@ -292,6 +292,13 @@ pub enum EngineSpec {
         joint_head: Option<PathBuf>,
         max_layer: Option<usize>,
     },
+    /// The backbone runs in mlx_lm (`tools/backbone_server.py`); only the
+    /// residual states cross the socket.
+    Remote {
+        model_dir: PathBuf,
+        repe_vectors: PathBuf,
+        addr: String,
+    },
     /// Random weights shaped like the calibrated vectors — no checkpoint needed.
     Synthetic {
         repe_vectors: PathBuf,
@@ -364,6 +371,26 @@ impl EngineSpec {
                     repe_sensor: repe,
                     clef_head,
                     capture_attention: false,
+                }))
+            }
+            EngineSpec::Remote {
+                model_dir,
+                repe_vectors,
+                addr,
+            } => {
+                let cfg: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(model_dir.join("config.json"))?,
+                )?;
+                let cfg = cfg.get("text_config").cloned().unwrap_or(cfg);
+                let num_layers = cfg["num_hidden_layers"].as_u64().unwrap_or(0) as usize;
+                let vocab_size = cfg["vocab_size"].as_i64().unwrap_or(0) as i32;
+                let mut repe = RepeSensor::load_safetensors(repe_vectors, 0, None)?;
+                repe.target_layer = repe.target_layer.min(num_layers.saturating_sub(1));
+                Ok(Box::new(crate::qwen_hook::RemoteBackboneEngine {
+                    addr: addr.clone(),
+                    repe_sensor: repe,
+                    num_layers,
+                    vocab_size,
                 }))
             }
             EngineSpec::Synthetic {

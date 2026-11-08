@@ -62,6 +62,10 @@ struct Args {
     /// resumes decoding — the alternative completion instead of a 403.
     #[arg(long, default_value_t = false)]
     rollback: bool,
+    /// Run the backbone in mlx_lm (`tools/backbone_server.py`) at this
+    /// address instead of the in-crate Rust decoder, e.g. 127.0.0.1:8093.
+    #[arg(long)]
+    backbone_addr: Option<String>,
     /// The prompt the rollback generation answers.
     #[arg(long)]
     rollback_prompt: Option<String>,
@@ -358,14 +362,19 @@ fn main() -> Result<()> {
         },
     };
 
-    let spec = match &args.model {
-        Some(model_dir) => EngineSpec::Real {
+    let spec = match (&args.model, &args.backbone_addr) {
+        (Some(model_dir), Some(addr)) => EngineSpec::Remote {
+            model_dir: model_dir.clone(),
+            repe_vectors: args.repe.clone(),
+            addr: addr.clone(),
+        },
+        (Some(model_dir), None) => EngineSpec::Real {
             model_dir: model_dir.clone(),
             repe_vectors: args.repe.clone(),
             joint_head: args.joint_head.clone(),
             max_layer: None,
         },
-        None => EngineSpec::Synthetic {
+        (None, _) => EngineSpec::Synthetic {
             repe_vectors: args.repe.clone(),
             n_layers: 8,
         },
