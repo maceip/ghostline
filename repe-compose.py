@@ -113,6 +113,10 @@ EXTRA_SECTIONS = [
      "src/bin/rollback_probe.rs", "src/bin/rollback_probe.rs"),
     ("src/access.rs", "ACCESS", "src/access.rs", "src/access.rs"),
     ("src/session.rs", "SESSION", "src/session.rs", "src/session.rs"),
+    ("tools/backbone_server.py", "BACKBONE_SERVER", "tools/backbone_server.py",
+     "tools/backbone_server.py"),
+    ("tools/parity_check.py", "PARITY_CHECK", "tools/parity_check.py",
+     "tools/parity_check.py"),
 ]
 
 ARCHIVE_ANCHOR = "# 24. Archive"
@@ -206,11 +210,24 @@ def main():
     out = build()
     if args.check:
         cur = OUT.read_text() if OUT.exists() else ""
-        if cur == out:
-            print("generator up to date")
-            return
-        print("generator is STALE (re-run without --check)", file=sys.stderr)
-        sys.exit(1)
+        if cur != out:
+            print("generator is STALE (re-run without --check)", file=sys.stderr)
+            sys.exit(1)
+        mapping = json.loads((MODS / "_sections.json").read_text())
+        all_rels = list(mapping.values()) + [m[2] for m in EXTRA_SECTIONS if (MODS / m[2]).exists()]
+        proj = ROOT / "qwen-clef-repe-guard"
+        drifted = []
+        for rel in all_rels:
+            mod_p = MODS / rel
+            target_p = (ROOT / rel) if rel == "extract_repe_vectors.py" else (proj / rel)
+            if mod_p.exists() and target_p.exists():
+                if mod_p.read_text() != target_p.read_text():
+                    drifted.append(rel)
+        if drifted:
+            print(f"repe-mods/ and qwen-clef-repe-guard/ drifted on: {', '.join(drifted)}", file=sys.stderr)
+            sys.exit(1)
+        print("generator and module workspace up to date")
+        return
 
     OUT.write_text(out)
     print(f"wrote {OUT} ({len(out)} bytes)")

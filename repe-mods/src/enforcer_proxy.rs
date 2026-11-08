@@ -241,6 +241,22 @@ pub struct ProbeVerdict {
     /// How many tokens the tool-call span covered.
     #[serde(default)]
     pub span_tokens: usize,
+    /// The harm reading at every decoder layer for THIS call (captured
+    /// before the baseline passes reuse the engine).
+    #[serde(default)]
+    pub layer_profile: Vec<f32>,
+    /// The layer the decision reads.
+    #[serde(default)]
+    pub probe_layer: usize,
+    /// The excess threshold this decision was compared against.
+    #[serde(default)]
+    pub excess_threshold: Option<f32>,
+    /// The decoded text of every token in the tool-call span.
+    #[serde(default)]
+    pub span_token_text: Vec<String>,
+    /// Per span token, the score against each cluster.
+    #[serde(default)]
+    pub token_scores: Vec<Vec<f32>>,
     /// The share of the tool call's attention that landed on the untrusted
     /// part of the context. `None` when nothing was declared untrusted.
     #[serde(default)]
@@ -291,6 +307,13 @@ pub enum EngineSpec {
         repe_vectors: PathBuf,
         joint_head: Option<PathBuf>,
         max_layer: Option<usize>,
+    },
+    /// The backbone runs in mlx_lm (`tools/backbone_server.py`); only the
+    /// residual states cross the socket.
+    Remote {
+        model_dir: PathBuf,
+        repe_vectors: PathBuf,
+        addr: String,
     },
     /// Random weights shaped like the calibrated vectors — no checkpoint needed.
     Synthetic {
@@ -364,6 +387,26 @@ impl EngineSpec {
                     repe_sensor: repe,
                     clef_head,
                     capture_attention: false,
+                }))
+            }
+            EngineSpec::Remote {
+                model_dir,
+                repe_vectors,
+                addr,
+            } => {
+                let cfg: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(model_dir.join("config.json"))?,
+                )?;
+                let cfg = cfg.get("text_config").cloned().unwrap_or(cfg);
+                let num_layers = cfg["num_hidden_layers"].as_u64().unwrap_or(0) as usize;
+                let vocab_size = cfg["vocab_size"].as_i64().unwrap_or(0) as i32;
+                let mut repe = RepeSensor::load_safetensors(repe_vectors, 0, None)?;
+                repe.target_layer = repe.target_layer.min(num_layers.saturating_sub(1));
+                Ok(Box::new(crate::qwen_hook::RemoteBackboneEngine {
+                    addr: addr.clone(),
+                    repe_sensor: repe,
+                    num_layers,
+                    vocab_size,
                 }))
             }
             EngineSpec::Synthetic {
@@ -839,7 +882,7 @@ impl Enforcer {
                                     ema_slope: verdict.ema_slope.clone(),
                                     trajectory_turns: verdict.trajectory_turns,
                                     circuit_broken: false,
-                                    layer_profile: engine.layer_profile().to_vec(),
+                                    layer_profile: verdict.layer_profile.clone(),
                                     probe_layer: engine.target_layer(),
                                     num_layers: engine.num_layers(),
                                     d_model: engine.d_model(),
@@ -1320,6 +1363,7 @@ pub fn evaluate_probe(
     // Captured now: the baseline pass below runs the sensor again and would
     // otherwise replace these coordinates with the reference call's.
     let pca_coords = engine.pca_coordinates();
+    let layer_profile = engine.layer_profile().to_vec();
     let telemetry = out.repe_telemetry.clone().unwrap_or(RepeProbeTelemetry {
         layer_idx: engine.target_layer(),
         harm_cosine: 0.0,
@@ -1331,6 +1375,8 @@ pub fn evaluate_probe(
         attribution_cluster: None,
         attribution_cosine: 0.0,
         span_tokens: 0,
+        token_scores: Vec::new(),
+        span_start: 0,
     });
     let decisions = out.clef_decisions.unwrap_or_default();
 
@@ -1568,6 +1614,21 @@ pub fn evaluate_probe(
         attribution_cluster: telemetry.attribution_cluster,
         attribution_cosine: telemetry.attribution_cosine,
         span_tokens: telemetry.span_tokens,
+        layer_profile,
+        probe_layer: engine.target_layer(),
+        excess_threshold,
+        span_token_text: (0..telemetry.span_tokens)
+            .map(|t| {
+                full_ids
+                    .get(telemetry.span_start + t)
+                    .map(|id| encoder.decode_token(*id))
+                    .unwrap_or_default()
+            })
+            .collect(),
+        token_scores: {
+            let c = telemetry.cluster_scores.len().max(1);
+            telemetry.token_scores.chunks(c).map(|r| r.to_vec()).collect()
+        },
         untrusted_attention_ratio,
         ema_excess,
         ema_slope,

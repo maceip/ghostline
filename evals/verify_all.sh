@@ -30,7 +30,6 @@ PROJ="$ROOT/qwen-clef-repe-guard"
 MODEL="${MODEL:-/Users/mac/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/7ae557604adf67be50417f59c2c2f167def9a775/}"
 CLEF="${CLEF:-/Users/mac/.cache/huggingface/hub/models--Cloudflare--clef-flash/snapshots/fb4417d31c1d0f9e7e77f1141b40aaede7491e00/}"
 PORT="${PORT:-8094}"   # never the deployed guard (8090)
-BACKBONE="${BACKBONE:-127.0.0.1:8093}"
 UPSTREAM="${UPSTREAM:-8123}"
 
 FAILED_STEPS=()
@@ -46,12 +45,9 @@ record() {
     fi
 }
 
-step "1/11 (retired) regenerate the project from repe-mods/"
-# Regenerating qwen-clef-repe-guard/src from repe-mods/ overwrote the fixes
-# made directly in the generated tree (the Qwen2 bias load, the mlx_lm
-# backbone). qwen-clef-repe-guard/src is now the source of truth.
-echo "skipped: qwen-clef-repe-guard/src is the source of truth"
-record "1/11 regenerate the project (retired)" 0
+step "1/11 verify repe-mods sync and regenerate the project"
+(cd "$ROOT" && python3 repe-compose.py --check && python3 repe-compose.py && bash upgrade_generic_viz.sh)
+record "1/11 regenerate the project" $?
 
 step "2/11 build and unit tests"
 (cd "$PROJ" && cargo build --all-targets 2>&1 | tail -3 && cargo test --lib 2>&1 | grep -E "test result")
@@ -70,13 +66,13 @@ fi
 curl -s -o /dev/null -w "upstream http=%{http_code}\n" "http://127.0.0.1:${UPSTREAM}/v1/models"
 record "3/11 start the upstream model server" $?
 
-step "4/11 start the guard"
+step "4/11 start the guard (native Rust MLX forward pass)"
 pkill -f "qwen-clef-repe-guard --port ${PORT}" 2>/dev/null || true
 sleep 2
 (cd "$PROJ" && nohup ./target/debug/qwen-clef-repe-guard --port "$PORT" \
     --upstream "http://127.0.0.1:${UPSTREAM}" --model "$MODEL" \
     --repe artifacts/repe_vectors_qwen2_5_0_5b_v2.safetensors --mode enforce \
-    --backbone-addr "$BACKBONE" --no-zero-shot \
+    --no-zero-shot \
     > /tmp/guard_verify.log 2>&1 &)
 for _ in $(seq 1 40); do
   curl -s -o /dev/null "http://127.0.0.1:${PORT}/health" && break
@@ -95,6 +91,8 @@ python3 "$ROOT/evals/real_upstream_20.py" "$PORT" | tail -3
 record "6/11 real upstream benchmark" $?
 
 step "7/11 parity suites"
+(cd "$PROJ" && timeout 300 uv run --python 3.12 --with mlx-lm python3 tools/parity_check.py "$PORT" "$MODEL" artifacts/repe_vectors_qwen2_5_0_5b_v2.safetensors)
+record "7/11 native Rust vs mlx_lm forward parity" $?
 (cd "$ROOT" && timeout 900 uv run --python 3.12 --with mlx-lm python3 check_render_parity.py | tail -2)
 record "7/11 render parity" $?
 (cd "$PROJ" && timeout 1800 cargo run --release --quiet --bin gdn_probe -- "$CLEF" artifacts/gdn_probe >/dev/null 2>&1 \

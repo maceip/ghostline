@@ -221,7 +221,7 @@ pub fn rope_tables_at(
     for pos in 0..seq_len {
         let abs_pos = position_offset as f64 + pos as f64;
         for i in 0..half {
-            let freq = 1.0f64 / (theta as f64).powf((2 * i) as f64 / half as f64);
+            let freq = 1.0f64 / (theta as f64).powf((2 * i) as f64 / head_dim as f64);
             let angle = abs_pos * freq;
             cos_data[pos as usize * half + i] = angle.cos() as f32;
             sin_data[pos as usize * half + i] = angle.sin() as f32;
@@ -867,5 +867,45 @@ impl ShardedModelLoader {
             .or_else(|| self.optional_tensor("model.lm_head.weight"))
             .context("Missing `lm_head.weight` and the checkpoint does not tie its embeddings")?;
         Ok(w.as_type::<f32>()?)
+    }
+}
+
+#[cfg(test)]
+mod rope_parity_tests {
+    use super::*;
+
+    #[test]
+    fn rope_matches_mlx_fast_rope() {
+        let seq_len = 8;
+        let heads = 2;
+        let head_dim = 64;
+        let theta = 1_000_000.0f32;
+        let n = (seq_len * heads * head_dim) as usize;
+        let data: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.037).sin()).collect();
+        let q = Array::from_slice(&data, &[1, seq_len, heads, head_dim]);
+        let tables = rope_tables(seq_len, head_dim, theta).unwrap();
+        let (q_rot, _) = apply_rope(&q, &q, &tables).unwrap();
+
+        // mlx_rs::fast::rope rotates [B, H, S, D]
+        let q_bhsd = transpose_axes(&q, &[0, 2, 1, 3]).unwrap();
+        let fast_rot = mlx_rs::fast::rope(
+            &q_bhsd,
+            head_dim,
+            false,
+            Some(theta),
+            1.0,
+            0,
+            None::<&Array>,
+        )
+        .unwrap();
+        let fast_bshd = transpose_axes(&fast_rot, &[0, 2, 1, 3]).unwrap();
+
+        let diff = max(&abs(&subtract(&q_rot, &fast_bshd).unwrap()).unwrap(), None).unwrap();
+        diff.eval().unwrap();
+        let max_diff = diff.as_slice::<f32>()[0];
+        assert!(
+            max_diff < 1e-5,
+            "RoPE tables diverged from mlx_rs::fast::rope: max_diff={max_diff}"
+        );
     }
 }

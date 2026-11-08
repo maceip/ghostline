@@ -62,6 +62,10 @@ struct Args {
     /// resumes decoding — the alternative completion instead of a 403.
     #[arg(long, default_value_t = false)]
     rollback: bool,
+    /// Run the backbone in mlx_lm (`tools/backbone_server.py`) at this
+    /// address instead of the in-crate Rust decoder, e.g. 127.0.0.1:8093.
+    #[arg(long)]
+    backbone_addr: Option<String>,
     /// The prompt the rollback generation answers.
     #[arg(long)]
     rollback_prompt: Option<String>,
@@ -339,8 +343,26 @@ fn main() -> Result<()> {
         architecture: fingerprint.architecture.clone(),
         num_layers: fingerprint.num_layers,
         d_model: fingerprint.d_model,
-        calibration_mode: zero_shot.hyperparams.calibration_mode.clone(),
-        weight_quant_summary: zero_shot.hyperparams.weight_quant_summary.clone(),
+        // Say which vectors are actually loaded: the zero-shot label used to
+        // be reported even while calibrated vectors were in use.
+        calibration_mode: {
+            let meta = qwen_clef_repe_guard::repe_sensor::safetensors_metadata(&args.repe)
+                .unwrap_or_default();
+            if meta.contains_key("harm_excess_threshold") {
+                format!(
+                    "calibrated contrastive vectors ({}; pooling {}, baseline {})",
+                    args.repe.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
+                    meta.get("pooling").cloned().unwrap_or_else(|| "mean".into()),
+                    meta.get("baseline_mode").cloned().unwrap_or_else(|| "?".into()),
+                )
+            } else {
+                zero_shot.hyperparams.calibration_mode.clone()
+            }
+        },
+        weight_quant_summary: match &args.backbone_addr {
+            Some(addr) => format!("backbone served by mlx_lm at {addr}"),
+            None => zero_shot.hyperparams.weight_quant_summary.clone(),
+        },
     };
 
     let tokenizer = match &args.tokenizer {
@@ -358,14 +380,19 @@ fn main() -> Result<()> {
         },
     };
 
-    let spec = match &args.model {
-        Some(model_dir) => EngineSpec::Real {
+    let spec = match (&args.model, &args.backbone_addr) {
+        (Some(model_dir), Some(addr)) => EngineSpec::Remote {
+            model_dir: model_dir.clone(),
+            repe_vectors: args.repe.clone(),
+            addr: addr.clone(),
+        },
+        (Some(model_dir), None) => EngineSpec::Real {
             model_dir: model_dir.clone(),
             repe_vectors: args.repe.clone(),
             joint_head: args.joint_head.clone(),
             max_layer: None,
         },
-        None => EngineSpec::Synthetic {
+        (None, _) => EngineSpec::Synthetic {
             repe_vectors: args.repe.clone(),
             n_layers: 8,
         },

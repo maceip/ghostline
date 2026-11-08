@@ -115,6 +115,9 @@ pub struct SafetensorsIndex {
 pub enum MlxLinear {
     FullPrecision {
         weight: Array,
+        /// The additive linear bias (`<prefix>.bias`). Qwen2 / Qwen2.5 carry
+        /// one on q/k/v; dropping it silently corrupts the forward pass.
+        bias: Option<Array>,
     },
     Quantized {
         weight: Array,
@@ -122,13 +125,25 @@ pub enum MlxLinear {
         biases: Array,
         group_size: i32,
         bits: i32,
+        bias: Option<Array>,
     },
 }
 
 impl MlxLinear {
     pub fn forward(&self, x: &Array) -> Result<Array> {
+        let out = self.forward_no_bias(x)?;
+        let bias = match self {
+            MlxLinear::FullPrecision { bias, .. } | MlxLinear::Quantized { bias, .. } => bias,
+        };
+        match bias {
+            Some(b) => Ok(mlx_rs::ops::add(&out, &b.as_type::<f32>()?)?),
+            None => Ok(out),
+        }
+    }
+
+    fn forward_no_bias(&self, x: &Array) -> Result<Array> {
         match self {
-            MlxLinear::FullPrecision { weight } => {
+            MlxLinear::FullPrecision { weight, .. } => {
                 let x_f32 = x.as_type::<f32>()?;
                 let w_t = transpose_axes(&weight.as_type::<f32>()?, &[1, 0])?;
                 // MLX's Metal float32 GEMM is not float32-accurate: it
@@ -151,6 +166,7 @@ impl MlxLinear {
                 biases,
                 group_size,
                 bits,
+                ..
             } => {
                 let out = quantized_matmul(
                     x,
@@ -205,7 +221,7 @@ pub fn rope_tables_at(
     for pos in 0..seq_len {
         let abs_pos = position_offset as f64 + pos as f64;
         for i in 0..half {
-            let freq = 1.0f64 / (theta as f64).powf((2 * i) as f64 / half as f64);
+            let freq = 1.0f64 / (theta as f64).powf((2 * i) as f64 / head_dim as f64);
             let angle = abs_pos * freq;
             cos_data[pos as usize * half + i] = angle.cos() as f32;
             sin_data[pos as usize * half + i] = angle.sin() as f32;
@@ -321,7 +337,7 @@ impl QwenLoadedLayer {
                 &mlx_rs::random::normal::<f32>(&[d_model, d_model], None, None, None)?,
                 &scale,
             )?;
-            Ok(MlxLinear::FullPrecision { weight: w })
+            Ok(MlxLinear::FullPrecision { weight: w, bias: None })
         };
         Ok(Self {
             input_norm: Array::ones::<f32>(&[d_model])?,
@@ -719,6 +735,7 @@ impl ShardedModelLoader {
 
     pub fn get_linear(&self, prefix: &str) -> Result<MlxLinear> {
         let weight = self.get_tensor(&format!("{prefix}.weight"))?;
+        let bias = self.optional_tensor(&format!("{prefix}.bias"));
         let scales_key = format!("{prefix}.scales");
         let vl_scales_key = format!("language_model.{scales_key}");
 
@@ -746,9 +763,10 @@ impl ShardedModelLoader {
                 biases,
                 group_size,
                 bits: inferred_bits,
+                bias,
             })
         } else {
-            Ok(MlxLinear::FullPrecision { weight })
+            Ok(MlxLinear::FullPrecision { weight, bias })
         }
     }
 
@@ -799,13 +817,14 @@ impl ShardedModelLoader {
 
     pub fn load_embed_tokens_f32(&self) -> Result<Array> {
         match self.get_linear("model.embed_tokens")? {
-            MlxLinear::FullPrecision { weight } => Ok(weight.as_type::<f32>()?),
+            MlxLinear::FullPrecision { weight, .. } => Ok(weight.as_type::<f32>()?),
             MlxLinear::Quantized {
                 weight,
                 scales,
                 biases,
                 group_size,
                 bits,
+                ..
             } => {
                 // Embeddings are stored row-major (not transposed like linear layers).
                 let deq = dequantize(
@@ -848,5 +867,45 @@ impl ShardedModelLoader {
             .or_else(|| self.optional_tensor("model.lm_head.weight"))
             .context("Missing `lm_head.weight` and the checkpoint does not tie its embeddings")?;
         Ok(w.as_type::<f32>()?)
+    }
+}
+
+#[cfg(test)]
+mod rope_parity_tests {
+    use super::*;
+
+    #[test]
+    fn rope_matches_mlx_fast_rope() {
+        let seq_len = 8;
+        let heads = 2;
+        let head_dim = 64;
+        let theta = 1_000_000.0f32;
+        let n = (seq_len * heads * head_dim) as usize;
+        let data: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.037).sin()).collect();
+        let q = Array::from_slice(&data, &[1, seq_len, heads, head_dim]);
+        let tables = rope_tables(seq_len, head_dim, theta).unwrap();
+        let (q_rot, _) = apply_rope(&q, &q, &tables).unwrap();
+
+        // mlx_rs::fast::rope rotates [B, H, S, D]
+        let q_bhsd = transpose_axes(&q, &[0, 2, 1, 3]).unwrap();
+        let fast_rot = mlx_rs::fast::rope(
+            &q_bhsd,
+            head_dim,
+            false,
+            Some(theta),
+            1.0,
+            0,
+            None::<&Array>,
+        )
+        .unwrap();
+        let fast_bshd = transpose_axes(&fast_rot, &[0, 2, 1, 3]).unwrap();
+
+        let diff = max(&abs(&subtract(&q_rot, &fast_bshd).unwrap()).unwrap(), None).unwrap();
+        diff.eval().unwrap();
+        let max_diff = diff.as_slice::<f32>()[0];
+        assert!(
+            max_diff < 1e-5,
+            "RoPE tables diverged from mlx_rs::fast::rope: max_diff={max_diff}"
+        );
     }
 }
