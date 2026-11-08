@@ -316,8 +316,107 @@ button:disabled { cursor: progress; }
   font-size: 13px; color: var(--ink-3); flex-wrap: wrap;
 }
 
+/* ---------- UX 3: 3D Layer-Profile Heatmap & Probe Vector Inspector ---------- */
+.inspector-card, .rollback-card { margin-top: 18px; }
+.insp-head, .rb-head {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.insp-controls, .rb-controls {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font: 12px "Space Mono", monospace; color: var(--inst-ink-2);
+}
+.insp-controls input[type="range"], .rb-controls input[type="range"] {
+  width: 140px; padding: 0; border: 0; background: transparent; accent-color: var(--red);
+}
+.perf-badges {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px;
+}
+.perf-badge {
+  font: 700 11px "Space Mono", monospace; padding: 5px 10px; border-radius: 999px;
+  border: 1px solid var(--inst-line); background: var(--inst); color: var(--inst-ink-2);
+}
+.perf-badge b { color: var(--inst-ink); }
+.perf-badge.is-good { border-color: #4fae6f; color: #74d494; }
+.insp-grid {
+  display: grid; grid-template-columns: 1.15fr 1.15fr 1fr; gap: 16px; align-items: start;
+}
+.insp-col {
+  background: var(--inst); border: 1px solid var(--inst-line); border-radius: 12px; padding: 14px; min-width: 0;
+}
+.insp-col h3 {
+  font: 700 12px "Space Mono", monospace; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--inst-ink-2); margin: 0 0 10px;
+}
+.layer-heatmap {
+  display: grid; gap: 2px; max-height: 290px; overflow-y: auto; font: 11px "Space Mono", monospace;
+}
+.hm-row {
+  display: grid; grid-template-columns: 32px repeat(3, 1fr); gap: 4px; align-items: center;
+  padding: 2px 4px; border-radius: 4px; cursor: pointer;
+}
+.hm-row:hover { background: rgba(255, 255, 255, .06); }
+.hm-row.is-active { outline: 1px solid #ff7a63; background: rgba(210, 50, 31, .18); }
+.hm-lbl { color: var(--inst-ink-3); text-align: right; font-size: 10px; }
+.hm-cell {
+  text-align: center; padding: 2px 4px; border-radius: 3px; font-size: 10px; color: var(--inst-ink);
+  font-variant-numeric: tabular-nums;
+}
+.pca-3d-wrap { margin: 0; }
+.pca-3d-wrap svg { width: 100%; height: auto; display: block; background: #100f0c; border-radius: 8px; border: 1px solid var(--inst-line); }
+.layer-readout { font: 12px/1.55 "Space Mono", monospace; color: var(--inst-ink-2); display: grid; gap: 8px; }
+.lr-kv { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dashed var(--inst-line); padding-bottom: 4px; }
+.lr-kv b { color: var(--inst-ink); }
+
+/* ---------- UX 1: Block-to-Rollback Simulation ---------- */
+.rb-btn {
+  background: var(--red); color: #fff; border: 0; border-radius: 999px; padding: 8px 16px;
+  font: 700 12px "Space Mono", monospace; letter-spacing: .05em; text-transform: uppercase;
+}
+.rb-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.rb-grid { display: grid; grid-template-columns: 1fr 1.2fr; gap: 16px; margin-top: 10px; }
+.rb-col {
+  background: var(--inst); border: 1px solid var(--inst-line); border-radius: 12px; padding: 16px; min-width: 0;
+}
+.rb-col.is-refused { border-color: var(--red); }
+.rb-col.is-clamped { border-color: #4fae6f; }
+.rb-col h3 { font: 700 13px "Space Mono", monospace; text-transform: uppercase; letter-spacing: .06em; margin: 0 0 8px; }
+.rb-col code { display: block; padding: 8px 10px; background: var(--inst-2); border-radius: 8px; margin: 6px 0 10px; overflow-wrap: anywhere; }
+.rb-metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; font: 12px "Space Mono", monospace; margin: 10px 0; }
+.rb-metrics div { background: var(--inst-2); padding: 8px 10px; border-radius: 8px; border: 1px solid var(--inst-line); }
+.rb-metrics small { display: block; color: var(--inst-ink-3); font-size: 10px; text-transform: uppercase; }
+.rb-metrics b { font-size: 14px; color: var(--inst-ink); }
+.rb-svg { width: 100%; height: auto; display: block; margin-top: 8px; background: var(--inst-2); border-radius: 8px; border: 1px solid var(--inst-line); }
+
+/* ---------- UX 2: Interactive Calibration Label Playpen ---------- */
+.pp-form { display: grid; grid-template-columns: 1fr 1fr auto; gap: 12px; align-items: end; margin-bottom: 14px; }
+.pp-form .field { grid-column: auto; }
+.pp-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.pp-btn {
+  border-radius: 10px; padding: 12px 16px; font: 700 13px "Space Mono", monospace; border: 2px solid var(--ink);
+  background: var(--bg); color: var(--ink);
+}
+.pp-btn.is-benign { border-color: var(--green); color: var(--green); }
+.pp-btn.is-benign:hover { background: var(--green); color: #fff; }
+.pp-btn.is-harmful { border-color: var(--red); color: var(--red); }
+.pp-btn.is-harmful:hover { background: var(--red); color: #fff; }
+.pp-status { font: 13px "Space Mono", monospace; color: var(--ink-2); min-height: 1.4em; margin: 6px 0 14px; }
+.cal-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+.cal-card { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+.cal-card small { display: block; font: 700 11px "Space Mono", monospace; text-transform: uppercase; color: var(--ink-3); margin-bottom: 4px; }
+.cal-card b { font-size: 24px; letter-spacing: -.02em; display: block; }
+.cal-card span { font-size: 12px; color: var(--ink-2); font-family: "Space Mono", monospace; }
+.pp-feed { display: grid; gap: 6px; max-height: 260px; overflow-y: auto; font: 12px "Space Mono", monospace; }
+.pp-row {
+  display: grid; grid-template-columns: 80px 1fr 110px 110px; gap: 10px; align-items: center;
+  padding: 8px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line);
+}
+.pp-row code { overflow-wrap: anywhere; }
+.pp-tag { font-weight: 700; text-transform: uppercase; font-size: 11px; padding: 2px 8px; border-radius: 999px; text-align: center; }
+.pp-tag.harmful { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
+.pp-tag.benign { background: color-mix(in srgb, var(--green) 18%, transparent); color: var(--green); }
+
 @media (max-width: 900px) {
-  .scan-grid { grid-template-columns: 1fr; }
+  .scan-grid, .insp-grid, .rb-grid, .pp-form, .cal-stats { grid-template-columns: 1fr; }
   .nav { display: none; }
 }
 @media (max-width: 640px) {
@@ -330,7 +429,7 @@ button:disabled { cursor: progress; }
   #go { width: 100%; }
   .gauge, .gauge.sm { grid-template-columns: 1fr 56px; }
   .g-name { grid-column: 1 / -1; }
-  .board, .yours dl, .pair-btns, .pair-grid { grid-template-columns: 1fr; }
+  .board, .yours dl, .pair-btns, .pair-grid, .rb-metrics, .pp-row { grid-template-columns: 1fr; }
   .top { padding: 12px 16px; }
   .engine { font-size: 11px; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .brand { flex-shrink: 0; }

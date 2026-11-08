@@ -104,6 +104,29 @@ ok((await p.$$("#misses li")).length > 0, "mistake list opens and lists commands
 await p.click("[data-testid=y-reset]");
 ok((await p.textContent("[data-testid=y-total]")) === "0", "reset clears your score");
 
+// 6b. Ghostline branding + UX 3 (3D Layer-Profile Heatmap & Probe Vector Inspector)
+ok((await p.title()).includes("GHOSTLINE"), "index.html title carries GHOSTLINE brand");
+ok((await p.$$("#layer-heatmap .hm-row")).length === 24, "UX 3: 3D inspector renders 24 layer heatmap rows");
+ok((await p.$$("#layer-heatmap .hm-cell")).length === 72, "UX 3: 3D inspector renders 24x3 cluster cosine cells");
+ok(!!(await p.$("#pca-3d-svg path")) && (await p.$$("#pca-3d-svg circle")).length === 24, "UX 3: 3D PCA trajectory renders path + 24 layer nodes");
+ok((await p.$$("#perf-badges .perf-badge")).length === 4, "UX 3: renders 4 pipeline performance telemetry badges (prefill, KV-slice, AWQ)");
+await p.fill("[data-testid=layer-scrub]", "8");
+await p.dispatchEvent("[data-testid=layer-scrub]", "input");
+ok((await p.textContent("#scrub-label")) === "L08" && (await p.textContent("[data-testid=layer-readout]")).includes("L08"), "UX 3: scrubbing layer slider updates 3D inspector readout to L08");
+
+// 6c. UX 1 (Integrated Block-to-Rollback Simulation on index.html)
+await p.click("[data-testid=btn-rollback]");
+await p.waitForSelector("#rollback-out .rb-grid", { timeout: 20000 });
+ok(!!(await p.$("#rollback-out .rb-col.is-refused")) && !!(await p.$("#rollback-out .rb-col.is-clamped")), "UX 1: rollback simulation renders side-by-side 403 vs Layer-16 Clamp & Rollback cards");
+ok(!!(await p.$("#rollback-out svg.rb-svg")), "UX 1: rollback simulation renders pre/post clamp 24-layer trajectory SVG");
+
+// 6d. UX 2 (Interactive Calibration Label Playpen in Room 5)
+await p.fill("[data-testid=playpen-cmd]", "cargo check --workspace");
+await p.click("[data-testid=playpen-benign]");
+await p.waitForFunction(() => (document.querySelector("[data-testid=playpen-status]")?.textContent || "").includes("Recorded"), null, { timeout: 20000 });
+ok((await p.$$("#cal-stats .cal-card")).length === 3, "UX 2: calibration playpen renders 3 split-conformal stat cards");
+ok((await p.$$("#playpen-feed .pp-row")).length >= 1, "UX 2: calibration playpen renders live site_calibration.jsonl feed rows");
+
 // 7. theme toggle on index.html
 await p.click('#seg-theme button[data-theme="dark"]');
 ok((await p.getAttribute("html", "data-theme")) === "dark", "index.html theme toggle switches to dark");
@@ -124,6 +147,7 @@ await d.waitForFunction(() => {
   const txt = document.querySelector("#src-chip")?.textContent || "";
   return txt.includes("LIVE ENGINE") && !txt.includes("undefined");
 }, null, { timeout: 10000 });
+ok((await d.title()).includes("GHOSTLINE"), "demo.html title carries GHOSTLINE brand");
 ok(/LIVE ENGINE · qwen2/i.test(await d.textContent("#src-chip")), "demo.html footer chip reports live qwen2 engine");
 
 // Step 0: Wake it up (FROM QWEN live stream)
@@ -159,11 +183,15 @@ await d.waitForTimeout(650);
 ok((await d.textContent("#f4-tok")).includes("#"), "demo.html Step 4 shows peak attribution token index");
 ok(!!(await d.$("#tok-4 mark")), "demo.html Step 4 highlights peak attribution token");
 
-// Step 5: Pull the trace
+// Step 5: Pull the trace + 3D Heatmap + Block-to-Rollback simulation
 await d.click("#act-5");
 await d.waitForFunction(() => document.querySelector("#step-5")?.dataset.state === "done", null, { timeout: 15000 });
 ok(!!(await d.$("#spine svg path")), "demo.html Step 5 renders 24-layer spine curve");
 ok((await d.textContent("#f5-verdict")).includes("refuse"), "demo.html Step 5 refuses harmful command");
+ok((await d.$$("#ex-heatmap .ex-hm-cell")).length === 24, "demo.html Step 5 renders 24 3D layer-cluster heatmap cells");
+await d.click("[data-testid=ex-btn-rollback]");
+await d.waitForSelector("#ex-rollback-out .ex-rb-grid", { timeout: 20000 });
+ok((await d.$$("#ex-rollback-out .ex-rb-card")).length === 2, "demo.html Step 5B runs live Layer-16 clamp & KV rollback simulation");
 
 // Theme toggle on demo.html
 await d.click('#seg-theme button[data-theme="dark"]');

@@ -30,8 +30,12 @@ pub struct ClefDecision {
 /// The joint schema head of a Clef / Clef-Flash checkpoint.
 ///
 /// The upstream checkpoint stores its projections with the PyTorch `Linear`
-/// layout (`[out, in]`). This struct keeps the `[d_model, d_head]` layout the
-/// evaluation path expects, so the loaded tensors are transposed on the way in.
+/// layout (`[out, in]`). When the full `JointSchemaHead` (`evidence_layers`,
+/// `layers`, `residual_scorer.0`, `residual_scorer.3`, `prior_logit_scale`,
+/// `joint_logit_scale`, `residual_gate`) is present in `joint_head.safetensors`,
+/// `joint_head` holds the full module and `evaluate` runs the complete routing
+/// and decoder pipeline.
+#[derive(Clone)]
 pub struct ClefSchemaHead {
     pub w_q_option: Array,   // [d_model, d_head]
     pub w_k_state: Array,    // [d_model, d_head]
@@ -42,15 +46,17 @@ pub struct ClefSchemaHead {
     /// True when the weights came from a trained joint head. A mock head
     /// cannot judge anything, so the guard treats its answers as advisory.
     pub calibrated: bool,
+    /// Full upstream `JointSchemaHead` when loaded from a Clef / Clef-Flash checkpoint.
+    pub joint_head: Option<crate::joint_head::JointSchemaHead>,
 }
 
 impl ClefSchemaHead {
     /// Loads `joint_head.safetensors` from a Clef / Clef-Flash checkpoint directory.
     ///
     /// Two schemas are accepted:
-    ///   * the upstream Cloudflare layout
-    ///     (`question_projection`, `memory_projection`, `global_projection`,
-    ///     `residual_scorer.3.weight`), and
+    ///   * the upstream Cloudflare `JointSchemaHead` layout (loaded with full
+    ///     `EvidenceRoutingLayer`s, `TransformerDecoderLayer`s, and 2-layer
+    ///     `residual_scorer` when `hidden_norm.weight` is present), and
     ///   * a project-local export that already uses the `clef_head.*` keys.
     pub fn load_safetensors(path: impl AsRef<Path>, d_head: usize, temperature: f32) -> Result<Self> {
         let tensors: HashMap<String, Array> = Array::load_safetensors(path.as_ref())
@@ -71,8 +77,15 @@ impl ClefSchemaHead {
                 temperature,
                 scale: 1.0 / (d_head as f32).sqrt(),
                 calibrated: true,
+                joint_head: None,
             });
         }
+
+        let joint_head = if tensors.contains_key("hidden_norm.weight") {
+            crate::joint_head::JointSchemaHead::load_safetensors(path.as_ref()).ok()
+        } else {
+            None
+        };
 
         // Upstream Clef joint head.
         let question_projection = get("question_projection.weight")
@@ -94,6 +107,7 @@ impl ClefSchemaHead {
             temperature,
             scale: 1.0 / (d_head as f32).sqrt(),
             calibrated: true,
+            joint_head,
         })
     }
 
@@ -108,6 +122,27 @@ impl ClefSchemaHead {
         questions: &[ClefQuestion],
         option_embeddings: &[Array],
     ) -> Result<Vec<ClefDecision>> {
+        if let Some(jh) = &self.joint_head {
+            let q_types: Vec<i32> = questions
+                .iter()
+                .map(|q| match q {
+                    ClefQuestion::Noul { .. } => 0,
+                    ClefQuestion::Choice { .. } => 1,
+                    ClefQuestion::Score { .. } => 2,
+                })
+                .collect();
+            let raw_logits = jh.forward_hidden_options(h_final, &q_types, option_embeddings)?;
+            let mut out = Vec::with_capacity(questions.len());
+            for (q, logits) in questions.iter().zip(raw_logits.into_iter()) {
+                let logits = divide(&logits, &Array::from_f32(self.temperature.max(1e-3)))?;
+                let probs_arr = softmax_axes(&logits, &[-1], None)?;
+                probs_arr.eval()?;
+                let probs: Vec<f32> = probs_arr.as_slice::<f32>().to_vec();
+                out.push(Self::decision_from_probs(q, &probs));
+            }
+            return Ok(out);
+        }
+
         let h_seq = h_final.index((0, .., ..)).as_type::<f32>()?;
         let k_state = matmul(&h_seq, &self.w_k_state)?;
         let v_state = matmul(&h_seq, &self.w_v_state)?;
@@ -129,68 +164,71 @@ impl ClefSchemaHead {
             probs_arr.eval()?;
             let probs: Vec<f32> = probs_arr.as_slice::<f32>().to_vec();
 
-            let best = probs
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.total_cmp(b.1))
-                .map(|(i, p)| (i, *p))
-                .unwrap_or((0, 0.0));
-
-            let decision = match q {
-                ClefQuestion::Noul { id, .. } => {
-                    let p_true = probs.first().copied().unwrap_or(0.0);
-                    let p_false = probs.get(1).copied().unwrap_or(1.0 - p_true);
-                    ClefDecision {
-                        id: id.clone(),
-                        pick: if p_true >= p_false { "true".into() } else { "false".into() },
-                        weighted_score: Some(p_true),
-                        confidence: p_true.max(p_false),
-                        distribution: vec![("true".into(), p_true), ("false".into(), p_false)],
-                    }
-                }
-                ClefQuestion::Choice { id, options, .. } => {
-                    let pick = options
-                        .get(best.0)
-                        .cloned()
-                        .unwrap_or_else(|| "none".to_string());
-                    ClefDecision {
-                        id: id.clone(),
-                        pick,
-                        weighted_score: None,
-                        confidence: best.1,
-                        distribution: options
-                            .iter()
-                            .cloned()
-                            .zip(probs.iter().copied())
-                            .collect(),
-                    }
-                }
-                ClefQuestion::Score { id, levels, .. } => {
-                    let weighted_idx: f32 = probs
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &p)| (i as f32) * p)
-                        .sum();
-                    let pick = levels
-                        .get(best.0)
-                        .cloned()
-                        .unwrap_or_else(|| "none".to_string());
-                    ClefDecision {
-                        id: id.clone(),
-                        pick,
-                        weighted_score: Some(weighted_idx),
-                        confidence: best.1,
-                        distribution: levels
-                            .iter()
-                            .cloned()
-                            .zip(probs.iter().copied())
-                            .collect(),
-                    }
-                }
-            };
-            out.push(decision);
+            out.push(Self::decision_from_probs(q, &probs));
         }
 
         Ok(out)
+    }
+
+    fn decision_from_probs(q: &ClefQuestion, probs: &[f32]) -> ClefDecision {
+        let best = probs
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, p)| (i, *p))
+            .unwrap_or((0, 0.0));
+
+        match q {
+            ClefQuestion::Noul { id, .. } => {
+                let p_true = probs.first().copied().unwrap_or(0.0);
+                let p_false = probs.get(1).copied().unwrap_or(1.0 - p_true);
+                ClefDecision {
+                    id: id.clone(),
+                    pick: if p_true >= p_false { "true".into() } else { "false".into() },
+                    weighted_score: Some(p_true),
+                    confidence: p_true.max(p_false),
+                    distribution: vec![("true".into(), p_true), ("false".into(), p_false)],
+                }
+            }
+            ClefQuestion::Choice { id, options, .. } => {
+                let pick = options
+                    .get(best.0)
+                    .cloned()
+                    .unwrap_or_else(|| "none".to_string());
+                ClefDecision {
+                    id: id.clone(),
+                    pick,
+                    weighted_score: None,
+                    confidence: best.1,
+                    distribution: options
+                        .iter()
+                        .cloned()
+                        .zip(probs.iter().copied())
+                        .collect(),
+                }
+            }
+            ClefQuestion::Score { id, levels, .. } => {
+                let weighted_idx: f32 = probs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &p)| (i as f32) * p)
+                    .sum();
+                let pick = levels
+                    .get(best.0)
+                    .cloned()
+                    .unwrap_or_else(|| "none".to_string());
+                ClefDecision {
+                    id: id.clone(),
+                    pick,
+                    weighted_score: Some(weighted_idx),
+                    confidence: best.1,
+                    distribution: levels
+                        .iter()
+                        .cloned()
+                        .zip(probs.iter().copied())
+                        .collect(),
+                }
+            }
+        }
     }
 }

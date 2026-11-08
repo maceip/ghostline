@@ -529,6 +529,12 @@ pub struct RepeSensor {
     /// The harm cosine measured at every decoder layer during the last
     /// forward pass — the per-layer profile the dashboard plots.
     pub layer_profile: Vec<f32>,
+    /// Per-layer 3-cluster harm cosines (`[destruction, theft, exfiltration]`)
+    /// across all decoder layers during the last forward pass.
+    pub layer_cluster_profile: Vec<Vec<f32>>,
+    /// Per-layer 3D PCA subspace coordinates (`[pc1, pc2, pc3]`) across all
+    /// decoder layers during the last forward pass.
+    pub layer_pca_profile: Vec<Vec<f32>>,
     /// The projection of the last inspected state onto the PCA basis.
     pub last_pca_coords: Vec<f32>,
     /// Whether the harm reading is ABSOLUTE (the tool-call state itself)
@@ -560,6 +566,11 @@ pub struct RepeSensor {
     pub whitening: Option<String>,
     /// The Ledoit-Wolf shrinkage coefficient of the fitted whitening, if any.
     pub whitening_shrinkage: Option<f32>,
+    /// Per-channel AWQ activation salience scales `[D]` calibrated from the
+    /// artifact's reference/contrastive activations (`s_j = RMS_j^alpha`).
+    pub awq_channel_scales: Option<Array>,
+    /// Ratio of maximum to minimum AWQ channel scale (`max(s_j) / min(s_j)`).
+    pub awq_salience_ratio: Option<f32>,
 }
 
 impl RepeSensor {
@@ -637,6 +648,36 @@ impl RepeSensor {
             None
         };
 
+        let (awq_channel_scales, awq_salience_ratio) = match tensors
+            .get("awq_channel_scales")
+            .cloned()
+            .or_else(|| {
+                tensors
+                    .get("benign_panel")
+                    .and_then(|panel| crate::mlx_loader::compute_awq_channel_scales(panel, 0.5).ok())
+            })
+            .or_else(|| {
+                cluster_source
+                    .and_then(|clusters| crate::mlx_loader::compute_awq_channel_scales(clusters, 0.5).ok())
+            }) {
+            Some(scales) => {
+                let sf = scales.as_type::<f32>().ok().and_then(|a| a.contiguous().ok());
+                let ratio = sf.and_then(|a| {
+                    a.eval().ok()?;
+                    let sl = a.as_slice::<f32>();
+                    let min_s = sl.iter().copied().fold(f32::INFINITY, f32::min);
+                    let max_s = sl.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    if min_s > 0.0 && max_s.is_finite() {
+                        Some(max_s / min_s)
+                    } else {
+                        None
+                    }
+                });
+                (Some(scales), ratio)
+            }
+            None => (None, None),
+        };
+
         Ok(Self {
             target_layer: resolved_layer,
             v_harm: Self::unit_norm(v_harm)?,
@@ -668,11 +709,15 @@ impl RepeSensor {
             harm_excess_threshold_obeys: read_scalar("harm_excess_threshold_obeys"),
             harm_excess_threshold_violates: read_scalar("harm_excess_threshold_violates"),
             layer_profile: Vec::new(),
+            layer_cluster_profile: Vec::new(),
+            layer_pca_profile: Vec::new(),
             last_pca_coords: Vec::new(),
             absolute_harm_reading: absolute_harm_reading,
             pooling,
             whitening,
             whitening_shrinkage,
+            awq_channel_scales,
+            awq_salience_ratio,
         })
     }
 
@@ -697,11 +742,15 @@ impl RepeSensor {
             harm_excess_threshold_obeys: None,
             harm_excess_threshold_violates: None,
             layer_profile: Vec::new(),
+            layer_cluster_profile: Vec::new(),
+            layer_pca_profile: Vec::new(),
             last_pca_coords: Vec::new(),
             absolute_harm_reading: false,
             pooling: Pooling::default(),
             whitening: None,
             whitening_shrinkage: None,
+            awq_channel_scales: None,
+            awq_salience_ratio: None,
         })
     }
 
@@ -757,6 +806,24 @@ impl RepeSensor {
     pub fn probe_cosine(&self, h_layer: &Array, span_start: Option<usize>) -> Result<f32> {
         let (harm, _) = self.span_harm_reading(h_layer, span_start)?;
         Ok(harm)
+    }
+
+    /// Measure `(harm_cosine, cluster_scores, pca_coords)` for one decoder layer.
+    pub fn probe_layer_telemetry(
+        &self,
+        h_layer: &Array,
+        span_start: Option<usize>,
+    ) -> Result<(f32, Vec<f32>, Vec<f32>)> {
+        let (harm, scores) = self.span_harm_reading(h_layer, span_start)?;
+        let pca = self.pca_coordinates(h_layer, span_start)?;
+        Ok((harm, scores.cluster_scores, pca))
+    }
+
+    /// Clear all per-layer profile buffers before a new forward pass.
+    pub fn clear_profiles(&mut self) {
+        self.layer_profile.clear();
+        self.layer_cluster_profile.clear();
+        self.layer_pca_profile.clear();
     }
 
     /// The projection of the inspected state onto the PCA basis.

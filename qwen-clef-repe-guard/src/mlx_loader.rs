@@ -234,6 +234,7 @@ pub fn rope_tables_at(
 }
 
 /// Apply rotary embeddings to `q` and `k`, both shaped `[B, S, H, D]`.
+#[allow(dead_code)]
 fn apply_rope(q: &Array, k: &Array, tables: &RopeTables) -> Result<(Array, Array)> {
     // Index ranges in `mlx-rs` are `i32`-based.
     // The tables are [seq_len, head_dim/2]; broadcasting them against a
@@ -364,10 +365,11 @@ impl QwenLoadedLayer {
     }
 
     fn rms_norm(x: &Array, weight: &Array, eps: f32) -> Result<Array> {
-        let xf = x.as_type::<f32>()?;
-        let var = mean_axes(&multiply(&xf, &xf)?, &[-1], true)?;
-        let inv = rsqrt(&add(&var, &Array::from_f32(eps))?)?;
-        Ok(multiply(&multiply(&xf, &inv)?, &weight.as_type::<f32>()?)?)
+        Ok(mlx_rs::fast::rms_norm(
+            &x.as_type::<f32>()?,
+            Some(&weight.as_type::<f32>()?),
+            eps,
+        )?)
     }
 
     /// Split `[B, S, H*D]` into `[B, S, H, D]`.
@@ -452,13 +454,30 @@ impl QwenLoadedLayer {
             k = Self::rms_norm(&k, kn, self.rms_eps)?;
         }
 
-        let tables = rope_tables_at(position_offset, seq_len, self.head_dim, self.rope_theta)?;
-        let (q, k) = apply_rope(&q, &k, &tables)?;
-
         // [B, S, H, D] -> [B, H, S, D]
         let q = transpose_axes(&q, &[0, 2, 1, 3])?;
         let k = transpose_axes(&k, &[0, 2, 1, 3])?;
         let v = transpose_axes(&v, &[0, 2, 1, 3])?;
+
+        // Fused Metal RoPE kernel over [B, H, S, D] at `position_offset`.
+        let q = mlx_rs::fast::rope(
+            &q,
+            self.head_dim,
+            false,
+            Some(self.rope_theta),
+            1.0,
+            position_offset as i32,
+            None::<&Array>,
+        )?;
+        let k = mlx_rs::fast::rope(
+            &k,
+            self.head_dim,
+            false,
+            Some(self.rope_theta),
+            1.0,
+            position_offset as i32,
+            None::<&Array>,
+        )?;
 
         // Append the new keys and values to the cache. With an empty cache the
         // new arrays are used as they are — no concatenation, no copy — so
@@ -474,41 +493,46 @@ impl QwenLoadedLayer {
         self.k_cache = Some(k_all.clone());
         self.v_cache = Some(v_all.clone());
 
-        // Grouped-query attention: each KV head serves `repeats` consecutive
-        // query heads, matching the `repeat_kv` convention. The KV axis is
-        // expanded and broadcast, not merely reshaped.
-        let repeats = (self.num_heads / self.num_kv_heads.max(1)).max(1);
-        let (k, v) = if repeats > 1 {
-            let b = k_all.shape()[0];
-            let expand = |x: &Array| -> Result<Array> {
-                let x5 = x.expand_dims(2)?; // [B, n_kv, 1, S, D]
-                let x5 = broadcast_to(
-                    &x5,
-                    &[b, self.num_kv_heads, repeats, total_len as i32, self.head_dim],
-                )?;
-                Ok(x5.reshape(&[b, self.num_heads, total_len as i32, self.head_dim])?)
-            };
-            (expand(&k_all)?, expand(&v_all)?)
-        } else {
-            (k_all, v_all)
-        };
-
         let scale = 1.0f32 / (self.head_dim as f32).sqrt();
-        let scores = multiply(
-            &matmul(&q, &transpose_axes(&k, &[0, 1, 3, 2])?)?,
-            &Array::from_f32(scale),
-        )?;
         // The new tokens see every cached position and each other causally.
         let mask = cached_causal_mask(seq_len, position_offset, total_len as i32)?;
-        let scores = add(&scores, &mask)?;
-        let probs = softmax_axes(&scores, &[-1], None)?;
-        if self.capture_attention {
-            // Kept for the provenance reading: the attention distribution of
-            // the probe layer, so the guard can see how much of the tool
-            // call's attention came from the untrusted part of the context.
+
+        let attn_ctx = if !self.capture_attention {
+            // Fused Metal SDPA kernel (handles GQA head broadcast internally on GPU).
+            mlx_rs::fast::scaled_dot_product_attention(
+                &q,
+                &k_all,
+                &v_all,
+                scale,
+                mlx_rs::fast::ScaledDotProductAttentionMask::Array(&mask),
+                None::<&Array>,
+            )?
+        } else {
+            // Explicit attention matrix path when provenance attention probabilities are requested.
+            let repeats = (self.num_heads / self.num_kv_heads.max(1)).max(1);
+            let (k_exp, v_exp) = if repeats > 1 {
+                let b = k_all.shape()[0];
+                let expand = |x: &Array| -> Result<Array> {
+                    let x5 = x.expand_dims(2)?; // [B, n_kv, 1, S, D]
+                    let x5 = broadcast_to(
+                        &x5,
+                        &[b, self.num_kv_heads, repeats, total_len as i32, self.head_dim],
+                    )?;
+                    Ok(x5.reshape(&[b, self.num_heads, total_len as i32, self.head_dim])?)
+                };
+                (expand(&k_all)?, expand(&v_all)?)
+            } else {
+                (k_all, v_all)
+            };
+            let scores = multiply(
+                &matmul(&q, &transpose_axes(&k_exp, &[0, 1, 3, 2])?)?,
+                &Array::from_f32(scale),
+            )?;
+            let scores = add(&scores, &mask)?;
+            let probs = softmax_axes(&scores, &[-1], None)?;
             self.attention_probs = Some(probs.clone());
-        }
-        let attn_ctx = matmul(&probs, &v)?; // [B, H, S, D]
+            matmul(&probs, &v_exp)?
+        };
 
         // [B, H, S, D] -> [B, S, H*D]
         let attn_ctx = transpose_axes(&attn_ctx, &[0, 2, 1, 3])?;
@@ -552,6 +576,10 @@ impl QwenDecoderLayer for QwenLoadedLayer {
         QwenLoadedLayer::cache_len(self)
     }
 
+    fn clear_cache(&mut self) {
+        QwenLoadedLayer::clear_cache(self)
+    }
+
     fn forward(&mut self, h: &Array, _lora_scale: f32) -> Result<Array> {
         let seq_len = h.shape()[1];
         let h_norm = Self::rms_norm(h, &self.input_norm, self.rms_eps)?;
@@ -572,48 +600,71 @@ impl QwenDecoderLayer for QwenLoadedLayer {
             k = Self::rms_norm(&k, kn, self.rms_eps)?;
         }
 
-        let tables = rope_tables(seq_len, self.head_dim, self.rope_theta)?;
-        let (q, k) = apply_rope(&q, &k, &tables)?;
-
         // [B, S, H, D] -> [B, H, S, D]
         let q = transpose_axes(&q, &[0, 2, 1, 3])?;
         let k = transpose_axes(&k, &[0, 2, 1, 3])?;
         let v = transpose_axes(&v, &[0, 2, 1, 3])?;
 
-        // Grouped-query attention: each KV head serves `repeats` consecutive
-        // query heads, matching the `repeat_kv` convention. The KV axis is
-        // expanded and broadcast, not merely reshaped.
-        let repeats = (self.num_heads / self.num_kv_heads.max(1)).max(1);
-        let (k, v) = if repeats > 1 {
-            let b = k.shape()[0];
-            let expand = |x: &Array| -> Result<Array> {
-                let x5 = x.expand_dims(2)?; // [B, n_kv, 1, S, D]
-                let x5 = broadcast_to(
-                    &x5,
-                    &[b, self.num_kv_heads, repeats, seq_len, self.head_dim],
-                )?;
-                Ok(x5.reshape(&[b, self.num_heads, seq_len, self.head_dim])?)
-            };
-            (expand(&k)?, expand(&v)?)
-        } else {
-            (k, v)
-        };
+        // Fused Metal RoPE kernel over [B, H, S, D].
+        let q = mlx_rs::fast::rope(
+            &q,
+            self.head_dim,
+            false,
+            Some(self.rope_theta),
+            1.0,
+            0,
+            None::<&Array>,
+        )?;
+        let k = mlx_rs::fast::rope(
+            &k,
+            self.head_dim,
+            false,
+            Some(self.rope_theta),
+            1.0,
+            0,
+            None::<&Array>,
+        )?;
 
         let scale = 1.0f32 / (self.head_dim as f32).sqrt();
-        let scores = multiply(
-            &matmul(&q, &transpose_axes(&k, &[0, 1, 3, 2])?)?,
-            &Array::from_f32(scale),
-        )?;
         let mask = causal_mask(seq_len)?;
-        let scores = add(&scores, &mask)?;
-        let probs = softmax_axes(&scores, &[-1], None)?;
-        if self.capture_attention {
-            // Kept for the provenance reading: the attention distribution of
-            // the probe layer, so the guard can see how much of the tool
-            // call's attention came from the untrusted part of the context.
+
+        let attn_ctx = if !self.capture_attention {
+            // Fused Metal SDPA kernel (expands GQA KV heads on GPU without extra tensor materialization).
+            mlx_rs::fast::scaled_dot_product_attention(
+                &q,
+                &k,
+                &v,
+                scale,
+                mlx_rs::fast::ScaledDotProductAttentionMask::Array(&mask),
+                None::<&Array>,
+            )?
+        } else {
+            // Grouped-query attention: each KV head serves `repeats` consecutive
+            // query heads, matching the `repeat_kv` convention.
+            let repeats = (self.num_heads / self.num_kv_heads.max(1)).max(1);
+            let (k_exp, v_exp) = if repeats > 1 {
+                let b = k.shape()[0];
+                let expand = |x: &Array| -> Result<Array> {
+                    let x5 = x.expand_dims(2)?; // [B, n_kv, 1, S, D]
+                    let x5 = broadcast_to(
+                        &x5,
+                        &[b, self.num_kv_heads, repeats, seq_len, self.head_dim],
+                    )?;
+                    Ok(x5.reshape(&[b, self.num_heads, seq_len, self.head_dim])?)
+                };
+                (expand(&k)?, expand(&v)?)
+            } else {
+                (k, v)
+            };
+            let scores = multiply(
+                &matmul(&q, &transpose_axes(&k_exp, &[0, 1, 3, 2])?)?,
+                &Array::from_f32(scale),
+            )?;
+            let scores = add(&scores, &mask)?;
+            let probs = softmax_axes(&scores, &[-1], None)?;
             self.attention_probs = Some(probs.clone());
-        }
-        let attn_ctx = matmul(&probs, &v)?; // [B, H, S, D]
+            matmul(&probs, &v_exp)?
+        };
 
         // [B, H, S, D] -> [B, S, H*D]
         let attn_ctx = transpose_axes(&attn_ctx, &[0, 2, 1, 3])?;
@@ -908,4 +959,137 @@ mod rope_parity_tests {
             "RoPE tables diverged from mlx_rs::fast::rope: max_diff={max_diff}"
         );
     }
+
+    #[test]
+    fn awq_4bit_preserves_cosine_parity_better_than_naive_4bit() {
+        let out_dim = 16i32;
+        let in_dim = 64i32;
+        let n_samples = 12i32;
+
+        // Activation matrix with 4 high-salience channels (20x magnitude) and one
+        // near-dormant channel (j == 8) that has a large weight outlier.
+        let mut x_data = vec![0.0f32; (n_samples * in_dim) as usize];
+        for s in 0..n_samples as usize {
+            for j in 0..in_dim as usize {
+                let base = (((s * 31 + j * 17) as f32) * 0.13).sin();
+                let mult = if j < 4 {
+                    20.0
+                } else if j == 8 {
+                    0.02
+                } else {
+                    1.0
+                };
+                x_data[s * in_dim as usize + j] = base * mult;
+            }
+        }
+        let x = Array::from_slice(&x_data, &[n_samples, in_dim]);
+
+        let mut w_data = vec![0.0f32; (out_dim * in_dim) as usize];
+        for i in 0..out_dim as usize {
+            for j in 0..in_dim as usize {
+                let base = (((i * 23 + j * 7) as f32) * 0.29).cos();
+                // Dormant channel j == 8 carries a large weight spike that stretches
+                // naive 4-bit quantization step size across the whole 64-channel group.
+                let amp = if j == 8 { 3.5 } else { 0.22 };
+                w_data[i * in_dim as usize + j] = base * amp;
+            }
+        }
+        let w = Array::from_slice(&w_data, &[out_dim, in_dim]);
+
+        let scales_awq = compute_awq_channel_scales(&x, 0.65).unwrap();
+        let scales_ones = Array::ones::<f32>(&[in_dim]).unwrap();
+
+        let (_, cos_awq) = awq_quantize_4bit_sim(&w, &x, &scales_awq, 64).unwrap();
+        let (_, cos_naive) = awq_quantize_4bit_sim(&w, &x, &scales_ones, 64).unwrap();
+
+        assert!(
+            cos_awq > cos_naive,
+            "AWQ 4-bit output cosine ({cos_awq:.6}) should exceed unscaled 4-bit ({cos_naive:.6})"
+        );
+        assert!(
+            cos_awq > 0.995,
+            "AWQ 4-bit output cosine ({cos_awq:.6}) should stay > 0.995"
+        );
+    }
+}
+
+/// Compute per-channel AWQ activation salience scales `s_j = RMS(X_{:, j})^alpha`
+/// normalized to unit mean across `D` channels.
+pub fn compute_awq_channel_scales(activations: &Array, alpha: f32) -> Result<Array> {
+    let xf = activations.as_type::<f32>()?;
+    let d = xf.shape().last().copied().unwrap_or(1).max(1);
+    let rows = (xf.size() as i32 / d).max(1);
+    let flat = xf.reshape(&[rows, d])?;
+    let sq = multiply(&flat, &flat)?;
+    let mean_sq = mean_axes(&sq, &[0], false)?;
+    let rms = sqrt(&add(&mean_sq, &Array::from_f32(1e-8))?)?;
+    rms.eval()?;
+    let rms_slice = rms.as_slice::<f32>();
+    let raw: Vec<f32> = rms_slice
+        .iter()
+        .map(|&v| v.max(1e-6).powf(alpha))
+        .collect();
+    let mean_s = (raw.iter().sum::<f32>() / (raw.len().max(1) as f32)).max(1e-6);
+    let norm_s: Vec<f32> = raw.into_iter().map(|s| (s / mean_s).clamp(0.1, 20.0)).collect();
+    Ok(Array::from_slice(&norm_s, &[d]))
+}
+
+/// Perform group-wise 4-bit affine quantization with AWQ per-channel scaling
+/// `W' = Quant4(W * diag(s)) * diag(s^-1)` and return `(W_awq_deq, output_cosine_parity)`
+/// evaluated on the calibration activations `x`.
+pub fn awq_quantize_4bit_sim(
+    weight: &Array,
+    x: &Array,
+    channel_scales: &Array,
+    group_size: i32,
+) -> Result<(Array, f32)> {
+    let wf = weight.as_type::<f32>()?.contiguous()?;
+    let sf = channel_scales.as_type::<f32>()?.contiguous()?;
+    wf.eval()?;
+    sf.eval()?;
+    let shape = wf.shape();
+    let (out_dim, in_dim) = (shape[0] as usize, shape[1] as usize);
+    let w_slice = wf.as_slice::<f32>();
+    let s_slice = sf.as_slice::<f32>();
+    let g = (group_size.max(8) as usize).min(in_dim.max(1));
+
+    let mut deq = vec![0.0f32; out_dim * in_dim];
+    for r in 0..out_dim {
+        let row = &w_slice[r * in_dim..(r + 1) * in_dim];
+        for start in (0..in_dim).step_by(g) {
+            let end = (start + g).min(in_dim);
+            let mut min_v = f32::INFINITY;
+            let mut max_v = f32::NEG_INFINITY;
+            for c in start..end {
+                let scaled = row[c] * s_slice.get(c).copied().unwrap_or(1.0);
+                if scaled < min_v {
+                    min_v = scaled;
+                }
+                if scaled > max_v {
+                    max_v = scaled;
+                }
+            }
+            let step = ((max_v - min_v) / 15.0).max(1e-8);
+            for c in start..end {
+                let s_c = s_slice.get(c).copied().unwrap_or(1.0).max(1e-6);
+                let scaled = row[c] * s_c;
+                let q = ((scaled - min_v) / step).round().clamp(0.0, 15.0);
+                let rec = min_v + q * step;
+                deq[r * in_dim + c] = rec / s_c;
+            }
+        }
+    }
+    let w_deq = Array::from_slice(&deq, &[out_dim as i32, in_dim as i32]);
+    let xf = x.as_type::<f32>()?;
+    let d = in_dim as i32;
+    let rows = (xf.size() as i32 / d).max(1);
+    let x2d = xf.reshape(&[rows, d])?;
+    let y_ref = matmul(&x2d, &transpose_axes(&wf, &[1, 0])?)?;
+    let y_awq = matmul(&x2d, &transpose_axes(&w_deq, &[1, 0])?)?;
+    let dot = sum(&multiply(&y_ref, &y_awq)?, false)?;
+    let n1 = sqrt(&sum(&multiply(&y_ref, &y_ref)?, false)?)?;
+    let n2 = sqrt(&sum(&multiply(&y_awq, &y_awq)?, false)?)?;
+    mlx_rs::transforms::eval([&dot, &n1, &n2])?;
+    let cos = dot.item_exact::<f32>() / (n1.item_exact::<f32>() * n2.item_exact::<f32>()).max(1e-8);
+    Ok((w_deq, cos))
 }

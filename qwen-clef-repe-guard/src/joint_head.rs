@@ -72,7 +72,7 @@ pub struct HeadTrace {
 }
 
 /// Packed `torch.nn.MultiheadAttention` parameters.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct AttentionWeights {
     /// `in_proj_weight` split into q, k, v chunks, each transposed to `[in, out]`.
     q_weight: Array,
@@ -88,7 +88,7 @@ struct AttentionWeights {
 }
 
 /// `EvidenceRoutingLayer` from the upstream module.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct EvidenceRoutingLayer {
     query_norm_weight: Array,
     query_norm_bias: Array,
@@ -106,7 +106,7 @@ struct EvidenceRoutingLayer {
 }
 
 /// `torch.nn.TransformerDecoderLayer(norm_first=True)` from the upstream module.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TransformerDecoderLayer {
     self_attn: AttentionWeights,
     multihead_attn: AttentionWeights,
@@ -123,7 +123,7 @@ struct TransformerDecoderLayer {
 }
 
 /// `JointSchemaHead` from the upstream module.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct JointSchemaHead {
     hidden_norm_weight: Array,
     hidden_norm_bias: Array,
@@ -784,5 +784,220 @@ impl JointSchemaHead {
         }
 
         Ok((results, trace))
+    }
+
+    /// Input hidden dimension expected by `hidden_norm` (`4096` on Clef-Flash).
+    #[allow(dead_code)]
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_norm_weight
+            .shape()
+            .first()
+            .copied()
+            .unwrap_or(HIDDEN_SIZE as i32) as usize
+    }
+
+    /// Adapt a `[..., d_in]` tensor to `[..., target_d]` while preserving L2 norm
+    /// when a smaller backbone is paired with a wider JointSchemaHead.
+    #[allow(dead_code)]
+    fn adapt_width(x: &Array, target_d: i32) -> Result<Array> {
+        let xf = x.as_type::<f32>()?;
+        let d_in = xf.shape().last().copied().unwrap_or(1).max(1);
+        if d_in == target_d {
+            return Ok(xf);
+        }
+        if d_in < target_d {
+            let reps = ((target_d + d_in - 1) / d_in).max(1);
+            let parts: Vec<&Array> = (0..reps).map(|_| &xf).collect();
+            let tiled = concatenate(&parts, -1)?;
+            let sliced = match tiled.ndim() {
+                2 => tiled.try_index((.., 0..target_d))?,
+                3 => tiled.try_index((.., .., 0..target_d))?,
+                _ => tiled,
+            };
+            let scale = 1.0f32 / (reps as f32).sqrt();
+            return Ok(multiply(&sliced, &Array::from_f32(scale))?);
+        }
+        let sliced = match xf.ndim() {
+            2 => xf.try_index((.., 0..target_d))?,
+            3 => xf.try_index((.., .., 0..target_d))?,
+            _ => xf,
+        };
+        Ok(sliced)
+    }
+
+    /// Evaluates the full `JointSchemaHead` (`EvidenceRoutingLayer`s,
+    /// `TransformerDecoderLayer`s, `option_summary_norm`, `field_norm`,
+    /// `option_norm`, and 2-layer GELU `residual_scorer`) directly on the
+    /// backbone final hidden state `[1, seq, d_model]` and per-question option
+    /// embeddings `[n_options, d_model]`.
+    #[allow(dead_code)]
+    pub fn forward_hidden_options(
+        &self,
+        hidden_states: &Array,
+        question_types: &[i32],
+        option_embeddings: &[Array],
+    ) -> Result<Vec<Array>> {
+        if question_types.is_empty() || option_embeddings.is_empty() {
+            return Ok(Vec::new());
+        }
+        let head_d = self.hidden_size() as i32;
+        let h_adapted = Self::adapt_width(hidden_states, head_d)?;
+        let normalized_hidden =
+            layer_norm_op(&h_adapted, &self.hidden_norm_weight, &self.hidden_norm_bias)?;
+        let seq_len = normalized_hidden.shape()[1] as usize;
+        if seq_len == 0 {
+            bail!("forward_hidden_options called with empty sequence");
+        }
+
+        let sequence_hidden = normalized_hidden.try_index((0, 0..seq_len as i32, ..))?;
+        let memory = linear(&sequence_hidden, &self.memory_projection_weight, None)?;
+        let memory = expand_dims(&memory, 0)?;
+        let global_vector = sequence_hidden.try_index(((seq_len - 1) as i32, ..))?;
+        let mean_hidden = mean_axes(&sequence_hidden, &[0], false)?;
+
+        let n_q = question_types.len().min(option_embeddings.len());
+        let mut q_vecs: Vec<Array> = Vec::with_capacity(n_q);
+        let mut context_vectors: Vec<Array> = Vec::with_capacity(n_q);
+        let mut lexical_vectors: Vec<Array> = Vec::with_capacity(n_q);
+        let mut option_counts: Vec<usize> = Vec::with_capacity(n_q);
+
+        for qi in 0..n_q {
+            let opt_adapted = Self::adapt_width(&option_embeddings[qi], head_d)?;
+            let n_opt = opt_adapted.shape()[0].max(1);
+            let lexical =
+                layer_norm_op(&opt_adapted, &self.hidden_norm_weight, &self.hidden_norm_bias)?;
+            let opt_mean = mean_axes(&lexical, &[0], false)?;
+            let q_vec = multiply(&add(&mean_hidden, &opt_mean)?, &Array::from_f32(0.5))?;
+            let ctx = broadcast_to(&expand_dims(&global_vector, 0)?, &[n_opt, head_d])?;
+            q_vecs.push(q_vec);
+            context_vectors.push(ctx);
+            lexical_vectors.push(lexical);
+            option_counts.push(n_opt as usize);
+        }
+
+        let question_vectors = stack(&q_vecs, 0)?;
+        let type_ids = Array::from_slice(&question_types[..n_q], &[n_q as i32]);
+
+        let mut option_queries: Vec<Array> = Vec::with_capacity(n_q);
+        for index in 0..n_q {
+            let context_projected = linear(
+                &context_vectors[index],
+                &self.option_context_projection_weight,
+                None,
+            )?;
+            let lexical_projected = linear(
+                &lexical_vectors[index],
+                &self.option_lexical_projection_weight,
+                None,
+            )?;
+            let question_projected = linear(
+                &question_vectors.try_index((index as i32, ..))?,
+                &self.option_question_projection_weight,
+                None,
+            )?;
+            let question_projected = expand_dims(&question_projected, 0)?;
+            option_queries.push(add(
+                &add(&context_projected, &lexical_projected)?,
+                &question_projected,
+            )?);
+        }
+
+        let mut routed_options = concatenate(&option_queries, 0)?;
+        routed_options = expand_dims(&routed_options, 0)?;
+        for layer in &self.evidence_layers {
+            routed_options = layer.forward(&routed_options, &memory)?;
+        }
+        let routed_options = routed_options.try_index((0, ..))?;
+
+        let mut split_points: Vec<i32> = Vec::new();
+        let mut running = 0i32;
+        for count in &option_counts[..option_counts.len().saturating_sub(1)] {
+            running += *count as i32;
+            split_points.push(running);
+        }
+        let split_options = if split_points.is_empty() {
+            vec![routed_options]
+        } else {
+            routed_options.split_at_indices(&split_points, 0)?
+        };
+
+        let base_fields = linear(&question_vectors, &self.question_projection_weight, None)?;
+        let mut option_summaries: Vec<Array> = Vec::with_capacity(n_q);
+        for (index, options) in split_options.iter().enumerate() {
+            let field = base_fields.try_index((index as i32, ..))?;
+            let scores = matmul_accurate(options, &field)?;
+            let scores = divide(&scores, &Array::from_f32((WIDTH as f32).sqrt()))?;
+            let routing_weights = softmax_axes(&scores, &[0], true)?;
+            let routing_weights = reshape(&routing_weights, &[options.shape()[0], 1])?;
+            let summary = sum_axes(&multiply(&routing_weights, options)?, &[0], false)?;
+            option_summaries.push(summary);
+        }
+        let option_summary = stack(&option_summaries, 0)?;
+        let option_summary = layer_norm_op(
+            &option_summary,
+            &self.option_summary_norm_weight,
+            &self.option_summary_norm_bias,
+        )?;
+
+        let global_projected = linear(&global_vector, &self.global_projection_weight, None)?;
+        let global_projected = expand_dims(&global_projected, 0)?;
+        let type_embeddings = take_axis(&self.type_embedding_weight, &type_ids, 0)?;
+
+        let mut fields = add(&base_fields, &option_summary)?;
+        fields = add(&fields, &global_projected)?;
+        fields = add(&fields, &type_embeddings)?;
+        let mut fields = expand_dims(&fields, 0)?;
+
+        for layer in &self.layers {
+            fields = layer.forward(&fields, &memory)?;
+        }
+        let fields = layer_norm_op(&fields, &self.field_norm_weight, &self.field_norm_bias)?;
+        let fields = fields.try_index((0, ..))?;
+
+        let prior_scale = Array::from_f32(self.prior_logit_scale.min(100f32.ln()).exp());
+        let joint_scale = Array::from_f32(self.joint_logit_scale.min(100f32.ln()).exp());
+        let gate = sigmoid(&Array::from_f32(self.residual_gate))?;
+
+        let mut record_logits: Vec<Array> = Vec::with_capacity(n_q);
+        for index in 0..n_q {
+            let field = fields.try_index((index as i32, ..))?;
+            let lexical = &lexical_vectors[index];
+            let routed = &split_options[index];
+
+            let anchor_source = add(
+                &question_vectors.try_index((index as i32, ..))?,
+                &global_vector,
+            )?;
+            let anchor = normalize(&anchor_source)?;
+            let lexical_anchor = normalize(lexical)?;
+            let prior = multiply(&prior_scale, &matmul_accurate(&lexical_anchor, &anchor)?)?;
+
+            let options =
+                layer_norm_op(routed, &self.option_norm_weight, &self.option_norm_bias)?;
+            let repeated_field = broadcast_to(&expand_dims(&field, 0)?, options.shape())?;
+            let cosine = cosine_similarity(&repeated_field, &options)?;
+
+            let product = multiply(&repeated_field, &options)?;
+            let difference = abs(&subtract(&repeated_field, &options)?)?;
+            let features = concatenate(&[&repeated_field, &options, &product, &difference], -1)?;
+            let residual = linear(
+                &features,
+                &self.residual_scorer_0_weight,
+                Some(&self.residual_scorer_0_bias),
+            )?;
+            let residual = gelu(&residual)?;
+            let residual = linear(
+                &residual,
+                &self.residual_scorer_3_weight,
+                Some(&self.residual_scorer_3_bias),
+            )?;
+            let residual = squeeze_axes(&residual, &[-1])?;
+
+            let joint = add(&multiply(&joint_scale, &cosine)?, &residual)?;
+            let logit = add(&prior, &multiply(&gate, &joint)?)?;
+            record_logits.push(logit);
+        }
+
+        Ok(record_logits)
     }
 }

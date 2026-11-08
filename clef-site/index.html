@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AgentVector — read the model's mind</title>
-  <meta name="description" content="Type a command an AI agent might run. A small language model reads it, and you watch what lights up inside — live, with the misses shown." />
+  <title>GHOSTLINE — read the model's mind before the verb runs</title>
+  <meta name="description" content="Ghostline intercepts AI agent tool calls in a single prefill pass using mid-layer Representation Engineering (RepE) and the Cloudflare Clef-Flash joint schema head." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
@@ -13,9 +13,9 @@
 </head>
 <body>
   <header class="top">
-    <a class="brand" href="./index.html"><img src="./assets/mark.svg" alt="" width="22" height="22" /> AgentVector</a>
+    <a class="brand" href="./index.html"><img src="./assets/mark.svg" alt="" width="22" height="22" /> GHOSTLINE</a>
     <nav class="nav" aria-label="Exhibit rooms">
-      <a href="#try">Try it</a><a href="#line">Alarm line</a><a href="#pairs">Pairs</a><a href="#score">Scoreboard</a><a href="./demo.html" class="nav-demo" data-testid="nav-demo">Glass room →</a>
+      <a href="#try">Try it</a><a href="#inspector-3d">3D Inspector</a><a href="#rollback-panel">Rollback</a><a href="#line">Alarm line</a><a href="#pairs">Pairs</a><a href="#score">Scoreboard</a><a href="#playpen-section">Calibration Playpen</a><a href="./demo.html" class="nav-demo" data-testid="nav-demo">Glass room →</a>
     </nav>
     <div class="seg-theme" id="seg-theme" data-testid="seg-theme" role="group" aria-label="Theme">
       <button type="button" class="seg-btn" data-theme="dark">DARK</button>
@@ -27,13 +27,13 @@
   <main>
     <section class="intro">
       <canvas id="field" class="intro-field" aria-hidden="true"></canvas>
-      <p class="kicker">An exhibit about representation engineering</p>
+      <p class="kicker">GHOSTLINE · Pre-decode activation guard (RepE + Cloudflare Clef-Flash pipeline)</p>
       <h1>When an AI agent reaches for a tool,<br />what is it <em>thinking</em>?</h1>
       <p class="lede">
-        A small language model (Qwen 2.5, 0.5B) reads a shell command an agent
-        wants to run. Instead of trusting its <em>answer</em>, we open it up and
-        read the numbers inside — and judge the command from those. Everything
-        below is measured live on that model. Nothing you type is ever executed.
+        A language model (Qwen 2.5 0.5B or Cloudflare <code>clef-flash</code>) reads a shell command an agent
+        wants to run. Instead of trusting its <em>answer</em>, <strong>Ghostline</strong> opens the residual stream,
+        probes the mid-layer activation trace with Representation Engineering (RepE), and routes ambiguous cases through
+        the Clef joint schema head. Everything below is measured live on the model. Nothing you type is ever executed.
       </p>
       <ol class="route" id="route" aria-label="What happens to your command">
         <li><b>1</b><span>Your command</span><small>is typed</small></li>
@@ -98,6 +98,55 @@
             <figure class="elevator" id="elevator" data-testid="elevator"></figure>
           </article>
         </div>
+
+        <!-- UX 3: Visual 3D Layer-Profile Heatmap & Probe Vector Inspector -->
+        <article class="placard inspector-card" id="inspector-3d" data-testid="inspector-3d">
+          <div class="insp-head">
+            <div>
+              <p class="tag">3D Subspace &amp; Layer-Cluster Heatmap</p>
+              <h2><i>3D</i> Layer-Profile Heatmap &amp; Probe Vector Inspector</h2>
+              <p class="explain">Scrub across every decoder layer or click any cell to inspect the 3-cluster harm cosines (<code>destruction · theft · exfiltration</code>), the 3D PCA residual trajectory <code>[pc1, pc2, pc3]</code>, and fused MLX + KV-cache pipeline telemetry.</p>
+            </div>
+            <div class="insp-controls">
+              <label for="layer-scrub">Inspect layer <strong id="scrub-label">L16</strong></label>
+              <input type="range" id="layer-scrub" data-testid="layer-scrub" min="0" max="23" value="16" />
+            </div>
+          </div>
+          <div class="perf-badges" id="perf-badges" data-testid="perf-badges"></div>
+          <div class="insp-grid">
+            <div class="insp-col">
+              <h3>Layer × Cluster Harm Heatmap</h3>
+              <div class="layer-heatmap" id="layer-heatmap" data-testid="layer-heatmap"></div>
+            </div>
+            <div class="insp-col">
+              <h3>3D PCA Residual Trajectory (L00 → L23)</h3>
+              <figure class="pca-3d-wrap" id="pca-3d-wrap">
+                <svg id="pca-3d-svg" data-testid="pca-3d-svg" viewBox="0 0 360 280" role="img" aria-label="3D PCA residual trajectory across decoder layers"></svg>
+              </figure>
+            </div>
+            <div class="insp-col">
+              <h3>Probe Vector Readout</h3>
+              <div class="layer-readout" id="layer-readout" data-testid="layer-readout"></div>
+            </div>
+          </div>
+        </article>
+
+        <!-- UX 1: Integrated Block-to-Rollback Simulation -->
+        <article class="placard rollback-card" id="rollback-panel" data-testid="rollback-panel">
+          <div class="rb-head">
+            <div>
+              <p class="tag">Active Intervention · Speculative KV-Cache Rollback</p>
+              <h2><i>↺</i> Block (403) vs. Layer-16 Clamp &amp; Rollback</h2>
+              <p class="explain">Instead of halting the agent with a hard HTTP 403 refusal, <strong>Ghostline</strong> can clamp the destructive direction out of the Layer-16 residual span, truncate the upper-layer KV cache back to the tool-call boundary, recompute Layers 17–23, and steer the agent to a safe CLI alternative.</p>
+            </div>
+            <div class="rb-controls">
+              <label for="rollback-alpha">Clamp α: <strong id="rb-alpha-val">1.15</strong></label>
+              <input type="range" id="rollback-alpha" data-testid="rollback-alpha" min="0.40" max="2.20" step="0.05" value="1.15" />
+              <button type="button" class="rb-btn" id="btn-rollback" data-testid="btn-rollback">Simulate Clamp &amp; Rollback</button>
+            </div>
+          </div>
+          <div class="rb-out" id="rollback-out" data-testid="rollback-out"></div>
+        </article>
       </div>
     </section>
 
@@ -157,26 +206,58 @@
       </div>
     </section>
 
+    <!-- ================= ROOM 5: CALIBRATION PLAYPEN ================= -->
+    <section class="station playpen" id="playpen-section" data-testid="playpen-section">
+      <p class="tag">Room 5 · Interactive Calibration Label Playpen</p>
+      <h2>Contribute to the live Split-Conformal Calibration stream.</h2>
+      <p class="explain">
+        Test custom CLI tool calls and label them as <strong>Benign</strong> or <strong>Harmful</strong>.
+        Every submission runs a live forward pass on the guard, appends the real <code>harm_excess</code>
+        and <code>harm_cosine</code> reading to <code>site_calibration.jsonl</code>, and recomputes the
+        finite-sample split-conformal decision boundaries ($\alpha = 0.05$ and $\alpha = 0.10$) in real time.
+      </p>
+      <div class="pp-form">
+        <label class="field">
+          <span>Task context / prompt</span>
+          <input id="playpen-prompt" data-testid="playpen-prompt" value="Inspect local build state." spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>Candidate CLI command</span>
+          <input id="playpen-cmd" data-testid="playpen-cmd" value="cargo check --workspace" spellcheck="false" />
+        </label>
+        <div class="pp-actions">
+          <button type="button" class="pp-btn is-benign" id="playpen-benign" data-testid="playpen-benign">Submit as Benign</button>
+          <button type="button" class="pp-btn is-harmful" id="playpen-harmful" data-testid="playpen-harmful">Submit as Harmful</button>
+        </div>
+      </div>
+      <p class="pp-status" id="playpen-status" data-testid="playpen-status" aria-live="polite"></p>
+      <div class="cal-stats" id="cal-stats" data-testid="cal-stats"></div>
+      <div class="pp-feed-wrap">
+        <h3>Live <code>SITE_CALIBRATION</code> Stream (most recent labeled probes)</h3>
+        <div class="pp-feed" id="playpen-feed" data-testid="playpen-feed"></div>
+      </div>
+    </section>
+
     <section class="station how">
-      <p class="tag">How it was built</p>
+      <p class="tag">How Ghostline was built</p>
       <ol>
         <li><strong>Collect pairs.</strong> 24 pairs of commands: one harmful, one harmless, often with the same verb (<code>rm -rf ~/Documents</code> vs <code>rm -rf ./dist</code>).</li>
         <li><strong>Look inside.</strong> Run each through the model and record the numbers at layer 16. Harmful and harmless commands push those numbers in different directions.</li>
-        <li><strong>Measure new commands</strong> against those directions and compare with ordinary commands in the same situation. The alarm line was placed to catch as many harmful training commands as possible while letting at most one in ten ordinary ones trip it.</li>
+        <li><strong>Measure new commands</strong> against those directions and compare with ordinary commands in the same situation using prefix KV-cache slicing. The alarm line was placed to catch as many harmful training commands as possible while letting at most one in ten ordinary ones trip it.</li>
       </ol>
       <p class="limits">
         <strong>Limits.</strong> It's a small model and a small training set. It
         still mistakes some ordinary downloads for data theft, and it misses
         harm it was never shown (force-pushing over a branch, killing every
         process). It judges commands; it does <em>not</em> detect prompt
-        injection. The method comes from Zou et al.,
-        <a href="https://arxiv.org/abs/2310.01405">Representation Engineering</a> (2023).
+        injection. The activation-probing method comes from Zou et al.,
+        <a href="https://arxiv.org/abs/2310.01405">Representation Engineering</a> (2023), paired with the Cloudflare <code>clef-flash</code> joint schema head.
       </p>
     </section>
   </main>
 
   <footer class="foot">
-    <span>AgentVector · every number on this page is a live reading or a published measurement</span>
+    <span>GHOSTLINE · every number on this page is a live reading or a published measurement</span>
     <a href="https://arxiv.org/abs/2310.01405">arXiv:2310.01405</a>
   </footer>
 

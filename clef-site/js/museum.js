@@ -423,6 +423,363 @@ function renderBoard() {
   }
 }
 
+/* ---------------- UX 3: 3D Layer-Profile Heatmap & Probe Vector Inspector ---------------- */
+let scrubbedLayer = 16;
+
+function renderPerfBadges(v) {
+  const box = $("perf-badges");
+  if (!box) return;
+  box.textContent = "";
+  const badges = [
+    { label: "Prefill (Pass 1+2)", val: v.prefill_ms != null ? `${v.prefill_ms.toFixed(1)} ms` : "—", good: true },
+    { label: "Total Judge (incl. 5-cmd panel)", val: v.total_judge_ms != null ? `${v.total_judge_ms.toFixed(1)} ms` : "—", good: true },
+    {
+      label: "Speculative KV-Cache Slicing",
+      val: v.baseline_cache_hit ? `HIT (${v.baseline_cached_prefix_tokens || 0} prefix tok reused)` : "matched-panel",
+      good: !!v.baseline_cache_hit,
+    },
+    {
+      label: "AWQ Salience Ratio",
+      val: v.awq_salience_ratio != null ? `${v.awq_salience_ratio.toFixed(2)}×` : "—",
+      good: v.awq_salience_ratio != null,
+    },
+  ];
+  for (const b of badges) {
+    const span = el("span", { class: `perf-badge${b.good ? " is-good" : ""}` });
+    span.append(`${b.label}: `, el("b", {}, b.val));
+    box.append(span);
+  }
+}
+
+function renderInspector3D(v) {
+  const hm = $("layer-heatmap");
+  const svgBox = $("pca-3d-svg");
+  const readout = $("layer-readout");
+  const scrub = $("layer-scrub");
+  if (!hm || !svgBox || !readout || !scrub) return;
+
+  const nLayers = (v.layer_profile || []).length || 24;
+  scrub.max = String(Math.max(0, nLayers - 1));
+  if (scrubbedLayer >= nLayers) scrubbedLayer = v.probe_layer ?? 16;
+  scrub.value = String(scrubbedLayer);
+  $("scrub-label").textContent = `L${String(scrubbedLayer).padStart(2, "0")}`;
+
+  renderPerfBadges(v);
+
+  // 1. Layer × Cluster Heatmap
+  hm.textContent = "";
+  const clusterProf = v.layer_cluster_profile || [];
+  const flatVals = clusterProf.flat().map(Math.abs);
+  const maxAbs = Math.max(0.05, ...flatVals, ...(v.layer_profile || []).map(Math.abs));
+
+  for (let l = nLayers - 1; l >= 0; l--) {
+    const row = el("div", {
+      class: `hm-row${l === scrubbedLayer ? " is-active" : ""}`,
+      "data-layer": String(l),
+    });
+    row.append(el("span", { class: "hm-lbl" }, `L${String(l).padStart(2, "0")}${l === v.probe_layer ? "*" : ""}`));
+    const cScores = clusterProf[l] || [v.layer_profile?.[l] ?? 0, 0, 0];
+    for (let c = 0; c < 3; c++) {
+      const val = cScores[c] ?? 0;
+      const intensity = Math.min(1, Math.abs(val) / maxAbs);
+      const cell = el("span", { class: "hm-cell" }, fmt(val, 2));
+      const hueColor = c === 0 ? "224, 68, 47" : c === 1 ? "201, 138, 34" : "122, 95, 214";
+      cell.style.background = val >= 0
+        ? `rgba(${hueColor}, ${(0.12 + intensity * 0.68).toFixed(2)})`
+        : `rgba(110, 105, 95, ${(0.08 + intensity * 0.35).toFixed(2)})`;
+      row.append(cell);
+    }
+    row.addEventListener("click", () => {
+      scrubbedLayer = l;
+      renderInspector3D(v);
+    });
+    hm.append(row);
+  }
+
+  // 2. 3D Isometric PCA Trajectory SVG
+  svgBox.textContent = "";
+  const pcaProf = v.layer_pca_profile || [];
+  const W = 360, H = 280, cx = 180, cy = 148;
+  const maxPca = Math.max(0.05, ...pcaProf.flat().map(Math.abs));
+  const scale = 105 / maxPca;
+  // Isometric projection: (x, y, z) -> screen (sx, sy)
+  const proj = ([x = 0, y = 0, z = 0]) => {
+    const sx = cx + (x - y) * 0.866 * scale;
+    const sy = cy - z * scale + (x + y) * 0.45 * scale;
+    return [sx, sy];
+  };
+
+  // Draw 3D coordinate axes
+  const axes = [
+    { vec: [maxPca, 0, 0], label: "PC1 (Destruction)", col: "#e0442f" },
+    { vec: [0, maxPca, 0], label: "PC2 (Secrets)", col: "#c98a22" },
+    { vec: [0, 0, maxPca], label: "PC3 (Exfil)", col: "#7a5fd6" },
+  ];
+  for (const ax of axes) {
+    const [x1, y1] = proj([0, 0, 0]);
+    const [x2, y2] = proj(ax.vec);
+    svgBox.append(svg("line", { x1, y1, x2, y2, stroke: ax.col, "stroke-width": "1.2", "stroke-dasharray": "3 3", opacity: "0.7" }));
+    svgBox.append(svg("text", { x: x2 + 4, y: y2 + 3, fill: ax.col, "font-size": "9", "font-family": "Space Mono, monospace" }, ax.label));
+  }
+
+  if (pcaProf.length > 0) {
+    const pts = pcaProf.map((coords) => proj(coords));
+    const dPath = pts.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+    svgBox.append(svg("path", { d: dPath, fill: "none", stroke: "#f3efe4", "stroke-width": "2", opacity: "0.85" }));
+    pts.forEach(([x, y], i) => {
+      const isProbe = i === v.probe_layer;
+      const isScrub = i === scrubbedLayer;
+      const dot = svg("circle", {
+        cx: x,
+        cy: y,
+        r: isScrub ? 6.5 : isProbe ? 5 : 2.8,
+        fill: isScrub ? "#ff7a63" : isProbe ? "#d2321f" : "#b7b0a0",
+        stroke: isScrub || isProbe ? "#fff" : "none",
+        "stroke-width": isScrub ? "2" : "1.2",
+      });
+      dot.append(svg("title", {}, `L${i}: [${(pcaProf[i] || []).map((n) => fmt(n, 3)).join(", ")}]`));
+      svgBox.append(dot);
+    });
+  }
+
+  // 3. Probe Vector Readout for `scrubbedLayer`
+  readout.textContent = "";
+  const lC = clusterProf[scrubbedLayer] || [0, 0, 0];
+  const lPca = pcaProf[scrubbedLayer] || [0, 0, 0];
+  const rows = [
+    ["Selected Layer", `L${String(scrubbedLayer).padStart(2, "0")}${scrubbedLayer === v.probe_layer ? " (Probe L*)" : ""}`],
+    ["Max Harm Cosine", fmt(v.layer_profile?.[scrubbedLayer] ?? 0, 4)],
+    ["Destruction Cosine", fmt(lC[0] ?? 0, 4)],
+    ["Reading Secrets Cosine", fmt(lC[1] ?? 0, 4)],
+    ["Exfiltration Cosine", fmt(lC[2] ?? 0, 4)],
+    ["3D PCA [pc1, pc2, pc3]", `[${lPca.map((x) => fmt(x, 3)).join(", ")}]`],
+    ["Peak Token Attribution", v.attribution_token_index != null ? `#${v.attribution_token_index} "${v.attribution_token}" (${fmt(v.attribution_cosine, 3)})` : "—"],
+    ["Tool-Call Span Tokens", `${v.span_tokens ?? 0} tokens`],
+  ];
+  for (const [k, val] of rows) {
+    const div = el("div", { class: "lr-kv" });
+    div.append(el("span", {}, k), el("b", {}, val));
+    readout.append(div);
+  }
+}
+
+$("layer-scrub")?.addEventListener("input", (e) => {
+  scrubbedLayer = Number(e.target.value) || 0;
+  if (last?.verdict) renderInspector3D(last.verdict);
+});
+
+/* ---------------- UX 1: Integrated Block-to-Rollback Simulation ---------------- */
+$("rollback-alpha")?.addEventListener("input", (e) => {
+  $("rb-alpha-val").textContent = Number(e.target.value).toFixed(2);
+});
+
+function renderRollbackPreview(v, cmd) {
+  const out = $("rollback-out");
+  if (!out) return;
+  out.textContent = "";
+  const note = el("p", { class: "scale" });
+  note.textContent = v.allowed
+    ? `Current command "${cmd}" is allowed (reading ${fmt(v.harm_excess)}). Click "Simulate Clamp & Rollback" to inspect how Layer-16 clamping shifts its residual trajectory.`
+    : `Current command "${cmd}" was REFUSED (403) with harm excess ${fmt(v.harm_excess)}. Click "Simulate Clamp & Rollback" to clamp Layer ${v.probe_layer}, roll back the KV cache, and synthesize a safe CLI alternative live.`;
+  out.append(note);
+}
+
+async function runRollbackSimulation() {
+  const btn = $("btn-rollback");
+  const out = $("rollback-out");
+  if (!btn || !out) return;
+  const ask = $("ask").value.trim() || "Help me with my project.";
+  const cmd = $("cmd").value.trim() || last?.cmd || PRESETS[0].cmd;
+  const alpha = Number($("rollback-alpha")?.value || 1.15);
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = "Clamping L16 & Rolling Back…";
+  try {
+    await session();
+    const r = await fetch("/v1/guard/rollback", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: ask,
+        tool_name: "bash",
+        tool_args: { command: cmd },
+        alpha,
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.clamp_telemetry) {
+      throw new Error(data.error || `rollback HTTP ${r.status}`);
+    }
+    out.textContent = "";
+    const grid = el("div", { class: "rb-grid" });
+
+    // Left column: Strict 403 Refusal
+    const bv = data.blocked_verdict;
+    const left = el("div", { class: "rb-col is-refused" });
+    left.append(
+      el("h3", {}, bv.allowed ? "Without Clamp · Pass-Through" : "Without Clamp · HTTP 403 Refusal"),
+      el("code", {}, data.original_command),
+      el("p", { class: "scale" }, bv.reason)
+    );
+    const leftM = el("div", { class: "rb-metrics" });
+    [
+      ["Harm Excess", fmt(bv.harm_excess, 4)],
+      ["Raw Harm Cosine", fmt(bv.harm_cosine, 4)],
+      ["Peak Token", bv.attribution_token ? `"${bv.attribution_token}" (${fmt(bv.attribution_cosine, 3)})` : "—"],
+      ["Prefill / Total", `${(bv.prefill_ms || 0).toFixed(1)} / ${(bv.total_judge_ms || 0).toFixed(1)} ms`],
+    ].forEach(([k, val]) => {
+      const d = el("div");
+      d.append(el("small", {}, k), el("b", {}, val));
+      leftM.append(d);
+    });
+    left.append(leftM);
+
+    // Right column: Layer-16 Clamp & KV-Cache Rollback
+    const ct = data.clamp_telemetry;
+    const sv = data.safe_verdict;
+    const right = el("div", { class: "rb-col is-clamped" });
+    right.append(
+      el("h3", {}, `Ghostline Clamp (α=${ct.alpha.toFixed(2)}) & KV Rollback → Safe CLI`),
+      el("code", {}, data.safe_command)
+    );
+    const rightM = el("div", { class: "rb-metrics" });
+    [
+      ["L16 Cosine Shift", `${fmt(ct.reading_before, 3)} → ${fmt(ct.reading_after, 3)}`],
+      ["KV Cache Rolled Back", `${ct.cache_entries_rolled_back} entries (${ct.layers_recomputed} layers)`],
+      ["Safe Verdict", `${sv.allowed ? "ALLOWED" : "REFUSED"} (${fmt(sv.harm_excess, 4)})`],
+      ["Rewrite Source", `${data.rewrite_source} (${(data.total_rollback_ms || 0).toFixed(0)} ms)`],
+    ].forEach(([k, val]) => {
+      const d = el("div");
+      d.append(el("small", {}, k), el("b", {}, val));
+      rightM.append(d);
+    });
+    right.append(rightM);
+
+    // Mini SVG comparing layer_profile_before vs layer_profile_after
+    const before = ct.layer_profile_before || [];
+    const after = ct.layer_profile_after || [];
+    if (before.length && after.length) {
+      const W = 420, H = 96, pad = 18;
+      const all = before.concat(after);
+      const lo = Math.min(...all) - 0.02;
+      const hi = Math.max(...all) + 0.02;
+      const X = (i) => pad + (i / Math.max(1, before.length - 1)) * (W - 2 * pad);
+      const Y = (v) => H - pad - ((v - lo) / Math.max(1e-5, hi - lo)) * (H - 2 * pad);
+      const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "rb-svg", role: "img", "aria-label": "Before vs After Layer-16 Clamp" });
+      const dBefore = before.map((v, i) => `${i === 0 ? "M" : "L"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+      const dAfter = after.map((v, i) => `${i === 0 ? "M" : "L"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(" ");
+      s.append(svg("path", { d: dBefore, fill: "none", stroke: "#ff7a63", "stroke-width": "1.8", "stroke-dasharray": "4 3" }));
+      s.append(svg("path", { d: dAfter, fill: "none", stroke: "#74d494", "stroke-width": "2.2" }));
+      s.append(svg("text", { x: pad, y: 13, fill: "#b7b0a0", "font-size": "9", "font-family": "Space Mono, monospace" }, "dashed red = pre-clamp · solid green = post-clamp recomputed (L16–L23)"));
+      right.append(s);
+    }
+
+    grid.append(left, right);
+    out.append(grid);
+  } catch (e) {
+    out.textContent = "";
+    out.append(el("p", { class: "err" }, `Rollback simulation failed: ${e.message}`));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
+$("btn-rollback")?.addEventListener("click", runRollbackSimulation);
+
+/* ---------------- UX 2: Interactive Calibration Label Playpen ---------------- */
+async function loadCalibration() {
+  const statsBox = $("cal-stats");
+  const feedBox = $("playpen-feed");
+  if (!statsBox || !feedBox) return;
+  try {
+    await session();
+    const r = await fetch("/api/calibration", { credentials: "same-origin" });
+    if (!r.ok) return;
+    const cal = await r.json();
+    statsBox.textContent = "";
+    const c05 = cal.conformal_alpha_05 || {};
+    const c10 = cal.conformal_alpha_10 || {};
+    const totalProbes = cal.total_records ?? cal.total ?? 0;
+    const cards = [
+      {
+        title: "Labeled Calibration Set",
+        big: `${totalProbes} probes`,
+        sub: `${cal.benign_count || 0} benign · ${cal.harmful_count || 0} harmful`,
+      },
+      {
+        title: "Split-Conformal α = 0.05",
+        big: c05.threshold != null ? fmt(c05.threshold, 4) : "awaiting ≥19 benign",
+        sub: `rank ${c05.rank || 1} · FP ${(100 * (c05.empirical_fp_rate || 0)).toFixed(1)}% · caught ${c05.harmful_blocked || 0}/${c05.harmful_count || 0}`,
+      },
+      {
+        title: "Split-Conformal α = 0.10",
+        big: c10.threshold != null ? fmt(c10.threshold, 4) : "awaiting ≥9 benign",
+        sub: `rank ${c10.rank || 1} · FP ${(100 * (c10.empirical_fp_rate || 0)).toFixed(1)}% · caught ${c10.harmful_blocked || 0}/${c10.harmful_count || 0}`,
+      },
+    ];
+    for (const c of cards) {
+      const card = el("div", { class: "cal-card" });
+      card.append(el("small", {}, c.title), el("b", {}, c.big), el("span", {}, c.sub));
+      statsBox.append(card);
+    }
+
+    feedBox.textContent = "";
+    const recent = (cal.records || cal.recent_entries || []).slice(-12).reverse();
+    if (!recent.length) {
+      feedBox.append(el("p", { class: "empty" }, "No visitor-labeled probes yet — submit one above or tag a command in Room 1."));
+    } else {
+      for (const item of recent) {
+        const cmdText = item.cmd || item.tool_args?.cmd || item.tool_args?.command || JSON.stringify(item.tool_args || {});
+        const row = el("div", { class: "pp-row" });
+        row.append(
+          el("span", { class: `pp-tag ${item.label}` }, item.label),
+          el("code", {}, cmdText),
+          el("span", {}, `excess ${fmt(item.harm_excess ?? 0, 4)}`),
+          el("span", {}, `cos ${fmt(item.harm_cosine ?? 0, 4)}`)
+        );
+        feedBox.append(row);
+      }
+    }
+  } catch {}
+}
+
+async function submitCalibrationLabel(prompt, cmd, label) {
+  const status = $("playpen-status");
+  if (status) status.textContent = `Submitting "${cmd}" as ${label}…`;
+  try {
+    await session();
+    const r = await fetch("/api/label", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, tool_name: "bash", tool_args: { cmd }, label }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body.ok) throw new Error(body.error || body.reason || `HTTP ${r.status}`);
+    await loadCalibration();
+    if (status) {
+      const rec = body.record || body.entry || {};
+      const tot = body.calibration?.total_records ?? body.calibration?.total ?? 1;
+      status.textContent = `Recorded "${cmd}" as ${label} — live harm_excess ${fmt(rec.harm_excess ?? 0, 4)} (${tot} total in site_calibration.jsonl).`;
+    }
+  } catch (e) {
+    if (status) status.textContent = `Could not record label: ${e.message}`;
+  }
+}
+
+$("playpen-benign")?.addEventListener("click", () => {
+  const prompt = $("playpen-prompt")?.value.trim() || "Inspect local build state.";
+  const cmd = $("playpen-cmd")?.value.trim();
+  if (cmd) submitCalibrationLabel(prompt, cmd, "benign");
+});
+$("playpen-harmful")?.addEventListener("click", () => {
+  const prompt = $("playpen-prompt")?.value.trim() || "Inspect local build state.";
+  const cmd = $("playpen-cmd")?.value.trim();
+  if (cmd) submitCalibrationLabel(prompt, cmd, "harmful");
+});
+
 /* ---------------- your score (per browser) ---------------- */
 const KEY = "agentvector-tags";
 function readTags() {
@@ -445,6 +802,8 @@ for (const b of document.querySelectorAll("#intent button")) {
     writeTags(tags);
     for (const o of document.querySelectorAll("#intent button")) o.classList.toggle("is-on", o === b);
     renderYours();
+    const ask = $("ask").value.trim() || "Help me with my project.";
+    submitCalibrationLabel(ask, last.cmd, b.dataset.intent);
   });
 }
 $("y-reset").addEventListener("click", () => { writeTags([]); renderYours(); });
@@ -469,12 +828,15 @@ async function run(cmd, { auto = false } = {}) {
     const v = await judge(ask, cmd);
     const ms = Math.round(performance.now() - t0);
     last = { id: `${Date.now()}`, cmd, verdict: v };
+    scrubbedLayer = v.probe_layer ?? 16;
     $("scan-status").textContent = auto ? `Live reading · first example · ${ms} ms` : `Live reading · ${ms} ms`;
     renderVerdict(v);
     renderSwarm();
     renderTokens(v);
     renderGauges(v);
     renderElevator(v);
+    renderInspector3D(v);
+    renderRollbackPreview(v, cmd);
     if (field) {
       field.setState({
         blocked: !v.allowed,
@@ -514,6 +876,7 @@ for (const p of PRESETS) {
 
 (async () => {
   loadEngine();
+  loadCalibration();
   try {
     const r = await fetch("./data/heldout.json", { cache: "no-store" });
     if (r.ok) heldout = await r.json();

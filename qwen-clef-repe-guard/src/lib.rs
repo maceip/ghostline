@@ -1,6 +1,10 @@
 pub mod access;
 pub mod clef_head;
 pub mod enforcer_proxy;
+pub mod gdn;
+pub mod hybrid_backbone;
+pub mod hybrid_loader;
+pub mod joint_head;
 pub mod mlx_loader;
 pub mod qwen_hook;
 pub mod repe_sensor;

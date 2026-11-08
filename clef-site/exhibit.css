@@ -692,3 +692,42 @@ body.exhibit {
   background: #f4f2ec;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.75);
 }
+
+.ex-subbox {
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(128, 128, 128, 0.25);
+}
+.ex-hm-wrap {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.ex-hm-cell {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.06);
+  border: 1px solid rgba(128, 128, 128, 0.22);
+}
+.ex-rb-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.ex-rb-card {
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.05);
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.ex-rb-card.is-refused { border-color: #D71921; }
+.ex-rb-card.is-clamped { border-color: #2f7d4a; }
+@media (max-width: 720px) {
+  .ex-rb-grid { grid-template-columns: 1fr; }
+}

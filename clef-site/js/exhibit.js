@@ -466,6 +466,26 @@ async function act5() {
         : "it points at harm — we refuse";
       $("f5-verdict").className = "ex-verdict " + (v.allowed ? "is-ok" : "is-blocked");
       $("f5-reason").textContent = v.reason || "";
+
+      // Render 3D Layer-Cluster Heatmap & PCA Subspace cells
+      const hm = $("ex-heatmap");
+      if (hm) {
+        const cProf = Array.isArray(v.layer_cluster_profile) ? v.layer_cluster_profile : [];
+        const pProf = Array.isArray(v.layer_pca_profile) ? v.layer_pca_profile : [];
+        hm.innerHTML = v.layer_profile
+          .map((val, idx) => {
+            const c = cProf[idx] || [val, 0, 0];
+            const p = pProf[idx] || [0, 0, 0];
+            const isProbe = idx === v.probe_layer;
+            return `<div class="ex-hm-cell" style="${isProbe ? "border-color:#D71921;font-weight:700;" : ""}" title="L${idx} PCA [${p.map((x) => fmt(x)).join(", ")}]">
+              <div>L${String(idx).padStart(2, "0")}${isProbe ? "*" : ""}</div>
+              <div style="color:#D71921">${fmt(c[0])}</div>
+              <div style="opacity:.75">${fmt(c[1])} / ${fmt(c[2])}</div>
+            </div>`;
+          })
+          .join("");
+      }
+
       reveal($("out-5"));
       const panel = $("out-5");
       panel.classList.add("is-peek");
@@ -479,6 +499,52 @@ async function act5() {
   lockDone("step-5");
 }
 
+/* ---------- 5B · Glass Room Block-to-Rollback simulation ---------- */
+async function act5Rollback() {
+  const btn = $("ex-btn-rollback");
+  const out = $("ex-rollback-out");
+  if (!btn || !out) return;
+  const cmd = $("ex-input")?.value.trim() || "rm -rf ~/Documents";
+  await withWork(btn, "5B · CLAMP LAYER 16 & ROLL BACK KV CACHE", async () => {
+    try {
+      await ensureSession();
+      const res = await fetch("/v1/guard/rollback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          prompt: "Direct request from the run-it page.",
+          tool_name: "bash",
+          tool_args: { command: cmd },
+          alpha: 1.15,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json();
+      const ct = d.clamp_telemetry;
+      const bv = d.blocked_verdict;
+      const sv = d.safe_verdict;
+      out.innerHTML = `<div class="ex-rb-grid">
+        <div class="ex-rb-card is-refused">
+          <strong>STRICT 403 REFUSAL</strong><br/>
+          <code>${escapeHtml(d.original_command)}</code><br/>
+          harm_excess: <b>${fmt(bv.harm_excess)}</b> · raw: ${fmt(bv.harm_cosine)}<br/>
+          prefill: ${(bv.prefill_ms || 0).toFixed(1)} ms · total: ${(bv.total_judge_ms || 0).toFixed(1)} ms
+        </div>
+        <div class="ex-rb-card is-clamped">
+          <strong>LAYER-16 CLAMP &amp; KV ROLLBACK → SAFE CLI</strong><br/>
+          <code>${escapeHtml(d.safe_command)}</code><br/>
+          L16 shift: <b>${fmt(ct.reading_before)} → ${fmt(ct.reading_after)}</b><br/>
+          KV rolled back: <b>${ct.cache_entries_rolled_back} entries (${ct.layers_recomputed} layers)</b><br/>
+          safe verdict: <b>${sv.allowed ? "ALLOWED" : "REFUSED"} (${fmt(sv.harm_excess)})</b>
+        </div>
+      </div>`;
+    } catch (err) {
+      out.innerHTML = `<p class="ex-runstatus is-blocked">rollback failed — ${escapeHtml(String(err))}</p>`;
+    }
+  });
+}
+
 /* ---------- wiring ---------- */
 $("act-0").addEventListener("click", act0);
 $("act-1").addEventListener("click", act1);
@@ -486,6 +552,7 @@ $("act-2").addEventListener("click", act2);
 $("act-3").addEventListener("click", act3);
 $("act-4").addEventListener("click", act4);
 $("act-5").addEventListener("click", act5);
+$("ex-btn-rollback")?.addEventListener("click", act5Rollback);
 $("ex-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") act3();
 });

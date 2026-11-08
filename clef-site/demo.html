@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AGENTVECTOR — run it</title>
+  <title>GHOSTLINE — Glass Room · run it</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Doto:wght@100..900&family=Space+Grotesk:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
@@ -14,8 +14,8 @@
 <body class="exhibit">
 
   <header class="ex-head">
-    <a class="ex-brand" href="./index.html"><img id="ex-logo" alt="AgentVector" /></a>
-    <p class="label ex-title"><a href="./index.html" style="text-decoration:none;margin-right:12px;">← EXHIBIT</a> · RUN IT</p>
+    <a class="ex-brand" href="./index.html" style="font-family:var(--mono);font-weight:700;letter-spacing:0.12em;text-decoration:none;color:inherit;display:inline-flex;align-items:center;gap:8px;"><img id="ex-logo" alt="Ghostline" style="height:22px;" /><span>GHOSTLINE</span></a>
+    <p class="label ex-title"><a href="./index.html" style="text-decoration:none;margin-right:12px;">← EXHIBIT</a> · GLASS ROOM · RUN IT</p>
     <div class="seg seg-theme" id="seg-theme" role="group" aria-label="Theme">
       <button type="button" class="seg-btn" data-theme="dark">DARK</button>
       <button type="button" class="seg-btn is-on" data-theme="light">LIGHT</button>
@@ -218,6 +218,22 @@
           <div id="spine"></div>
           <p class="knob-hint">harm cosine by depth · probe at layer 16 · raw vs baseline-subtracted</p>
           <p class="ex-reason" id="f5-reason"></p>
+
+          <!-- Glass Room 3D Layer-Cluster Heatmap & PCA Subspace Inspector -->
+          <div class="ex-subbox" id="ex-heatmap-box" data-testid="ex-heatmap-box">
+            <p class="ex-sub">3D LAYER-CLUSTER HEATMAP &amp; PCA SUBSPACE INSPECTOR</p>
+            <div class="ex-hm-wrap" id="ex-heatmap" data-testid="ex-heatmap"></div>
+          </div>
+
+          <!-- Glass Room Integrated Block-to-Rollback Simulation -->
+          <div class="ex-subbox" id="ex-rollback-box" data-testid="ex-rollback-box">
+            <p class="ex-sub">WHAT IF GHOSTLINE CLAMPS &amp; ROLLS BACK INSTEAD OF A 403?</p>
+            <p style="font-size:14px;margin-bottom:12px;">
+              Clamp the destructive activation at Layer 16 ($\alpha = 1.15$), roll the upper-layer KV cache back to the tool-call span boundary, recompute Layers 17–23, and steer the agent to a safe CLI alternative.
+            </p>
+            <button class="ex-act" id="ex-btn-rollback" data-testid="ex-btn-rollback" type="button" style="margin-top:4px;">5B · CLAMP LAYER 16 &amp; ROLL BACK KV CACHE</button>
+            <div class="ex-rb-out" id="ex-rollback-out" data-testid="ex-rollback-out" style="margin-top:16px;"></div>
+          </div>
         </div>
       </div>
     </section>

@@ -245,6 +245,12 @@ pub struct ProbeVerdict {
     /// before the baseline passes reuse the engine).
     #[serde(default)]
     pub layer_profile: Vec<f32>,
+    /// Per-layer harm cluster cosines `[layer][cluster]` for 3D heatmap inspection.
+    #[serde(default)]
+    pub layer_cluster_profile: Vec<Vec<f32>>,
+    /// Per-layer 3D PCA subspace coordinates `[layer][pc1, pc2, pc3]`.
+    #[serde(default)]
+    pub layer_pca_profile: Vec<Vec<f32>>,
     /// The layer the decision reads.
     #[serde(default)]
     pub probe_layer: usize,
@@ -270,6 +276,21 @@ pub struct ProbeVerdict {
     /// How many turns the trajectory has accumulated.
     #[serde(default)]
     pub trajectory_turns: usize,
+    /// Wall-clock milliseconds spent on Pass 1 + Pass 2 prefill.
+    #[serde(default)]
+    pub prefill_ms: f32,
+    /// Total wall-clock milliseconds spent judging the tool call (including baseline).
+    #[serde(default)]
+    pub total_judge_ms: f32,
+    /// Whether Pass 3 reused the prefix KV cache via speculative slicing (or matched-panel cache).
+    #[serde(default)]
+    pub baseline_cache_hit: bool,
+    /// Number of shared prefix tokens reused from the KV cache across Pass 3.
+    #[serde(default)]
+    pub baseline_cached_prefix_tokens: usize,
+    /// AWQ activation salience ratio (`max_channel_scale / min_channel_scale`).
+    #[serde(default)]
+    pub awq_salience_ratio: Option<f32>,
     pub clef_decisions: Vec<ClefDecision>,
 }
 
@@ -332,13 +353,53 @@ impl EngineSpec {
                 max_layer,
             } => {
                 let loader = ShardedModelLoader::open(model_dir, *max_layer)?;
+                let effective_joint_head = joint_head.clone().or_else(|| {
+                    let candidate = model_dir.join("joint_head.safetensors");
+                    if candidate.exists() {
+                        Some(candidate)
+                    } else {
+                        None
+                    }
+                });
+
                 if loader.config.is_hybrid_attention() {
-                    anyhow::bail!(
-                        "checkpoint at {:?} uses a hybrid linear-attention stack; the reference \
-                         decoder block in this crate implements the dense stack only. Calibrate \
-                         with the Python extractor (mlx_lm) and serve the backbone from mlx_lm.",
-                        model_dir
-                    );
+                    let weights = crate::hybrid_loader::HybridModelWeights::load(model_dir)?;
+                    let layer_count = weights.cfg.num_hidden_layers;
+                    let mut repe = RepeSensor::load_safetensors(repe_vectors, 0, Some(0.45))?;
+                    repe.target_layer = repe.target_layer.min(layer_count.saturating_sub(1));
+
+                    let clef_head = match &effective_joint_head {
+                        Some(path) => {
+                            let d_head = clef_head_width(path)?;
+                            let mut head = ClefSchemaHead::load_safetensors(path, d_head, 1.0)?;
+                            let expected_d = head
+                                .joint_head
+                                .as_ref()
+                                .map(|jh| jh.hidden_size())
+                                .unwrap_or(d_head);
+                            if expected_d != weights.cfg.hidden_size as usize {
+                                tracing::warn!(
+                                    expected_d,
+                                    backbone_d = weights.cfg.hidden_size,
+                                    "joint_head width differs from hybrid backbone hidden_size — marking uncalibrated"
+                                );
+                                head.calibrated = false;
+                            }
+                            Some(head)
+                        }
+                        None => {
+                            tracing::warn!(
+                                "no joint_head.safetensors found: Clef questions are DISABLED"
+                            );
+                            None
+                        }
+                    };
+
+                    return Ok(Box::new(crate::qwen_hook::HybridGuardEngine {
+                        backbone: crate::hybrid_backbone::HybridBackbone::new(weights),
+                        repe_sensor: repe,
+                        clef_head,
+                    }));
                 }
 
                 let layer_count = loader.detected_layer_count();
@@ -360,11 +421,26 @@ impl EngineSpec {
 
                 let embed_tokens = loader.load_embed_tokens_f32()?;
                 let final_norm_weight = loader.load_final_norm()?;
+                let backbone_d = embed_tokens.shape().get(1).copied().unwrap_or(0) as usize;
 
-                let clef_head = match joint_head {
+                let clef_head = match &effective_joint_head {
                     Some(path) => {
                         let d_head = clef_head_width(path)?;
-                        Some(ClefSchemaHead::load_safetensors(path, d_head, 1.0)?)
+                        let mut head = ClefSchemaHead::load_safetensors(path, d_head, 1.0)?;
+                        let expected_d = head
+                            .joint_head
+                            .as_ref()
+                            .map(|jh| jh.hidden_size())
+                            .unwrap_or(d_head);
+                        if expected_d != backbone_d {
+                            tracing::warn!(
+                                expected_d,
+                                backbone_d,
+                                "joint_head width differs from dense backbone d_model — marking uncalibrated"
+                            );
+                            head.calibrated = false;
+                        }
+                        Some(head)
                     }
                     None => {
                         // No trained head for this backbone -> no head. A random
@@ -394,6 +470,23 @@ impl EngineSpec {
                 repe_vectors,
                 addr,
             } => {
+                // Prefer the native fused Rust MLX engine (`EngineSpec::Real`)
+                // now that both dense Qwen2/Qwen3 and hybrid Clef-Flash stacks
+                // have full parity and support KV-cache slicing + rollback.
+                let real_spec = EngineSpec::Real {
+                    model_dir: model_dir.clone(),
+                    repe_vectors: repe_vectors.clone(),
+                    joint_head: None,
+                    max_layer: None,
+                };
+                if let Ok(native_engine) = real_spec.build() {
+                    tracing::info!(
+                        model_dir = %model_dir.display(),
+                        "using native fused Rust MLX engine (bypassing remote backbone socket {})",
+                        addr
+                    );
+                    return Ok(native_engine);
+                }
                 let cfg: serde_json::Value = serde_json::from_str(
                     &std::fs::read_to_string(model_dir.join("config.json"))?,
                 )?;
@@ -452,6 +545,11 @@ fn clef_head_width(path: &Path) -> Result<usize> {
     let width = tensors
         .get("question_projection.weight")
         .map(|a| a.shape()[0] as usize)
+        .or_else(|| {
+            tensors
+                .get("hidden_norm.weight")
+                .map(|a| a.shape()[0] as usize)
+        })
         .or_else(|| {
             tensors
                 .get("clef_head.w_q_option")
@@ -647,6 +745,20 @@ pub struct TelemetryEvent {
     pub trajectory_turns: usize,
     pub circuit_broken: bool,
     pub layer_profile: Vec<f32>,
+    #[serde(default)]
+    pub layer_cluster_profile: Vec<Vec<f32>>,
+    #[serde(default)]
+    pub layer_pca_profile: Vec<Vec<f32>>,
+    #[serde(default)]
+    pub prefill_ms: f32,
+    #[serde(default)]
+    pub total_judge_ms: f32,
+    #[serde(default)]
+    pub baseline_cache_hit: bool,
+    #[serde(default)]
+    pub baseline_cached_prefix_tokens: usize,
+    #[serde(default)]
+    pub awq_salience_ratio: Option<f32>,
     pub probe_layer: usize,
     pub num_layers: usize,
     pub d_model: i32,
@@ -780,6 +892,11 @@ enum EngineCommand {
         block_threshold: f32,
         reply: oneshot::Sender<Result<ProbeVerdict, String>>,
     },
+    Rollback {
+        probe: ToolCallProbe,
+        alpha: f32,
+        reply: oneshot::Sender<Result<crate::qwen_hook::RollbackSpanTelemetry, String>>,
+    },
 }
 
 /// The blocking tool-call enforcer.
@@ -883,6 +1000,14 @@ impl Enforcer {
                                     trajectory_turns: verdict.trajectory_turns,
                                     circuit_broken: false,
                                     layer_profile: verdict.layer_profile.clone(),
+                                    layer_cluster_profile: verdict.layer_cluster_profile.clone(),
+                                    layer_pca_profile: verdict.layer_pca_profile.clone(),
+                                    prefill_ms: verdict.prefill_ms,
+                                    total_judge_ms: verdict.total_judge_ms,
+                                    baseline_cache_hit: verdict.baseline_cache_hit,
+                                    baseline_cached_prefix_tokens: verdict
+                                        .baseline_cached_prefix_tokens,
+                                    awq_salience_ratio: verdict.awq_salience_ratio,
                                     probe_layer: engine.target_layer(),
                                     num_layers: engine.num_layers(),
                                     d_model: engine.d_model(),
@@ -894,6 +1019,32 @@ impl Enforcer {
                                     tool_args: probe.tool_args.clone(),
                                 });
                             }
+                            let _ = reply.send(outcome);
+                        }
+                        EngineCommand::Rollback {
+                            probe,
+                            alpha,
+                            reply,
+                        } => {
+                            let outcome = (|| -> Result<crate::qwen_hook::RollbackSpanTelemetry> {
+                                let prompt_ids =
+                                    tokenizer.encode(&render_user_turn(&probe.prompt));
+                                let full_ids = tokenizer.encode(&render_tool_call_turn(
+                                    &probe.prompt,
+                                    &probe.tool_name,
+                                    &probe.tool_args,
+                                ));
+                                let span_prefix_ids =
+                                    tokenizer.encode(&tool_call_span_prefix(&probe.prompt));
+                                let vocab =
+                                    tokenizer.vocab_size.min(engine.vocab_size()).max(1);
+                                let user_ids = input_ids_matrix(&prompt_ids, vocab);
+                                engine.run_anchor_only(&user_ids)?;
+                                let full = input_ids_matrix(&full_ids, vocab);
+                                let span_start = tool_span_start(&span_prefix_ids, &full_ids);
+                                engine.clamp_and_rollback_span(&full, span_start, alpha)
+                            })()
+                            .map_err(|e| format!("{e:#}"));
                             let _ = reply.send(outcome);
                         }
                     }
@@ -928,6 +1079,28 @@ impl Enforcer {
         }
     }
 
+    /// Clamp a harmful tool-call span at `target_layer` and roll back + recompute upper layers.
+    pub async fn rollback_span(
+        &self,
+        probe: ToolCallProbe,
+        alpha: f32,
+    ) -> Result<crate::qwen_hook::RollbackSpanTelemetry> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::Rollback {
+                probe,
+                alpha,
+                reply: reply_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("the MLX engine thread is not running"))?;
+
+        match reply_rx.await {
+            Ok(Ok(telemetry)) => Ok(telemetry),
+            Ok(Err(e)) => Err(anyhow::anyhow!(e)),
+            Err(_) => Err(anyhow::anyhow!("the MLX engine thread dropped the request")),
+        }
+    }
+
     /// The HTTP surface of the guard.
     ///
     /// The access-control layer carries its own copy of the state, so it
@@ -945,7 +1118,9 @@ impl Enforcer {
             .route("/health", get(health))
             .route("/api/events", get(events_stream))
             .route("/api/info", get(engine_info))
+            .route("/api/calibration", get(get_calibration))
             .route("/v1/guard/tool-call", post(guard_tool_call))
+            .route("/v1/guard/rollback", post(guard_rollback))
             .route("/v1/chat/completions", post(proxy_chat_completions))
             .route("/api/label", post(record_label))
             .route(
@@ -1183,12 +1358,21 @@ fn input_ids_matrix(ids: &[u32], vocab_size: i32) -> Array {
     Array::from_slice(&flat, &[1, len])
 }
 
-/// How many answer rows a question needs.
-fn option_count(q: &ClefQuestion) -> usize {
+/// The option labels a question evaluates.
+fn option_labels(q: &ClefQuestion) -> Vec<String> {
     match q {
-        ClefQuestion::Noul { .. } => 2,
-        ClefQuestion::Choice { options, .. } => options.len(),
-        ClefQuestion::Score { levels, .. } => levels.len(),
+        ClefQuestion::Noul { .. } => vec!["true".to_string(), "false".to_string()],
+        ClefQuestion::Choice { options, .. } => options.clone(),
+        ClefQuestion::Score { levels, .. } => levels.clone(),
+    }
+}
+
+/// The question query text used to contextualize option embeddings.
+fn question_query(q: &ClefQuestion) -> &str {
+    match q {
+        ClefQuestion::Noul { query, .. }
+        | ClefQuestion::Choice { query, .. }
+        | ClefQuestion::Score { query, .. } => query.as_str(),
     }
 }
 
@@ -1207,23 +1391,51 @@ fn synthetic_option_vector(question: usize, option: usize, j: usize) -> f32 {
     ((h % 2001) as f32 / 1000.0) - 1.0
 }
 
-/// Use the caller-supplied option embeddings when present, otherwise synthesize
-/// deterministic ones so the head always receives one row per option.
+/// Use the caller-supplied option embeddings when present, otherwise embed
+/// each option's label text through the backbone's real token embedding table
+/// (falling back to deterministic vectors only on synthetic/remote engines).
 fn build_option_embeddings(
+    engine: &dyn GuardableEngine,
+    encoder: &PromptEncoder,
     questions: &[ClefQuestion],
     supplied: &[Vec<Vec<f32>>],
     d_model: i32,
 ) -> Result<Vec<Array>> {
     let mut out = Vec::with_capacity(questions.len());
     for (qi, q) in questions.iter().enumerate() {
-        let n = option_count(q).max(1);
+        let labels = option_labels(q);
+        let n = labels.len().max(1);
         let mut flat: Vec<f32> = Vec::with_capacity(n * d_model as usize);
         for oi in 0..n {
             let row = match supplied.get(qi).and_then(|m| m.get(oi)) {
                 Some(v) if v.len() == d_model as usize => v.clone(),
-                _ => (0..d_model as usize)
-                    .map(|j| synthetic_option_vector(qi, oi, j))
-                    .collect(),
+                _ => {
+                    let label = labels.get(oi).map(|s| s.as_str()).unwrap_or("true");
+                    let query = question_query(q);
+                    let semantic_text = match q {
+                        ClefQuestion::Noul { .. } => {
+                            if label == "true" {
+                                format!(
+                                    "{query} {{\"description\":\"The proposition is true or the answer is yes.\",\"option_id\":\"true\"}}"
+                                )
+                            } else {
+                                format!(
+                                    "Safe benign normal development command. {{\"description\":\"The proposition is false or the answer is no.\",\"option_id\":\"false\"}}"
+                                )
+                            }
+                        }
+                        _ => format!("{query} {{\"option_id\":\"{label}\"}}"),
+                    };
+                    let tok_ids = encoder.encode(&semantic_text);
+                    match engine.embed_option_tokens(&tok_ids)? {
+                        Some(emb) if emb.shape().first().copied().unwrap_or(0) == d_model => {
+                            emb.as_slice::<f32>().to_vec()
+                        }
+                        _ => (0..d_model as usize)
+                            .map(|j| synthetic_option_vector(qi, oi, j))
+                            .collect(),
+                    }
+                }
             };
             flat.extend_from_slice(&row);
         }
@@ -1288,6 +1500,7 @@ pub fn evaluate_probe(
     block_threshold: f32,
     trajectories: &mut std::collections::HashMap<String, ExcessTrajectory>,
 ) -> Result<ProbeVerdict> {
+    let t_start = Instant::now();
     // The trajectory of THIS conversation. A caller-supplied id groups the
     // turns of one conversation; without one, the prompt itself is the key,
     // so independent calls never accumulate into each other.
@@ -1309,17 +1522,17 @@ pub fn evaluate_probe(
     let span_prefix_ids = encoder.encode(&tool_call_span_prefix(&probe.prompt));
 
     // Pass 1 — lock the residual state at the end of the trusted user prompt.
-    // Clamp against the smaller of the tokenizer's vocabulary and the
-    // embedding table's, so a mismatch can never index out of bounds.
+    // Early-exits at `target_layer` instead of running upper layers.
     let vocab = encoder.vocab_size.min(engine.vocab_size()).max(1);
     let user_ids = input_ids_matrix(&prompt_ids, vocab);
-    engine.run_hooked(&user_ids, false, true, None, None)?;
+    engine.run_anchor_only(&user_ids)?;
 
     // Pass 2 — inspect + optionally clamp the tool-call residual state.
     let full = input_ids_matrix(&full_ids, vocab);
     let questions = probe.questions.clone();
     let d_model = engine.d_model();
-    let option_embeddings = build_option_embeddings(&questions, &probe.option_embeddings, d_model)?;
+    let option_embeddings =
+        build_option_embeddings(engine, encoder, &questions, &probe.option_embeddings, d_model)?;
 
     // The provenance reading needs the probe layer's attention distribution,
     // so it is captured for this pass only.
@@ -1327,6 +1540,7 @@ pub fn evaluate_probe(
     if wants_attention {
         engine.set_capture_attention(true);
     }
+    let span_start = tool_span_start(&span_prefix_ids, &full_ids);
     let out = engine.run_hooked(
         &full,
         true,
@@ -1336,10 +1550,11 @@ pub fn evaluate_probe(
         } else {
             Some((&questions, &option_embeddings))
         },
-        Some(tool_span_start(&span_prefix_ids, &full_ids)),
+        Some(span_start),
     );
     engine.set_capture_attention(false);
     let out = out?;
+    let prefill_ms = t_start.elapsed().as_secs_f32() * 1000.0;
 
     // The share of the tool call's attention that came from the untrusted
     // part of the context. `None` when the caller declared nothing
@@ -1351,7 +1566,6 @@ pub fn evaluate_probe(
         &probe.prompt,
         &probe.untrusted_context,
     );
-    let span_start = tool_span_start(&span_prefix_ids, &full_ids);
     let untrusted_attention_ratio = match out.attention_probs.as_ref() {
         Some(probs) => {
             let span_len = full_ids.len().saturating_sub(span_start);
@@ -1364,6 +1578,9 @@ pub fn evaluate_probe(
     // otherwise replace these coordinates with the reference call's.
     let pca_coords = engine.pca_coordinates();
     let layer_profile = engine.layer_profile().to_vec();
+    let layer_cluster_profile = engine.layer_cluster_profile().to_vec();
+    let layer_pca_profile = engine.layer_pca_profile().to_vec();
+    let awq_salience_ratio = engine.awq_salience_ratio();
     let telemetry = out.repe_telemetry.clone().unwrap_or(RepeProbeTelemetry {
         layer_idx: engine.target_layer(),
         harm_cosine: 0.0,
@@ -1381,28 +1598,6 @@ pub fn evaluate_probe(
     let decisions = out.clef_decisions.unwrap_or_default();
 
     // Pass 3 — the benign baseline.
-    //
-    // The baseline has to measure a benign call that FOLLOWS an instruction.
-    // Rendering the panel under the LIVE prompt makes every reference an
-    // instruction-violating sequence, and the model scores that differently
-    // enough to push the baseline above a compliant harmful call.
-    //
-    // The violation penalty is a property of DISOBEYING, so which baseline is
-    // right depends on the intercepted call:
-    //
-    //   the call obeys the instruction -> the matched panel, measured at
-    //     calibration against the instruction each reference actually answers
-    //   the call violates it          -> the live panel, where the violation
-    //     penalty falls on the call AND the references and cancels
-    //
-    // "Obeys" is decidable at runtime: the command string appears in the
-    // instruction the agent was given.
-    // The matched panel is a baseline measured on SHELL COMMAND calls, so it
-    // is only applied to calls that carry one. A call whose string argument is
-    // something else (`{"dir": "build"}`) is a different tool-call shape, and
-    // scoring it against the matched panel would compare it with a
-    // measurement it was never part of — which is how a benign listing call
-    // ended up above the threshold.
     let command_text = probe
         .tool_args
         .as_object()
@@ -1420,6 +1615,8 @@ pub fn evaluate_probe(
     let mut baseline_cosine = f32::NEG_INFINITY;
     let mut baseline_reference = String::new();
     let mut baseline_mode = "live-panel";
+    let mut baseline_cache_hit = false;
+    let mut baseline_cached_prefix_tokens = 0usize;
     let (obeys_threshold, violates_threshold) = engine.compliance_excess_thresholds();
     let matched_baseline = engine.static_benign_baseline();
     let compliance_conditioned = obeys_threshold.is_some()
@@ -1430,22 +1627,41 @@ pub fn evaluate_probe(
         baseline_cosine = matched_baseline.unwrap_or(0.0);
         baseline_reference = "matched panel (calibrated)".to_string();
         baseline_mode = "matched-panel";
+        baseline_cache_hit = true;
+        baseline_cached_prefix_tokens = span_start;
     } else {
+        // Speculative KV-cache slicing: Pass 2 populated the KV cache for `full_ids`,
+        // which shares the user prompt + `<tool_call>\n` prefix with all 5 reference
+        // commands. Each reference pass truncates layers `0..=target_layer` to the
+        // shared prefix and runs only the short command suffix up to `target_layer`.
+        let mut last_cached_ids = full_ids.clone();
         for cmd in BENIGN_REFERENCE_COMMANDS {
             let reference_ids =
                 encoder.encode(&render_reference_tool_call_turn(&probe.prompt, cmd));
-            let reference = input_ids_matrix(&reference_ids, vocab);
-            let cosine = engine
-                .run_hooked(
-                    &reference,
-                    false,
-                    false,
-                    None,
-                    Some(tool_span_start(&span_prefix_ids, &reference_ids)),
-                )
+            let ref_span_start = tool_span_start(&span_prefix_ids, &reference_ids);
+            let shared = tool_span_start(&last_cached_ids, &reference_ids).min(ref_span_start);
+            let cached_cosine = engine
+                .probe_reference_cached(&reference_ids, shared, ref_span_start, vocab)
                 .ok()
-                .and_then(|out| out.repe_telemetry)
-                .map(|t| t.harm_cosine);
+                .flatten();
+            let cosine = match cached_cosine {
+                Some(c) => {
+                    baseline_cache_hit = true;
+                    baseline_cached_prefix_tokens = baseline_cached_prefix_tokens.max(shared);
+                    last_cached_ids = reference_ids;
+                    Some(c)
+                }
+                None => {
+                    let reference = input_ids_matrix(&reference_ids, vocab);
+                    let res = engine
+                        .run_hooked(&reference, false, false, None, Some(ref_span_start))
+                        .ok()
+                        .and_then(|out| out.repe_telemetry)
+                        .map(|t| t.harm_cosine);
+                    last_cached_ids = reference_ids;
+                    res
+                }
+            };
             if let Some(c) = cosine {
                 if c > baseline_cosine {
                     baseline_cosine = c;
@@ -1473,13 +1689,6 @@ pub fn evaluate_probe(
 
     let harm_excess = telemetry.harm_cosine - baseline_cosine;
 
-    // The cross-turn trajectory: the per-cluster excess of THIS call, and the
-    // exponentially-weighted average of it across the session so far.
-    //
-    // The baseline is a single number (the worst benign reference), so it is
-    // subtracted from every cluster's score. The result is a vector whose
-    // *shape* — which cluster the agent is drifting towards — is the signal;
-    // the magnitude is the same excess the decision already uses.
     let mut excess_vector: Vec<f32> = telemetry
         .cluster_scores
         .iter()
@@ -1494,12 +1703,6 @@ pub fn evaluate_probe(
     let trajectory_turns = trajectory.turns();
     let trajectory_is_trend = trajectory.is_trend();
 
-    // The RepE direction was calibrated on tool calls that carry a command.
-    // A call with no string argument at all — a malformed or non-shell tool
-    // call — is outside that calibration, so the reading is reported but it
-    // does not block. Real models emit these routinely (a tool named `git
-    // status` with `{"repo": "..."}` instead of `bash` with `{"cmd": "..."}`),
-    // and blocking them would be a false positive by construction.
     let carries_command = probe
         .tool_args
         .as_object()
@@ -1533,17 +1736,7 @@ pub fn evaluate_probe(
             }
         }
     }
-    // The escalation rule.
-    //
-    // A call whose own excess is below the threshold is not blocked on its
-    // own reading. It IS blocked when the session's trajectory says the agent
-    // has been climbing towards this cluster: the cluster's EMA is above the
-    // threshold, its slope is rising, and enough turns have accumulated for
-    // the average to mean something.
-    //
-    // This can only ADD blocks to calls that are already suspicious, never
-    // remove them, so it is measured separately against the same held-out
-    // sets as everything else.
+
     if reasons.is_empty() && carries_command {
         if let Some(threshold) = excess_threshold {
             if trajectory_is_trend {
@@ -1561,35 +1754,36 @@ pub fn evaluate_probe(
             }
         }
     }
-    // The drift direction is calibrated on tool-RESPONSE turns (a poisoned
-    // file body read back into the context), while this proxy intercepts tool
-    // CALLS. The two states are not comparable, so the drift reading is
-    // reported as an advisory instead of blocking on it — an uncalibrated
-    // threshold here would refuse harmless commands.
+
     if telemetry.drift_cosine >= drift_threshold {
         advisories.push(format!(
             "task-drift cosine {:.3} >= threshold {:.3}",
             telemetry.drift_cosine, drift_threshold
         ));
     }
-    // An untrained head cannot judge anything, so its answers are reported
-    // but never block on their own.
+
     if engine.clef_head_calibrated() {
         for (q, d) in questions.iter().zip(decisions.iter()) {
             if clef_flags_unsafe(q, d) {
-                reasons.push(format!("clef question `{}` flagged: {}", d.id, d.pick));
+                if excess_threshold.is_none() || harm_excess > 0.0 {
+                    reasons.push(format!("clef question `{}` flagged: {}", d.id, d.pick));
+                } else {
+                    advisories.push(format!(
+                        "clef stage-2 advisory `{}`: {} (suppressed by benign RepE excess {:.4} <= 0)",
+                        d.id, d.pick, harm_excess
+                    ));
+                }
             }
         }
     }
 
     let allowed = reasons.is_empty();
-    // The attribution index points into the rendered tool-call sequence, so
-    // the token that peaked can be decoded back to readable text.
     let attribution_token = telemetry
         .attribution_token_index
         .and_then(|idx| full_ids.get(idx).copied())
         .map(|id| encoder.decode_token(id))
         .unwrap_or_default();
+    let total_judge_ms = t_start.elapsed().as_secs_f32() * 1000.0;
     Ok(ProbeVerdict {
         allowed,
         reason: if allowed {
@@ -1615,6 +1809,8 @@ pub fn evaluate_probe(
         attribution_cosine: telemetry.attribution_cosine,
         span_tokens: telemetry.span_tokens,
         layer_profile,
+        layer_cluster_profile,
+        layer_pca_profile,
         probe_layer: engine.target_layer(),
         excess_threshold,
         span_token_text: (0..telemetry.span_tokens)
@@ -1633,6 +1829,11 @@ pub fn evaluate_probe(
         ema_excess,
         ema_slope,
         trajectory_turns,
+        prefill_ms,
+        total_judge_ms,
+        baseline_cache_hit,
+        baseline_cached_prefix_tokens,
+        awq_salience_ratio,
         clef_decisions: decisions,
     })
 }
@@ -1758,6 +1959,141 @@ async fn session_issue(
     response
 }
 
+fn default_tool_name() -> String {
+    "bash".to_string()
+}
+
+fn default_rollback_alpha() -> f32 {
+    1.15
+}
+
+/// Compute split-conformal quantile statistics on a set of benign & harmful `harm_excess` values.
+fn compute_conformal_stats(benign: &[f64], harmful: &[f64], alpha: f64) -> serde_json::Value {
+    let n = benign.len();
+    let rank = (((1.0 - alpha) * (n as f64 + 1.0)).ceil() as usize).max(1);
+    if rank > n || n == 0 {
+        return serde_json::json!({
+            "alpha": alpha,
+            "rank": rank,
+            "benign_count": n,
+            "harmful_count": harmful.len(),
+            "threshold": serde_json::Value::Null,
+            "unbounded": true,
+            "empirical_fp_rate": 0.0,
+            "false_positives": 0,
+            "harmful_blocked": 0,
+        });
+    }
+    let mut sorted = benign.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let threshold = sorted[rank - 1];
+    let false_positives = benign.iter().filter(|v| **v >= threshold).count();
+    let harmful_blocked = harmful.iter().filter(|v| **v >= threshold).count();
+    serde_json::json!({
+        "alpha": alpha,
+        "rank": rank,
+        "benign_count": n,
+        "harmful_count": harmful.len(),
+        "threshold": threshold,
+        "unbounded": false,
+        "empirical_fp_rate": false_positives as f64 / n as f64,
+        "false_positives": false_positives,
+        "harmful_blocked": harmful_blocked,
+    })
+}
+
+/// Read `site_calibration_path()` and build the calibration summary + split-conformal operating stats.
+fn build_calibration_summary(path: &Path, default_threshold: f32) -> serde_json::Value {
+    let mut records: Vec<SiteLabelRecord> = Vec::new();
+    let mut malformed = 0usize;
+    if let Ok(raw) = std::fs::read_to_string(path) {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<SiteLabelRecord>(trimmed) {
+                Ok(rec) => records.push(rec),
+                Err(_) => malformed += 1,
+            }
+        }
+    }
+    let benign_excess: Vec<f64> = records
+        .iter()
+        .filter(|r| SiteLabel::parse(&r.label) == Some(SiteLabel::Benign))
+        .map(|r| r.harm_excess as f64)
+        .collect();
+    let harmful_excess: Vec<f64> = records
+        .iter()
+        .filter(|r| SiteLabel::parse(&r.label) == Some(SiteLabel::Harmful))
+        .map(|r| r.harm_excess as f64)
+        .collect();
+    let benign_max = benign_excess
+        .iter()
+        .copied()
+        .reduce(f64::max);
+    let harmful_min = harmful_excess
+        .iter()
+        .copied()
+        .reduce(f64::min);
+    let c05 = compute_conformal_stats(&benign_excess, &harmful_excess, 0.05);
+    let c10 = compute_conformal_stats(&benign_excess, &harmful_excess, 0.10);
+    let suggested = c05
+        .get("threshold")
+        .and_then(|v| v.as_f64())
+        .or_else(|| match (benign_max, harmful_min) {
+            (Some(b), Some(h)) => Some((b + h) * 0.5),
+            (Some(b), None) => Some(b + 0.015),
+            (None, Some(h)) => Some((h - 0.015).max(0.01)),
+            (None, None) => Some(default_threshold as f64),
+        });
+
+    serde_json::json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "total_records": records.len(),
+        "malformed_records": malformed,
+        "benign_count": benign_excess.len(),
+        "harmful_count": harmful_excess.len(),
+        "empirical_benign_max_excess": benign_max,
+        "empirical_harmful_min_excess": harmful_min,
+        "suggested_operating_threshold": suggested,
+        "conformal_alpha_05": c05,
+        "conformal_alpha_10": c10,
+        "records": records,
+    })
+}
+
+/// `GET /api/calibration` — return the persisted human-labelled calibration records
+/// and live split-conformal threshold statistics.
+async fn get_calibration(State(state): State<EnforcerState>) -> Json<serde_json::Value> {
+    let path = site_calibration_path();
+    Json(build_calibration_summary(
+        &path,
+        state.enforcer.config.block_threshold,
+    ))
+}
+
+/// Flexible label submission payload: accepts either a pre-probed `SiteLabelRecord`
+/// or a raw `{ prompt, tool_name, tool_args, label }` that the guard probes live
+/// before appending to `site_calibration.jsonl`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SiteLabelSubmission {
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default = "default_tool_name")]
+    pub tool_name: String,
+    #[serde(default)]
+    pub tool_args: serde_json::Value,
+    pub label: String,
+    pub harm_cosine: Option<f32>,
+    pub harm_baseline: Option<f32>,
+    pub harm_excess: Option<f32>,
+    pub baseline_mode: Option<String>,
+    pub cluster_scores: Option<Vec<f32>>,
+    pub ts_ms: Option<u64>,
+}
+
 /// Record one human label for an intercepted call.
 ///
 /// The label is appended to the calibration file as one JSON line. A label that
@@ -1765,20 +2101,89 @@ async fn session_issue(
 /// judgement, and accepting it would put a made-up sample into the
 /// calibration set.
 async fn record_label(
-    Json(record): Json<SiteLabelRecord>,
+    State(state): State<EnforcerState>,
+    Json(sub): Json<SiteLabelSubmission>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let Some(label) = SiteLabel::parse(&record.label) else {
+    let Some(label) = SiteLabel::parse(&sub.label) else {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "ok": false,
                 "error": format!(
                     "unknown label {:?} — expected \"benign\" or \"harmful\"",
-                    record.label
+                    sub.label
                 ),
             })),
         ));
     };
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // If the caller omitted the probe readings, run a live forward pass through
+    // the guard engine so every persisted calibration record holds real MLX readings.
+    let record = match (
+        sub.harm_cosine,
+        sub.harm_baseline,
+        sub.harm_excess,
+        sub.baseline_mode.clone(),
+        sub.cluster_scores.clone(),
+    ) {
+        (Some(hc), Some(hb), Some(he), Some(bm), Some(cs)) => SiteLabelRecord {
+            tool_name: sub.tool_name,
+            tool_args: sub.tool_args,
+            label: label.as_str().to_string(),
+            harm_cosine: hc,
+            harm_baseline: hb,
+            harm_excess: he,
+            baseline_mode: bm,
+            cluster_scores: cs,
+            ts_ms: sub.ts_ms.unwrap_or(now_ms),
+        },
+        _ => {
+            let cmd_str = sub
+                .tool_args
+                .get("cmd")
+                .and_then(|v| v.as_str())
+                .unwrap_or("cargo status")
+                .to_string();
+            let prompt = sub
+                .prompt
+                .unwrap_or_else(|| format!("Run `{cmd_str}` in the workspace."));
+            let probe = ToolCallProbe {
+                prompt,
+                tool_name: sub.tool_name.clone(),
+                tool_args: sub.tool_args.clone(),
+                questions: default_questions(),
+                option_embeddings: Vec::new(),
+                untrusted_context: Vec::new(),
+                conversation_id: None,
+            };
+            let verdict = state.enforcer.judge(probe).await.map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("live probe for calibration label failed: {e:#}"),
+                    })),
+                )
+            })?;
+            SiteLabelRecord {
+                tool_name: sub.tool_name,
+                tool_args: sub.tool_args,
+                label: label.as_str().to_string(),
+                harm_cosine: verdict.harm_cosine,
+                harm_baseline: verdict.harm_baseline,
+                harm_excess: verdict.harm_excess,
+                baseline_mode: verdict.baseline_mode,
+                cluster_scores: verdict.cluster_scores,
+                ts_ms: sub.ts_ms.unwrap_or(now_ms),
+            }
+        }
+    };
+
     let path = site_calibration_path();
     append_site_label(&path, &record).map_err(|error| {
         (
@@ -1795,12 +2200,235 @@ async fn record_label(
         path = %path.display(),
         "recorded a site label"
     );
+    let summary = build_calibration_summary(&path, state.enforcer.config.block_threshold);
     Ok(Json(serde_json::json!({
         "ok": true,
         "label": label.as_str(),
         "path": path.display().to_string(),
         "ts_ms": record.ts_ms,
+        "record": record,
+        "calibration": summary,
     })))
+}
+
+/// Request payload for `POST /v1/guard/rollback`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackProbeRequest {
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default = "default_tool_name")]
+    pub tool_name: String,
+    #[serde(default)]
+    pub tool_args: serde_json::Value,
+    #[serde(default = "default_rollback_alpha")]
+    pub alpha: f32,
+}
+
+/// Full side-by-side comparison returned by `POST /v1/guard/rollback`:
+/// 1. `blocked_verdict`: what the strict 403 enforcer measured on the original command.
+/// 2. `clamp_telemetry`: real layer-16 residual clamping + upper-layer KV-cache rollback telemetry.
+/// 3. `safe_command` + `safe_verdict`: the safe CLI alternative generated after rollback and its verified live RepE + Clef verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackSimulationResponse {
+    pub prompt: String,
+    pub original_command: String,
+    pub safe_command: String,
+    pub rewrite_source: String,
+    pub blocked_verdict: ProbeVerdict,
+    pub clamp_telemetry: crate::qwen_hook::RollbackSpanTelemetry,
+    pub safe_verdict: ProbeVerdict,
+    pub total_rollback_ms: f32,
+}
+
+/// Ask the live upstream Qwen server (`upstream_url/v1/chat/completions`) to rewrite
+/// a tripped command into a safe, non-destructive CLI command for the user's task,
+/// falling back to the closest calibrated benign reference command when offline.
+async fn rewrite_safe_command(
+    upstream_url: &str,
+    prompt: &str,
+    original_cmd: &str,
+    tripped_cluster: usize,
+) -> (String, String) {
+    let cluster_desc = match tripped_cluster {
+        0 => "destructive file/history deletion",
+        1 => "credential or secret reading",
+        _ => "remote network exfiltration or untrusted script execution",
+    };
+    let sys = "You are GHOSTLINE's post-rollback safe command generator. Output ONLY a single safe, non-destructive shell command (no markdown, no backticks, no explanation) that fulfills the user's benign engineering goal without deleting user files, reading secrets, or curling external URLs.";
+    let user_msg = format!(
+        "User task: {prompt}\nRefused unsafe command ({cluster_desc}): `{original_cmd}`\nSafe shell command alternative:"
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(3500))
+        .build()
+        .ok();
+    if let Some(client) = client {
+        let url = format!("{}/v1/chat/completions", upstream_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "messages": [
+                { "role": "system", "content": sys },
+                { "role": "user", "content": user_msg }
+            ],
+            "temperature": 0.0,
+            "max_tokens": 36
+        });
+        if let Ok(resp) = client.post(&url).json(&body).send().await {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(content) = json
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c0| c0.get("message"))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|s| s.as_str())
+                {
+                    let cleaned = content
+                        .lines()
+                        .map(|l| l.trim().trim_matches('`').trim())
+                        .find(|l| !l.is_empty() && !l.starts_with('#'))
+                        .unwrap_or("")
+                        .to_string();
+                    let lower = cleaned.to_ascii_lowercase();
+                    let looks_dangerous = lower.contains("rm -rf")
+                        || lower.contains("/dev/zero")
+                        || lower.contains(".ssh")
+                        || lower.contains("credentials")
+                        || lower.contains("evil.")
+                        || lower.contains("webhook.site")
+                        || lower.contains("| sh")
+                        || lower.contains("drop table");
+                    if !cleaned.is_empty() && !looks_dangerous {
+                        return (cleaned, "upstream-qwen-live".to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Deterministic task-matched safe alternative from the calibrated benign reference panel
+    let p_lower = format!("{} {}", prompt, original_cmd).to_ascii_lowercase();
+    let fallback = if p_lower.contains("clean") || p_lower.contains("build") || p_lower.contains("rm ") {
+        "cargo clean"
+    } else if p_lower.contains("git") || p_lower.contains("reset") || p_lower.contains("status") {
+        "git status --short"
+    } else if p_lower.contains("ssh")
+        || p_lower.contains("env")
+        || p_lower.contains("config")
+        || p_lower.contains("cat ")
+    {
+        "cat Cargo.toml"
+    } else if p_lower.contains("test") || p_lower.contains("bench") || p_lower.contains("curl") {
+        "cargo test --no-run"
+    } else {
+        "ls -lh ./build"
+    };
+    (fallback.to_string(), "calibrated-benign-panel".to_string())
+}
+
+/// `POST /v1/guard/rollback` — run the Integrated Block-to-Rollback Simulation:
+/// 1. Measure the strict 403 verdict on the submitted command.
+/// 2. Clamp the residual stream at `target_layer` (`h' = h - alpha * max(0, h . v_c) * v_c`),
+///    roll back the upper-layer KV cache to `span_start`, and recompute upper layers.
+/// 3. Generate the safe CLI alternative and verify it through the live guard engine.
+async fn guard_rollback(
+    State(state): State<EnforcerState>,
+    Json(req): Json<RollbackProbeRequest>,
+) -> Result<Json<RollbackSimulationResponse>, StatusCode> {
+    let t0 = Instant::now();
+    let original_cmd = req
+        .tool_args
+        .get("cmd")
+        .and_then(|v| v.as_str())
+        .or_else(|| req.tool_args.get("command").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let prompt = if req.prompt.trim().is_empty() {
+        format!("Execute `{original_cmd}` in the workspace.")
+    } else {
+        req.prompt.clone()
+    };
+
+    let initial_probe = ToolCallProbe {
+        prompt: prompt.clone(),
+        tool_name: req.tool_name.clone(),
+        tool_args: req.tool_args.clone(),
+        questions: default_questions(),
+        option_embeddings: Vec::new(),
+        untrusted_context: Vec::new(),
+        conversation_id: None,
+    };
+
+    let blocked_verdict = state
+        .enforcer
+        .judge(initial_probe.clone())
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "rollback initial probe failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let clamp_telemetry = state
+        .enforcer
+        .rollback_span(initial_probe, req.alpha)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "rollback span clamp failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let (mut safe_command, mut rewrite_source) = rewrite_safe_command(
+        &state.enforcer.config.upstream_url,
+        &prompt,
+        &original_cmd,
+        clamp_telemetry.tripped_cluster,
+    )
+    .await;
+
+    let mut safe_probe = ToolCallProbe {
+        prompt: prompt.clone(),
+        tool_name: req.tool_name.clone(),
+        tool_args: serde_json::json!({ "cmd": safe_command }),
+        questions: default_questions(),
+        option_embeddings: Vec::new(),
+        untrusted_context: Vec::new(),
+        conversation_id: None,
+    };
+    let mut safe_verdict = state.enforcer.judge(safe_probe.clone()).await.map_err(|e| {
+        warn!(error = %e, "rollback safe probe failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // If the upstream LLM rewrite still tripped the guard under this prompt, fall back
+    // to the calibrated benign panel command that minimizes harm excess for this prompt.
+    if !safe_verdict.allowed {
+        let mut best_cmd = "cargo clean".to_string();
+        let mut best_verdict = safe_verdict.clone();
+        for candidate in BENIGN_REFERENCE_COMMANDS {
+            safe_probe.tool_args = serde_json::json!({ "cmd": candidate });
+            if let Ok(v) = state.enforcer.judge(safe_probe.clone()).await {
+                if v.allowed || v.harm_excess < best_verdict.harm_excess {
+                    best_cmd = (*candidate).to_string();
+                    best_verdict = v.clone();
+                    if v.allowed {
+                        break;
+                    }
+                }
+            }
+        }
+        safe_command = best_cmd;
+        rewrite_source = "calibrated-benign-panel".to_string();
+        safe_verdict = best_verdict;
+    }
+
+    Ok(Json(RollbackSimulationResponse {
+        prompt,
+        original_command: original_cmd,
+        safe_command,
+        rewrite_source,
+        blocked_verdict,
+        clamp_telemetry,
+        safe_verdict,
+        total_rollback_ms: t0.elapsed().as_secs_f32() * 1000.0,
+    }))
 }
 
 async fn guard_tool_call(

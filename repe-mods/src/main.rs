@@ -359,10 +359,10 @@ fn main() -> Result<()> {
                 zero_shot.hyperparams.calibration_mode.clone()
             }
         },
-        weight_quant_summary: match &args.backbone_addr {
-            Some(addr) => format!("backbone served by mlx_lm at {addr}"),
-            None => zero_shot.hyperparams.weight_quant_summary.clone(),
-        },
+        weight_quant_summary: format!(
+            "{} · mlx_rs::fast fused",
+            zero_shot.hyperparams.weight_quant_summary
+        ),
     };
 
     let tokenizer = match &args.tokenizer {

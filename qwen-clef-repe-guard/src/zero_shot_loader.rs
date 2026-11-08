@@ -100,7 +100,9 @@ impl ModelFingerprint {
         if self.num_layers != other.num_layers || self.d_model != other.d_model {
             return false;
         }
-        if self.vocab_size != 0 && other.vocab_size != 0 && self.vocab_size != other.vocab_size
+        if self.vocab_size != 0
+            && other.vocab_size != 0
+            && (self.vocab_size - other.vocab_size).abs() > 512
         {
             return false;
         }
@@ -396,14 +398,7 @@ impl UniversalModelRuntime {
         };
 
         let effective = raw_cfg.effective();
-        if raw_cfg.is_hybrid_attention() {
-            anyhow::bail!(
-                "checkpoint at {:?} uses a hybrid linear-attention stack; the Rust loader \
-                 implements the dense decoder block only. Use the Python extractor (mlx_lm) \
-                 and serve the backbone from mlx_lm.",
-                dir
-            );
-        }
+        let is_hybrid = raw_cfg.is_hybrid_attention();
         let default_gs = effective
             .quantization
             .as_ref()
@@ -485,11 +480,16 @@ impl UniversalModelRuntime {
         let mut layers = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
             let lp = format!("{prefix}.layers.{i}");
+            let o_proj_prefix = if tensors.contains_key(&format!("{lp}.self_attn.o_proj.weight")) {
+                format!("{lp}.self_attn.o_proj")
+            } else {
+                format!("{lp}.linear_attn.out_proj")
+            };
             layers.push(GenericDecoderLayer {
                 input_norm: tensors[&format!("{lp}.input_layernorm.weight")].as_type::<f32>()?,
                 post_attn_norm: tensors[&format!("{lp}.post_attention_layernorm.weight")]
                     .as_type::<f32>()?,
-                o_proj: Self::extract_linear(&tensors, &format!("{lp}.self_attn.o_proj"), default_gs, default_bits)?,
+                o_proj: Self::extract_linear(&tensors, &o_proj_prefix, default_gs, default_bits)?,
                 gate_proj: Self::extract_linear(&tensors, &format!("{lp}.mlp.gate_proj"), default_gs, default_bits)?,
                 up_proj: Self::extract_linear(&tensors, &format!("{lp}.mlp.up_proj"), default_gs, default_bits)?,
                 down_proj: Self::extract_linear(&tensors, &format!("{lp}.mlp.down_proj"), default_gs, default_bits)?,
@@ -497,12 +497,21 @@ impl UniversalModelRuntime {
         }
 
         let probe_layer = ((num_layers as f32) * 0.68).round() as usize;
-        let quant_summary = format!(
-            "embed={}, layer_{}_mlp={}",
-            embed_tokens.describe(),
-            probe_layer,
-            layers[probe_layer].down_proj.describe()
-        );
+        let quant_summary = if is_hybrid {
+            format!(
+                "hybrid-gdn+attn, embed={}, layer_{}_mlp={}",
+                embed_tokens.describe(),
+                probe_layer,
+                layers[probe_layer].down_proj.describe()
+            )
+        } else {
+            format!(
+                "embed={}, layer_{}_mlp={}",
+                embed_tokens.describe(),
+                probe_layer,
+                layers[probe_layer].down_proj.describe()
+            )
+        };
 
         let tok_path = dir.join("tokenizer.json");
         let tokenizer = if tok_path.exists() {
