@@ -10,7 +10,7 @@
 # Environment:
 #   MODEL     the checkpoint to calibrate and judge with (default: Qwen2.5-0.5B)
 #   CLEF      the clef-flash checkpoint, for the GDN and joint-head parity
-#   PORT      the guard's port (default 8090)
+#   PORT      the test guard port (default 8094; never the deployed 8090)
 #   UPSTREAM  the upstream model server's port (default 8123)
 #
 # IT EXITS NON-ZERO IF ANY STEP FAILED
@@ -29,7 +29,8 @@ PROJ="$ROOT/qwen-clef-repe-guard"
 
 MODEL="${MODEL:-/Users/mac/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/7ae557604adf67be50417f59c2c2f167def9a775/}"
 CLEF="${CLEF:-/Users/mac/.cache/huggingface/hub/models--Cloudflare--clef-flash/snapshots/fb4417d31c1d0f9e7e77f1141b40aaede7491e00/}"
-PORT="${PORT:-8090}"
+PORT="${PORT:-8094}"   # never the deployed guard (8090)
+BACKBONE="${BACKBONE:-127.0.0.1:8093}"
 UPSTREAM="${UPSTREAM:-8123}"
 
 FAILED_STEPS=()
@@ -74,7 +75,8 @@ pkill -f "qwen-clef-repe-guard --port ${PORT}" 2>/dev/null || true
 sleep 2
 (cd "$PROJ" && nohup ./target/debug/qwen-clef-repe-guard --port "$PORT" \
     --upstream "http://127.0.0.1:${UPSTREAM}" --model "$MODEL" \
-    --repe artifacts/repe_vectors_qwen2_5_0_5b.safetensors --mode enforce \
+    --repe artifacts/repe_vectors_qwen2_5_0_5b_v2.safetensors --mode enforce \
+    --backbone-addr "$BACKBONE" --no-zero-shot \
     > /tmp/guard_verify.log 2>&1 &)
 for _ in $(seq 1 40); do
   curl -s -o /dev/null "http://127.0.0.1:${PORT}/health" && break
