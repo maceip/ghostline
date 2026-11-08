@@ -186,6 +186,35 @@ pub struct RepeProbeTelemetry {
     pub span_start: usize,
 }
 
+/// Per-layer telemetry captured during a forward pass for `GhostlineTraceFrame`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LayerTraceMetric {
+    pub layer: usize,
+    pub l2_norm: f32,
+    pub cos_harm: f32,
+    pub cos_drift: f32,
+    pub guard_logit: f32,
+    pub tensor_slice_preview: Vec<f32>,
+}
+
+/// Per-token telemetry captured at `decision_layer` for `GhostlineTraceFrame`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TokenTraceMetric {
+    pub idx: usize,
+    pub raw_harm_cosine: f32,
+    pub drift_score: f32,
+    pub pca_coords: [f32; 2],
+}
+
+/// Calibrated PCA subspace reference clusters loaded from the RepE safetensors artifact.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PcaReferenceTelemetry {
+    pub pc1_variance: f32,
+    pub pc2_variance: f32,
+    pub benign_cluster: Vec<[f32; 2]>,
+    pub exploit_cluster: Vec<[f32; 2]>,
+}
+
 /// How the residual stream is collapsed over the tool-call span.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Pooling {
@@ -571,6 +600,14 @@ pub struct RepeSensor {
     pub awq_channel_scales: Option<Array>,
     /// Ratio of maximum to minimum AWQ channel scale (`max(s_j) / min(s_j)`).
     pub awq_salience_ratio: Option<f32>,
+    /// Per-layer user anchor vectors `[D]` captured during Pass 1.
+    pub user_anchor_by_layer: Vec<Array>,
+    /// Per-layer full trace telemetry (`l2_norm`, `cos_harm`, `cos_drift`, `guard_logit`, `tensor_slice_preview`).
+    pub layer_trace: Vec<LayerTraceMetric>,
+    /// Per-token trace telemetry at `target_layer` (`idx`, `raw_harm_cosine`, `drift_score`, `pca_coords`).
+    pub token_trace: Vec<TokenTraceMetric>,
+    /// Calibrated PCA subspace reference clusters (`pc1_variance`, `pc2_variance`, `benign_cluster`, `exploit_cluster`).
+    pub pca_reference: PcaReferenceTelemetry,
 }
 
 impl RepeSensor {
@@ -678,6 +715,66 @@ impl RepeSensor {
             None => (None, None),
         };
 
+        let pca_basis_f32 = pca_basis.as_type::<f32>()?;
+        let evr_vec: Vec<f32> = meta
+            .get("harm_evr_top_k")
+            .and_then(|s| serde_json::from_str::<Vec<f32>>(s).ok())
+            .unwrap_or_default();
+        let pc1_variance = evr_vec.first().copied().unwrap_or(0.0);
+        let pc2_variance = evr_vec.get(1).copied().unwrap_or(0.0);
+
+        let project_2d = |vec_1d: &Array| -> Option<[f32; 2]> {
+            let u = Self::unit_norm(vec_1d).ok()?;
+            let c = matmul(&pca_basis_f32, &u).ok()?;
+            c.eval().ok()?;
+            let sl = c.as_slice::<f32>();
+            Some([
+                sl.first().copied().unwrap_or(0.0),
+                sl.get(1).copied().unwrap_or(0.0),
+            ])
+        };
+
+        let mut benign_cluster = Vec::new();
+        for key in ["benign_panel", "benign_panel_natural"] {
+            if let Some(panel) = tensors.get(key) {
+                if let Ok(pf) = panel.as_type::<f32>() {
+                    let rows = pf.shape().first().copied().unwrap_or(0);
+                    for r in 0..rows {
+                        let row = pf.index((r, ..));
+                        if let Some(pt) = project_2d(&row) {
+                            benign_cluster.push(pt);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(bs) = tensors.get("v_benign_shell") {
+            if let Some(pt) = project_2d(bs) {
+                benign_cluster.push(pt);
+            }
+        }
+
+        let mut exploit_cluster = Vec::new();
+        for key in ["v_harm_clusters", "v_harm_clusters_whitened"] {
+            if let Some(cl) = tensors.get(key) {
+                if let Ok(cf) = cl.as_type::<f32>() {
+                    let rows = cf.shape().first().copied().unwrap_or(0);
+                    for r in 0..rows {
+                        let row = cf.index((r, ..));
+                        if let Some(pt) = project_2d(&row) {
+                            exploit_cluster.push(pt);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(pt) = project_2d(v_harm) {
+            exploit_cluster.push(pt);
+        }
+        if let Some(pt) = project_2d(v_drift) {
+            exploit_cluster.push(pt);
+        }
+
         Ok(Self {
             target_layer: resolved_layer,
             v_harm: Self::unit_norm(v_harm)?,
@@ -699,7 +796,7 @@ impl RepeSensor {
                 None => None,
             },
             v_drift: Self::unit_norm(v_drift)?,
-            pca_basis: pca_basis.as_type::<f32>()?,
+            pca_basis: pca_basis_f32,
             trusted_user_anchor: None,
             clamp_threshold,
             calibrated_harm_threshold: read_scalar("harm_threshold"),
@@ -718,6 +815,15 @@ impl RepeSensor {
             whitening_shrinkage,
             awq_channel_scales,
             awq_salience_ratio,
+            user_anchor_by_layer: Vec::new(),
+            layer_trace: Vec::new(),
+            token_trace: Vec::new(),
+            pca_reference: PcaReferenceTelemetry {
+                pc1_variance,
+                pc2_variance,
+                benign_cluster,
+                exploit_cluster,
+            },
         })
     }
 
@@ -751,6 +857,10 @@ impl RepeSensor {
             whitening_shrinkage: None,
             awq_channel_scales: None,
             awq_salience_ratio: None,
+            user_anchor_by_layer: Vec::new(),
+            layer_trace: Vec::new(),
+            token_trace: Vec::new(),
+            pca_reference: PcaReferenceTelemetry::default(),
         })
     }
 
@@ -801,6 +911,24 @@ impl RepeSensor {
         Ok(())
     }
 
+    /// Record the mean user-turn anchor vector for a specific decoder layer `layer_idx`.
+    pub fn record_layer_anchor(&mut self, layer_idx: usize, h_layer: &Array) -> Result<()> {
+        if layer_idx == 0 {
+            self.user_anchor_by_layer.clear();
+        }
+        let anchor = Self::mean_state(h_layer)?;
+        anchor.eval()?;
+        if layer_idx == self.target_layer {
+            self.trusted_user_anchor = Some(anchor.clone());
+        }
+        if layer_idx == self.user_anchor_by_layer.len() {
+            self.user_anchor_by_layer.push(anchor);
+        } else if layer_idx < self.user_anchor_by_layer.len() {
+            self.user_anchor_by_layer[layer_idx] = anchor;
+        }
+        Ok(())
+    }
+
     /// The harm cosine of a residual state, measured the same way the inline
     /// hook measures it (relative to the trusted anchor when one is locked).
     pub fn probe_cosine(&self, h_layer: &Array, span_start: Option<usize>) -> Result<f32> {
@@ -819,11 +947,67 @@ impl RepeSensor {
         Ok((harm, scores.cluster_scores, pca))
     }
 
+    /// Record a `LayerTraceMetric` (`l2_norm`, `cos_harm`, `cos_drift`, `guard_logit`,
+    /// and the first 8 floats of `h_l[last_token]`) for `GhostlineTraceFrame`.
+    pub fn record_layer_trace(
+        &mut self,
+        layer_idx: usize,
+        h_layer: &Array,
+        span_start: Option<usize>,
+        cos_harm: f32,
+    ) -> Result<()> {
+        let pooled = self.pooled_state(h_layer, span_start)?;
+        let norm_arr = sqrt(&sum(&multiply(&pooled, &pooled)?, false)?)?;
+        let h_unit = Self::unit_norm(&pooled)?;
+        let anchor_ref = self
+            .user_anchor_by_layer
+            .get(layer_idx)
+            .or(self.trusted_user_anchor.as_ref());
+        let cos_drift = if let Some(anchor) = anchor_ref {
+            let a_unit = Self::unit_norm(anchor)?;
+            let dot_arr = sum(&multiply(&h_unit, &a_unit)?, false)?;
+            mlx_rs::transforms::eval([&norm_arr, &dot_arr])?;
+            (1.0 - dot_arr.item_exact::<f32>()).clamp(0.0, 2.0)
+        } else {
+            norm_arr.eval()?;
+            0.0
+        };
+        let l2_norm = norm_arr.item_exact::<f32>();
+
+        let seq_len = h_layer.shape()[1];
+        let d_model = h_layer.shape()[2];
+        let slice_len = d_model.min(8);
+        let last_slice = h_layer
+            .index((0, seq_len.saturating_sub(1), 0..slice_len))
+            .as_type::<f32>()?;
+        last_slice.eval()?;
+        let tensor_slice_preview = last_slice.as_slice::<f32>().to_vec();
+
+        let base = self.static_benign_baseline.unwrap_or(0.0);
+        let thr = self
+            .calibrated_harm_excess_threshold
+            .or(self.harm_excess_threshold_violates)
+            .unwrap_or(0.011);
+        let guard_logit = (cos_harm - base) - thr;
+
+        self.layer_trace.push(LayerTraceMetric {
+            layer: layer_idx,
+            l2_norm,
+            cos_harm,
+            cos_drift,
+            guard_logit,
+            tensor_slice_preview,
+        });
+        Ok(())
+    }
+
     /// Clear all per-layer profile buffers before a new forward pass.
     pub fn clear_profiles(&mut self) {
         self.layer_profile.clear();
         self.layer_cluster_profile.clear();
         self.layer_pca_profile.clear();
+        self.layer_trace.clear();
+        self.token_trace.clear();
     }
 
     /// The projection of the inspected state onto the PCA basis.
@@ -1013,6 +1197,48 @@ impl RepeSensor {
 
         let drift_cosine = drift_cos_arr.item_exact::<f32>();
         let pca_subspace_energy = energy_arr.item_exact::<f32>();
+
+        // 3b. Per-token [PC1, PC2] coordinates and drift scores across the tool-call span
+        self.token_trace.clear();
+        let n_clusters = span_scores.cluster_scores.len().max(1);
+        let anchor_unit_opt = self
+            .user_anchor_by_layer
+            .get(self.target_layer)
+            .or(self.trusted_user_anchor.as_ref())
+            .and_then(|a| Self::unit_norm(a).ok());
+        for t in 0..span_scores.span_len {
+            let pos = (span_scores.span_start + t) as i32;
+            if pos >= seq_len {
+                break;
+            }
+            let h_tok = h_layer.index((0, pos, ..)).as_type::<f32>()?;
+            let h_tok_unit = Self::unit_norm(&h_tok)?;
+            let tok_pca = matmul(&self.pca_basis, &h_tok_unit)?;
+            let tok_drift = if let Some(ref a_unit) = anchor_unit_opt {
+                let d_arr = sum(&multiply(&h_tok_unit, a_unit)?, false)?;
+                mlx_rs::transforms::eval([&tok_pca, &d_arr])?;
+                (1.0 - d_arr.item_exact::<f32>()).clamp(0.0, 1.0)
+            } else {
+                tok_pca.eval()?;
+                0.0
+            };
+            let pca_sl = tok_pca.as_slice::<f32>();
+            let row_start = t * n_clusters;
+            let raw_harm = span_scores.token_scores
+                [row_start..(row_start + n_clusters).min(span_scores.token_scores.len())]
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
+            self.token_trace.push(TokenTraceMetric {
+                idx: t,
+                raw_harm_cosine: if raw_harm.is_finite() { raw_harm } else { 0.0 },
+                drift_score: tok_drift,
+                pca_coords: [
+                    pca_sl.first().copied().unwrap_or(0.0),
+                    pca_sl.get(1).copied().unwrap_or(0.0),
+                ],
+            });
+        }
 
         // 4. Optional In-Place Orthogonal Clamping on the last token:
         //    h' = h - max(0, h · v_harm) * v_harm

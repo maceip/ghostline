@@ -1,0 +1,481 @@
+/* console.css — Surface 2: Operator Control Plane
+ * Zero-scroll, viewport-locked CSS Grid (height: 100dvh; overflow: hidden)
+ * Top Telemetry Bar: 48px | Left Rail: 280px | Center Stage: 1fr | Right Drawer: 380px
+ */
+
+:root {
+  --con-bg: #0b0c10;
+  --con-panel: #12141b;
+  --con-panel-alt: #171a24;
+  --con-border: rgba(255, 255, 255, 0.11);
+  --con-text: #ecebe4;
+  --con-muted: #9296a6;
+  --con-red: #D71921;
+  --con-amber: #C9971F;
+  --con-green: #38a169;
+  --mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: "Space Grotesk", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root[data-theme="light"] {
+  --con-bg: #ebe8e0;
+  --con-panel: #fbfaf7;
+  --con-panel-alt: #f2efe8;
+  --con-border: rgba(0, 0, 0, 0.13);
+  --con-text: #151515;
+  --con-muted: #646057;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body.console-surface {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--con-bg);
+  color: var(--con-text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.con-shell {
+  display: grid;
+  grid-template-rows: 48px calc(100dvh - 48px);
+  grid-template-columns: 280px minmax(0, 1fr) 380px;
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+/* 1. Top Telemetry Bar (48px) */
+.con-topbar {
+  grid-column: 1 / -1;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 16px;
+  background: var(--con-panel);
+  border-bottom: 1px solid var(--con-border);
+  overflow: hidden;
+}
+
+.con-brand-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  white-space: nowrap;
+}
+
+.con-brand {
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--con-text);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.con-brand-tag {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(215, 25, 33, 0.16);
+  color: var(--con-red);
+  border: 1px solid rgba(215, 25, 33, 0.4);
+}
+
+.con-mode-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--con-panel-alt);
+  border: 1px solid var(--con-border);
+}
+
+.con-mode-btn {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--con-muted);
+  cursor: pointer;
+}
+
+.con-mode-btn.is-active {
+  background: var(--con-red);
+  color: #fff;
+  font-weight: 700;
+}
+
+.con-kpis {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  white-space: nowrap;
+}
+
+.con-kpi {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.con-kpi span {
+  font-size: 9.5px;
+  color: var(--con-muted);
+  letter-spacing: 0.06em;
+}
+
+.con-kpi strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.con-nav-links {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+.con-nav-links a {
+  color: var(--con-muted);
+  text-decoration: none;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.con-nav-links a:hover {
+  color: var(--con-text);
+}
+
+/* 2. Left Policy & Session Rail (280px) */
+.con-left-rail {
+  width: 280px;
+  height: calc(100dvh - 48px);
+  background: var(--con-panel);
+  border-right: 1px solid var(--con-border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.con-rail-sec {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--con-border);
+}
+
+.con-sec-hdr {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--con-muted);
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.con-probe-form {
+  display: flex;
+  gap: 6px;
+}
+
+.con-probe-form input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--con-border);
+  background: var(--con-panel-alt);
+  color: var(--con-text);
+}
+
+.con-btn {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  border-radius: 5px;
+  border: 1px solid var(--con-border);
+  background: var(--con-text);
+  color: var(--con-bg);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.con-btn:hover:not(:disabled) {
+  background: var(--con-red);
+  color: #fff;
+  border-color: var(--con-red);
+}
+
+.con-filter-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+}
+
+.con-filter-btn {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  padding: 4px 2px;
+  border-radius: 4px;
+  border: 1px solid var(--con-border);
+  background: var(--con-panel-alt);
+  color: var(--con-muted);
+  cursor: pointer;
+}
+
+.con-filter-btn.is-active {
+  border-color: var(--con-text);
+  color: var(--con-text);
+  font-weight: 700;
+}
+
+.con-turn-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.con-turn-item {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--con-border);
+  background: var(--con-panel-alt);
+  color: var(--con-text);
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.con-turn-item.is-selected {
+  border-color: var(--con-red);
+  box-shadow: inset 2px 0 0 var(--con-red);
+}
+
+.con-turn-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+
+.con-v-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.con-v-badge.is-allow {
+  background: rgba(56, 161, 105, 0.18);
+  color: var(--con-green);
+}
+
+.con-v-badge.is-clamped {
+  background: rgba(201, 151, 31, 0.2);
+  color: var(--con-amber);
+}
+
+.con-v-badge.is-blocked {
+  background: rgba(215, 25, 33, 0.2);
+  color: var(--con-red);
+}
+
+.con-turn-cmd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.con-turn-meta {
+  font-size: 9.5px;
+  color: var(--con-muted);
+  display: flex;
+  justify-content: space-between;
+}
+
+/* 3. Center Inspection Stage (1fr) */
+.con-center-stage {
+  height: calc(100dvh - 48px);
+  padding: 12px 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.con-stage-mid {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr;
+  gap: 10px;
+}
+
+/* 4. Right Extension & Calibration Drawer (380px) */
+.con-right-drawer {
+  width: 380px;
+  height: calc(100dvh - 48px);
+  background: var(--con-panel);
+  border-left: 1px solid var(--con-border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.con-drawer-sec {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--con-border);
+}
+
+.con-form-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 10.5px;
+}
+
+.con-form-row input[type="range"] {
+  width: 130px;
+}
+
+.con-form-row input[type="number"] {
+  width: 78px;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--con-border);
+  background: var(--con-panel-alt);
+  color: var(--con-text);
+}
+
+.con-cap-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10px;
+}
+
+.con-cap-table th,
+.con-cap-table td {
+  padding: 5px 4px;
+  border-bottom: 1px solid var(--con-border);
+  text-align: left;
+}
+
+.con-cap-table select {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--con-border);
+  background: var(--con-panel-alt);
+  color: var(--con-text);
+}
+
+.con-cal-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.con-cal-card {
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: var(--con-panel-alt);
+  border: 1px solid var(--con-border);
+}
+
+.con-cal-card span {
+  display: block;
+  font-size: 9px;
+  color: var(--con-muted);
+}
+
+.con-cal-card strong {
+  font-size: 12px;
+}
+
+.con-cal-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.con-cal-feed {
+  margin-top: 8px;
+  max-height: 140px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.con-cal-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--con-panel-alt);
+  font-size: 9.5px;
+}
+
+/* Adapt Shared Visualizer Core (.gl-*) inside Console */
+.console-surface .gl-comp {
+  background: var(--con-panel);
+  border: 1px solid var(--con-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.console-surface .gl-tok-chip {
+  background: var(--con-panel-alt);
+  border-color: var(--con-border);
+  color: var(--con-text);
+}
+
+.console-surface .gl-pass-pill {
+  background: var(--con-panel-alt);
+}
+
+.console-surface .gl-layer-dot {
+  fill: var(--con-text);
+}
+
+.console-surface .gl-layer-dot.is-decision,
+.console-surface .gl-layer-dot.is-active {
+  fill: var(--con-red);
+}

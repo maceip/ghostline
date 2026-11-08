@@ -226,9 +226,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             resp.close()
 
     def do_GET(self):  # noqa: N802
-        if self.path.split("?")[0].startswith("/gen/"):
+        clean = self.path.split("?")[0]
+        if clean in ("/arena", "/arena/"):
+            self.path = "/demo.html"
+            clean = "/demo.html"
+        elif clean in ("/console", "/console/"):
+            self.path = "/console.html"
+            clean = "/console.html"
+        if clean.startswith("/gen/"):
             self._proxy_model("GET")
-        elif self._wants_proxy(self.path.split("?")[0]):
+        elif self._wants_proxy(clean):
             self._proxy("GET")
         else:
             super().do_GET()

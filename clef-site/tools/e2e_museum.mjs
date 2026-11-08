@@ -197,6 +197,105 @@ ok((await d.$$("#ex-rollback-out .ex-rb-card")).length === 2, "demo.html Step 5B
 await d.click('#seg-theme button[data-theme="dark"]');
 ok((await d.getAttribute("html", "data-theme")) === "dark", "demo.html theme toggle switches to dark");
 
+// 9b. GhostlineTraceFrame Wire Contract verification
+const tf0 = verdicts[0]?.trace_frame;
+ok(
+  !!tf0 &&
+  typeof tf0.turn_id === "string" &&
+  typeof tf0.model_id === "string" &&
+  tf0.hidden_dim === 896 &&
+  tf0.num_layers === 24 &&
+  tf0.decision_layer === 16 &&
+  Array.isArray(tf0.tokens) && tf0.tokens.length > 0 &&
+  Array.isArray(tf0.layers) && tf0.layers.length === 24 &&
+  Array.isArray(tf0.layers[16]?.tensor_slice_preview) && tf0.layers[16].tensor_slice_preview.length === 8 &&
+  typeof tf0.pca_reference?.pc1_variance === "number" &&
+  Array.isArray(tf0.pca_reference?.benign_cluster) && tf0.pca_reference.benign_cluster.length > 0 &&
+  Array.isArray(tf0.pca_reference?.exploit_cluster) && tf0.pca_reference.exploit_cluster.length > 0,
+  "GhostlineTraceFrame wire contract populated with real tokens, 24 layers (8-float tensor_slice_preview), and PCA reference clusters"
+);
+
+// 9c. Surface 1: Public Interactive Arena Workbench (on demo.html / /arena)
+await d.click("[data-testid=arena-run-btn]");
+await d.waitForSelector("[data-testid=arena-step-card]", { timeout: 25000 });
+ok((await d.$$("[data-testid=arena-step-card]")).length === 3, "Surface 1 Arena renders 3 live multi-step agent trajectory cards");
+ok(!!(await d.$("[data-testid=gl-token-salience]")) && (await d.$$("[data-testid=gl-tok-chip]")).length > 0, "Surface 1 Arena mounts Shared Token Salience Stream component");
+ok(!!(await d.$("[data-testid=gl-layer-scrubber-comp]")) && (await d.$$("#arena-viz-layers .gl-layer-dot")).length === 24, "Surface 1 Arena mounts Shared 24-Layer Cosine Scrubber component");
+ok(!!(await d.$("[data-testid=gl-pca-canvas]")) && !!(await d.$("[data-testid=gl-pca-canvas] svg.gl-pca-svg")), "Surface 1 Arena mounts Shared 2D PCA Subspace Canvas component");
+ok(!!(await d.$("[data-testid=gl-clamp-panel]")) && !!(await d.$("[data-testid=gl-clamp-alpha]")), "Surface 1 Arena mounts Shared Counterfactual Clamping component");
+
+// Scrub layer in Surface 1 Arena
+await d.fill("#arena-viz-layers [data-testid=gl-layer-scrubber]", "12");
+await d.dispatchEvent("#arena-viz-layers [data-testid=gl-layer-scrubber]", "input");
+ok((await d.textContent("#arena-viz-layers [data-testid=gl-scrub-layer-label]")) === "L12", "Surface 1 Arena layer scrubber updates to L12 and refreshes tensor slice preview");
+
+// Toggle mode to bypass in Surface 1 Arena and re-run
+await d.click('#arena-modes button[data-mode="bypass"]');
+await d.waitForFunction(() => {
+  const b = document.querySelector("[data-testid=arena-run-btn]");
+  const out = document.querySelector("[data-testid=arena-sandbox-out]")?.textContent || "";
+  return b && !b.disabled && out.includes("MODE: BYPASS");
+}, null, { timeout: 25000 });
+ok((await d.textContent("[data-testid=arena-sandbox-out]")).includes("MODE: BYPASS"), "Surface 1 Arena runs multi-step trajectory in bypass mode (virtualized host side-effects)");
+
+// Restore clamp mode on Surface 1 Arena
+await d.click('#arena-modes button[data-mode="clamp"]');
+await d.waitForFunction(() => {
+  const b = document.querySelector("[data-testid=arena-run-btn]");
+  const out = document.querySelector("[data-testid=arena-sandbox-out]")?.textContent || "";
+  return b && !b.disabled && out.includes("MODE: CLAMP");
+}, null, { timeout: 25000 });
+
+// 10. Surface 2: Operator Control Plane (/console / console.html)
+const c = await b.newPage({ viewport: { width: 1440, height: 900 } });
+c.on("console", (m) => m.type() === "error" && errors.push(`console: ${m.text()}`));
+await c.goto(`${base}/console`, { waitUntil: "load" });
+await c.waitForSelector("[data-testid=con-turn-item]", { timeout: 30000 });
+
+ok((await c.title()).includes("Operator Control Plane"), "Surface 2 (/console) title carries Operator Control Plane");
+ok(await c.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight && getComputedStyle(document.body).overflow === "hidden"), "Surface 2 enforces zero-scroll 100dvh viewport-locked layout");
+
+// Top Telemetry Bar KPIs
+ok((await c.textContent("#con-prefill-ms")).includes("ms"), "Surface 2 Top Bar displays live prefill hook latency (ms)");
+ok(!isNaN(parseFloat((await c.textContent("#con-peak-harm")).replace("−", "-"))), "Surface 2 Top Bar displays numeric peak v_harm cosine");
+ok(parseInt(await c.textContent("#con-count-total"), 10) >= 1, "Surface 2 Top Bar displays evaluated turn count");
+
+// Left Rail Session Filtering + Live Probe Dispatch
+const initialTurns = (await c.$$("[data-testid=con-turn-item]")).length;
+await c.fill("[data-testid=con-quick-cmd]", "cat ~/.ssh/id_rsa");
+await c.click("[data-testid=con-quick-send]");
+await c.waitForFunction((prev) => document.querySelectorAll("[data-testid=con-turn-item]").length > prev, initialTurns, { timeout: 25000 });
+ok((await c.$$("[data-testid=con-turn-item]")).length === initialTurns + 1, "Surface 2 Left Rail live probe dispatch evaluates command and prepends turn card");
+
+// Filter buttons on Left Rail
+await c.click('#con-filter-bar button[data-filter="allow"]');
+await c.waitForTimeout(100);
+await c.click('#con-filter-bar button[data-filter="all"]');
+ok((await c.$$("[data-testid=con-turn-item]")).length === initialTurns + 1, "Surface 2 Left Rail verdict filter switches between ALLOW and ALL");
+
+// Center Stage Shared Visualizer Core mounted in Surface 2
+ok(!!(await c.$("#con-stage-tokens [data-testid=gl-token-salience]")), "Surface 2 Center Stage mounts Shared Token Salience Stream");
+ok(!!(await c.$("#con-stage-layers [data-testid=gl-layer-scrubber-comp]")), "Surface 2 Center Stage mounts Shared Layer Cosine Scrubber");
+ok(!!(await c.$("#con-stage-pca [data-testid=gl-pca-canvas]")), "Surface 2 Center Stage mounts Shared 2D PCA Subspace Canvas");
+ok(!!(await c.$("#con-stage-clamp [data-testid=gl-clamp-panel]")), "Surface 2 Center Stage mounts Shared Counterfactual Clamping panel");
+
+// Right Drawer: Hook Policy update, Tool Capability Matrix, and Contrastive Calibration Studio
+await c.fill("[data-testid=con-pol-alpha]", "1.20");
+await c.dispatchEvent("[data-testid=con-pol-alpha]", "input");
+await c.click("[data-testid=con-pol-save]");
+await c.waitForFunction(() => (document.querySelector("#con-pol-status")?.textContent || "").includes("ACTIVE"), null, { timeout: 10000 });
+ok((await c.textContent("#con-pol-alpha-val")) === "1.20" && (await c.textContent("#con-pol-status")).includes("ACTIVE"), "Surface 2 Right Drawer updates pre-tool hook policy on backend");
+
+ok((await c.$$("[data-testid=con-cap-select]")).length >= 4, "Surface 2 Right Drawer renders Tool Capability Matrix selectors");
+await c.selectOption('[data-testid=con-cap-select][data-cap-idx="1"]', "hard-block");
+await c.waitForFunction(() => (document.querySelector("#con-pol-status")?.textContent || "").includes("ACTIVE"), null, { timeout: 10000 });
+ok((await c.$eval('[data-testid=con-cap-select][data-cap-idx="1"]', (el) => el.value)) === "hard-block", "Surface 2 Right Drawer persists Tool Capability Matrix change");
+
+await c.fill("[data-testid=con-cal-cmd]", "git status -sb");
+await c.click("[data-testid=con-cal-benign]");
+await c.waitForFunction(() => (document.querySelector("[data-testid=con-cal-status]")?.textContent || "").includes("Recorded"), null, { timeout: 15000 });
+ok((await c.$$(".con-cal-card")).length === 3 && (await c.$$("#con-cal-feed .con-cal-row")).length >= 1, "Surface 2 Right Drawer Contrastive Calibration Studio records live vector and updates conformal stats");
+
 ok(errors.length === 0, `no console errors ${errors.join(" | ").slice(0, 160)}`);
 await b.close();
 console.log(failed ? `${failed} FAILED` : "ALL PASS");

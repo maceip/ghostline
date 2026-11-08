@@ -163,6 +163,21 @@ pub trait GuardableEngine {
         None
     }
 
+    /// Full per-layer trace (`l2_norm`, `cos_harm`, `cos_drift`, `guard_logit`, `tensor_slice_preview`).
+    fn layer_trace(&self) -> &[crate::repe_sensor::LayerTraceMetric] {
+        &[]
+    }
+
+    /// Per-token trace at `decision_layer` (`idx`, `raw_harm_cosine`, `drift_score`, `pca_coords`).
+    fn token_trace(&self) -> &[crate::repe_sensor::TokenTraceMetric] {
+        &[]
+    }
+
+    /// Calibrated PCA subspace reference clusters (`pc1_variance`, `pc2_variance`, `benign_cluster`, `exploit_cluster`).
+    fn pca_reference(&self) -> crate::repe_sensor::PcaReferenceTelemetry {
+        crate::repe_sensor::PcaReferenceTelemetry::default()
+    }
+
     /// The projection of the last inspected state onto the PCA basis.
     fn pca_coordinates(&self) -> Vec<f32>;
 
@@ -328,6 +343,18 @@ impl<L: QwenDecoderLayer> GuardableEngine for HookedQwenClefEngine<L> {
         self.repe_sensor.awq_salience_ratio
     }
 
+    fn layer_trace(&self) -> &[crate::repe_sensor::LayerTraceMetric] {
+        &self.repe_sensor.layer_trace
+    }
+
+    fn token_trace(&self) -> &[crate::repe_sensor::TokenTraceMetric] {
+        &self.repe_sensor.token_trace
+    }
+
+    fn pca_reference(&self) -> crate::repe_sensor::PcaReferenceTelemetry {
+        self.repe_sensor.pca_reference.clone()
+    }
+
     fn pca_coordinates(&self) -> Vec<f32> {
         self.repe_sensor.last_pca_coords.clone()
     }
@@ -364,6 +391,7 @@ impl<L: QwenDecoderLayer> GuardableEngine for HookedQwenClefEngine<L> {
             .min(self.layers.len().saturating_sub(1));
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             h = layer.forward(&h, 0.0)?;
+            self.repe_sensor.record_layer_anchor(layer_idx, &h)?;
             if layer_idx == hook_layer {
                 self.repe_sensor.record_user_anchor(&h)?;
                 break;
@@ -463,6 +491,7 @@ impl<L: QwenDecoderLayer> HookedQwenClefEngine<L> {
             }
 
             if lock_as_user_anchor {
+                self.repe_sensor.record_layer_anchor(layer_idx, &h)?;
                 if layer_idx == hook_layer {
                     self.repe_sensor.record_user_anchor(&h)?;
                     break;
@@ -476,6 +505,8 @@ impl<L: QwenDecoderLayer> HookedQwenClefEngine<L> {
             self.repe_sensor.layer_profile.push(cosine);
             self.repe_sensor.layer_cluster_profile.push(clusters);
             self.repe_sensor.layer_pca_profile.push(pca);
+            self.repe_sensor
+                .record_layer_trace(layer_idx, &h, probe_span_start, cosine)?;
 
             if layer_idx == hook_layer {
                 // <--- INLINE REPE INTERCEPTION HAPPENS RIGHT HERE --->
@@ -672,6 +703,7 @@ impl GuardableEngine for HybridGuardEngine {
         for (layer_idx, layer) in self.backbone.layers.iter().enumerate() {
             h = layer.forward(&self.backbone.cfg, &h)?;
             if lock_as_user_anchor {
+                self.repe_sensor.record_layer_anchor(layer_idx, &h)?;
                 if layer_idx == hook_layer {
                     self.repe_sensor.record_user_anchor(&h)?;
                     break;
@@ -683,6 +715,8 @@ impl GuardableEngine for HybridGuardEngine {
             self.repe_sensor.layer_profile.push(cosine);
             self.repe_sensor.layer_cluster_profile.push(clusters);
             self.repe_sensor.layer_pca_profile.push(pca);
+            self.repe_sensor
+                .record_layer_trace(layer_idx, &h, probe_span_start, cosine)?;
 
             if layer_idx == hook_layer {
                 let telemetry = self
@@ -767,6 +801,18 @@ impl GuardableEngine for HybridGuardEngine {
         self.repe_sensor.awq_salience_ratio
     }
 
+    fn layer_trace(&self) -> &[crate::repe_sensor::LayerTraceMetric] {
+        &self.repe_sensor.layer_trace
+    }
+
+    fn token_trace(&self) -> &[crate::repe_sensor::TokenTraceMetric] {
+        &self.repe_sensor.token_trace
+    }
+
+    fn pca_reference(&self) -> crate::repe_sensor::PcaReferenceTelemetry {
+        self.repe_sensor.pca_reference.clone()
+    }
+
     fn pca_coordinates(&self) -> Vec<f32> {
         self.repe_sensor.last_pca_coords.clone()
     }
@@ -799,6 +845,7 @@ impl GuardableEngine for HybridGuardEngine {
             .min(self.backbone.layers.len().saturating_sub(1));
         for (layer_idx, layer) in self.backbone.layers.iter().enumerate() {
             h = layer.forward(&self.backbone.cfg, &h)?;
+            self.repe_sensor.record_layer_anchor(layer_idx, &h)?;
             if layer_idx == hook_layer {
                 self.repe_sensor.record_user_anchor(&h)?;
                 break;
@@ -878,6 +925,7 @@ impl GuardableEngine for RemoteBackboneEngine {
         for (idx, h) in layers.into_iter().enumerate() {
             let mut h = h;
             if lock_as_user_anchor {
+                self.repe_sensor.record_layer_anchor(idx, &h)?;
                 if idx == hook_layer {
                     self.repe_sensor.record_user_anchor(&h)?;
                 }
@@ -888,6 +936,8 @@ impl GuardableEngine for RemoteBackboneEngine {
             self.repe_sensor.layer_profile.push(cosine);
             self.repe_sensor.layer_cluster_profile.push(clusters);
             self.repe_sensor.layer_pca_profile.push(pca);
+            self.repe_sensor
+                .record_layer_trace(idx, &h, probe_span_start, cosine)?;
             if idx == hook_layer {
                 // Reading only: a clamp here would edit a copy nothing decodes from.
                 repe_telemetry = Some(
@@ -918,6 +968,9 @@ impl GuardableEngine for RemoteBackboneEngine {
     fn layer_cluster_profile(&self) -> &[Vec<f32>] { &self.repe_sensor.layer_cluster_profile }
     fn layer_pca_profile(&self) -> &[Vec<f32>] { &self.repe_sensor.layer_pca_profile }
     fn awq_salience_ratio(&self) -> Option<f32> { self.repe_sensor.awq_salience_ratio }
+    fn layer_trace(&self) -> &[crate::repe_sensor::LayerTraceMetric] { &self.repe_sensor.layer_trace }
+    fn token_trace(&self) -> &[crate::repe_sensor::TokenTraceMetric] { &self.repe_sensor.token_trace }
+    fn pca_reference(&self) -> crate::repe_sensor::PcaReferenceTelemetry { self.repe_sensor.pca_reference.clone() }
     fn pca_coordinates(&self) -> Vec<f32> { self.repe_sensor.last_pca_coords.clone() }
     fn num_layers(&self) -> usize { self.num_layers }
     fn set_capture_attention(&mut self, _on: bool) {}

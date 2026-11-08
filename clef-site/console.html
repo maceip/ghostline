@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GHOSTLINE — Operator Control Plane</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./exhibit.css?v=core" />
+  <link rel="stylesheet" href="./console.css?v=1" />
+  <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml" />
+</head>
+<body class="console-surface" data-testid="console-surface">
+  <div class="con-shell" id="con-shell" data-testid="con-shell">
+
+    <!-- 1. TOP TELEMETRY BAR (48px) -->
+    <header class="con-topbar" id="con-topbar" data-testid="con-topbar">
+      <div class="con-brand-group">
+        <a class="con-brand" href="./index.html">
+          <img id="con-logo" src="./assets/logo/lockup-dark.png" alt="Ghostline" style="height:20px;" />
+          <span>GHOSTLINE</span>
+        </a>
+        <span class="con-brand-tag" data-testid="con-stream-badge" id="con-stream-badge">LIVE · /v1/telemetry</span>
+        <div class="con-mode-seg" id="con-top-modes" role="group" aria-label="Enforcement Mode">
+          <button type="button" class="con-mode-btn" data-mode="bypass" data-testid="con-mode-bypass">BYPASS</button>
+          <button type="button" class="con-mode-btn" data-mode="shadow" data-testid="con-mode-shadow">SHADOW</button>
+          <button type="button" class="con-mode-btn" data-mode="clamp" data-testid="con-mode-clamp">CLAMP</button>
+          <button type="button" class="con-mode-btn is-active" data-mode="hard-block" data-testid="con-mode-hard-block">HARD-BLOCK</button>
+        </div>
+      </div>
+
+      <div class="con-kpis">
+        <div class="con-kpi">
+          <span>PREFILL HOOK</span>
+          <strong id="con-prefill-ms" data-testid="con-prefill-ms">— ms</strong>
+        </div>
+        <div class="con-kpi">
+          <span>PEAK v_harm</span>
+          <strong id="con-peak-harm" data-testid="con-peak-harm">—</strong>
+        </div>
+        <div class="con-kpi">
+          <span>INTERCEPTED</span>
+          <strong id="con-count-total" data-testid="con-count-total">0</strong>
+        </div>
+        <div class="con-kpi">
+          <span>CLAMPED / BLOCKED</span>
+          <strong id="con-count-flagged" data-testid="con-count-flagged">0</strong>
+        </div>
+      </div>
+
+      <nav class="con-nav-links">
+        <a href="./index.html">← EXHIBIT</a>
+        <a href="./demo.html" data-testid="con-nav-arena">PUBLIC ARENA</a>
+        <button type="button" class="con-mode-btn" id="con-theme-toggle" data-testid="con-theme-toggle">LIGHT</button>
+      </nav>
+    </header>
+
+    <!-- 2. LEFT POLICY & SESSION RAIL (280px) -->
+    <aside class="con-left-rail" id="con-left-rail" data-testid="con-left-rail">
+      <div class="con-rail-sec">
+        <div class="con-sec-hdr">
+          <span>DISPATCH LIVE PROBE</span>
+          <span id="con-engine-arch">qwen2</span>
+        </div>
+        <div class="con-probe-form">
+          <input id="con-quick-cmd" data-testid="con-quick-cmd" type="text" value="rm -rf ~/Documents" placeholder="Tool call command…" />
+          <button type="button" class="con-btn" id="con-quick-send" data-testid="con-quick-send">PROBE</button>
+        </div>
+      </div>
+
+      <div class="con-rail-sec">
+        <div class="con-sec-hdr">
+          <span>ACTIVE AGENT TURNS</span>
+          <span id="con-session-count">0 turns</span>
+        </div>
+        <div class="con-filter-bar" id="con-filter-bar">
+          <button type="button" class="con-filter-btn is-active" data-filter="all" data-testid="con-filter-all">ALL</button>
+          <button type="button" class="con-filter-btn" data-filter="allow" data-testid="con-filter-allow">ALLOW</button>
+          <button type="button" class="con-filter-btn" data-filter="clamped" data-testid="con-filter-clamped">CLAMPED</button>
+          <button type="button" class="con-filter-btn" data-filter="blocked" data-testid="con-filter-blocked">BLOCKED</button>
+        </div>
+      </div>
+
+      <div class="con-turn-list" id="con-turn-list" data-testid="con-turn-list" role="list"></div>
+    </aside>
+
+    <!-- 3. CENTER INSPECTION STAGE (1fr) — Mounts Shared Visualizer Core -->
+    <main class="con-center-stage" id="con-center-stage" data-testid="con-center-stage">
+      <div id="con-stage-tokens"></div>
+      <div class="con-stage-mid">
+        <div id="con-stage-layers"></div>
+        <div id="con-stage-pca"></div>
+      </div>
+      <div id="con-stage-clamp"></div>
+    </main>
+
+    <!-- 4. RIGHT EXTENSION & CALIBRATION DRAWER (380px) -->
+    <aside class="con-right-drawer" id="con-right-drawer" data-testid="con-right-drawer">
+
+      <!-- Hot-Swappable Pre-Tool Hook Configuration -->
+      <section class="con-drawer-sec" data-testid="con-hook-config">
+        <div class="con-sec-hdr">
+          <span>PRE-TOOL HOOK CONFIGURATION</span>
+          <span id="con-pol-status">SYNCED</span>
+        </div>
+        <div class="con-form-row">
+          <label for="con-pol-alpha">Clamp Alpha (α)</label>
+          <div>
+            <input id="con-pol-alpha" data-testid="con-pol-alpha" type="range" min="0.20" max="2.20" step="0.05" value="1.15" />
+            <strong id="con-pol-alpha-val">1.15</strong>
+          </div>
+        </div>
+        <div class="con-form-row">
+          <label for="con-pol-thresh">Excess Block Threshold</label>
+          <input id="con-pol-thresh" data-testid="con-pol-thresh" type="number" step="0.005" value="0.011" />
+        </div>
+        <button type="button" class="con-btn" id="con-pol-save" data-testid="con-pol-save" style="width:100%;">APPLY HOOK POLICY</button>
+      </section>
+
+      <!-- Tool Capability Matrix -->
+      <section class="con-drawer-sec" data-testid="con-cap-matrix">
+        <div class="con-sec-hdr">
+          <span>TOOL CAPABILITY MATRIX</span>
+          <span>LIVE ENFORCEMENT</span>
+        </div>
+        <table class="con-cap-table" id="con-cap-table">
+          <thead>
+            <tr>
+              <th>SCOPE</th>
+              <th>POLICY</th>
+              <th>MAX Δ</th>
+            </tr>
+          </thead>
+          <tbody id="con-cap-tbody" data-testid="con-cap-tbody"></tbody>
+        </table>
+      </section>
+
+      <!-- Interactive Contrastive Vector Calibration Studio (SITE_CALIBRATION) -->
+      <section class="con-drawer-sec" data-testid="con-cal-studio">
+        <div class="con-sec-hdr">
+          <span>CONTRASTIVE CALIBRATION (SITE_CALIBRATION)</span>
+          <span id="con-cal-total">0 records</span>
+        </div>
+        <div class="con-cal-kpis">
+          <div class="con-cal-card">
+            <span>BENIGN N</span>
+            <strong id="con-cal-benign-n" data-testid="con-cal-benign-n">0</strong>
+          </div>
+          <div class="con-cal-card">
+            <span>HARMFUL N</span>
+            <strong id="con-cal-harmful-n" data-testid="con-cal-harmful-n">0</strong>
+          </div>
+          <div class="con-cal-card">
+            <span>CONFORMAL τ (α=0.05)</span>
+            <strong id="con-cal-tau" data-testid="con-cal-tau">—</strong>
+          </div>
+        </div>
+        <div class="con-probe-form" style="margin-bottom:6px;">
+          <input id="con-cal-cmd" data-testid="con-cal-cmd" type="text" placeholder="Command to label…" value="cargo test --workspace" />
+        </div>
+        <div class="con-cal-actions">
+          <button type="button" class="con-btn" id="con-cal-benign" data-testid="con-cal-benign" style="background:#38a169;color:#fff;border-color:#38a169;">+ LABEL BENIGN</button>
+          <button type="button" class="con-btn" id="con-cal-harmful" data-testid="con-cal-harmful" style="background:#D71921;color:#fff;border-color:#D71921;">+ LABEL HARMFUL</button>
+        </div>
+        <div id="con-cal-status" data-testid="con-cal-status" style="font-size:9.5px;color:var(--con-muted);margin-top:5px;"></div>
+        <div class="con-cal-feed" id="con-cal-feed" data-testid="con-cal-feed"></div>
+      </section>
+
+    </aside>
+
+  </div>
+
+  <script type="module" src="./js/console.js?v=1"></script>
+</body>
+</html>
