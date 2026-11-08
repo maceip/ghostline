@@ -115,6 +115,9 @@ pub struct SafetensorsIndex {
 pub enum MlxLinear {
     FullPrecision {
         weight: Array,
+        /// The additive linear bias (`<prefix>.bias`). Qwen2 / Qwen2.5 carry
+        /// one on q/k/v; dropping it silently corrupts the forward pass.
+        bias: Option<Array>,
     },
     Quantized {
         weight: Array,
@@ -122,13 +125,25 @@ pub enum MlxLinear {
         biases: Array,
         group_size: i32,
         bits: i32,
+        bias: Option<Array>,
     },
 }
 
 impl MlxLinear {
     pub fn forward(&self, x: &Array) -> Result<Array> {
+        let out = self.forward_no_bias(x)?;
+        let bias = match self {
+            MlxLinear::FullPrecision { bias, .. } | MlxLinear::Quantized { bias, .. } => bias,
+        };
+        match bias {
+            Some(b) => Ok(mlx_rs::ops::add(&out, &b.as_type::<f32>()?)?),
+            None => Ok(out),
+        }
+    }
+
+    fn forward_no_bias(&self, x: &Array) -> Result<Array> {
         match self {
-            MlxLinear::FullPrecision { weight } => {
+            MlxLinear::FullPrecision { weight, .. } => {
                 let x_f32 = x.as_type::<f32>()?;
                 let w_t = transpose_axes(&weight.as_type::<f32>()?, &[1, 0])?;
                 // MLX's Metal float32 GEMM is not float32-accurate: it
@@ -151,6 +166,7 @@ impl MlxLinear {
                 biases,
                 group_size,
                 bits,
+                ..
             } => {
                 let out = quantized_matmul(
                     x,
@@ -321,7 +337,7 @@ impl QwenLoadedLayer {
                 &mlx_rs::random::normal::<f32>(&[d_model, d_model], None, None, None)?,
                 &scale,
             )?;
-            Ok(MlxLinear::FullPrecision { weight: w })
+            Ok(MlxLinear::FullPrecision { weight: w, bias: None })
         };
         Ok(Self {
             input_norm: Array::ones::<f32>(&[d_model])?,
@@ -719,6 +735,7 @@ impl ShardedModelLoader {
 
     pub fn get_linear(&self, prefix: &str) -> Result<MlxLinear> {
         let weight = self.get_tensor(&format!("{prefix}.weight"))?;
+        let bias = self.optional_tensor(&format!("{prefix}.bias"));
         let scales_key = format!("{prefix}.scales");
         let vl_scales_key = format!("language_model.{scales_key}");
 
@@ -746,9 +763,10 @@ impl ShardedModelLoader {
                 biases,
                 group_size,
                 bits: inferred_bits,
+                bias,
             })
         } else {
-            Ok(MlxLinear::FullPrecision { weight })
+            Ok(MlxLinear::FullPrecision { weight, bias })
         }
     }
 
@@ -799,13 +817,14 @@ impl ShardedModelLoader {
 
     pub fn load_embed_tokens_f32(&self) -> Result<Array> {
         match self.get_linear("model.embed_tokens")? {
-            MlxLinear::FullPrecision { weight } => Ok(weight.as_type::<f32>()?),
+            MlxLinear::FullPrecision { weight, .. } => Ok(weight.as_type::<f32>()?),
             MlxLinear::Quantized {
                 weight,
                 scales,
                 biases,
                 group_size,
                 bits,
+                ..
             } => {
                 // Embeddings are stored row-major (not transposed like linear layers).
                 let deq = dequantize(
