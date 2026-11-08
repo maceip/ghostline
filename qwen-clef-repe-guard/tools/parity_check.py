@@ -12,7 +12,7 @@ import mlx.core as mx
 from mlx_lm import load
 import extract_repe_vectors as E
 
-TOL = 0.03  # Metal f32 GEMM runs at ~fp16 precision; a broken forward misses by 0.1-0.3
+TOL = 0.005  # mlx_lm backbone: bf16 vs f32 reference differ by ~0.001; the broken Rust decoder missed by 0.22
 port, model_dir, artifact = sys.argv[1], sys.argv[2], sys.argv[3]
 cj = http.cookiejar.CookieJar()
 op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
