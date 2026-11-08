@@ -251,7 +251,10 @@ function renderGauges(v) {
   (v.cluster_scores || []).forEach((s, i) => box.append(gaugeRow(s, i, false, base)));
   const note = el("p", { class: "scale" });
   note.append(el("span", { class: "base-key" }, `Tick = how far the most harm-like of five ordinary commands reached (${fmt(base)}). `),
-    `The longest bar beat it by ${fmt(v.harm_excess)} — that gap is the number on the alarm line. Raw readings sit below zero for most commands; only the gap matters.`);
+    (v.harm_excess >= 0
+      ? `The rightmost bar passed it by ${v.harm_excess.toFixed(3)}`
+      : `The rightmost bar fell ${Math.abs(v.harm_excess).toFixed(3)} short of it`) +
+      ` — that gap is the number on the alarm line. Raw readings sit below zero for most commands; only the gap matters.`);
   box.append(note);
 }
 

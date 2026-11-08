@@ -25,7 +25,12 @@ const settle = async (n) => {
   return verdicts.length === n + 1 ? verdicts.at(-1) : null;
 };
 
-await p.goto(`${base}/index.html`, { waitUntil: "networkidle" });
+await p.goto(`${base}/index.html`, { waitUntil: "load" });
+// the page takes one real reading of the first example on load
+await p.waitForSelector("#verdict:not([hidden])", { timeout: 30000 });
+await p.waitForTimeout(200);
+ok(verdicts.length === 1 && verdicts[0]?.harm_excess !== undefined, "first example is measured live on load");
+ok((await p.textContent("#scan-cmd")) === "rm -rf ~/Documents", "instrument names the command it measured");
 ok(/^live · /.test(await p.textContent("[data-testid=engine]")), "engine chip reports a live engine");
 ok((await p.$$("#board .b-col")).length === 2, "scoreboard renders both columns from heldout.json");
 ok((await p.$$("#swarm circle.dot")).length === 50, "alarm line shows the 50 reference commands");
@@ -43,6 +48,10 @@ ok((await p.$$("#gauges .gauge")).length === v.cluster_scores.length, "one gauge
 ok((await p.$$("#elevator .floors li")).length === v.layer_profile.length, "one floor per layer reading");
 ok((await p.textContent("#elevator li.is-probe .f-n")) === String(v.probe_layer), "probe floor is the guard's probe layer");
 ok(!!(await p.$("#swarm circle.you")), "your command is placed on the alarm line");
+ok((await p.$$("#swarm rect.pin")).length === 1, "the earlier reading stays on the line as a pin");
+ok((await p.$$("#gauges .g-base")).length === v.cluster_scores.length, "gauges mark the ordinary-command level");
+ok((await p.textContent("#gauges .scale")).includes(Math.abs(v.harm_cosine - v.harm_excess).toFixed(3)), "ordinary-command level = harm_cosine - harm_excess");
+ok((await p.$$("#elevator .f-ghost")).length === v.layer_profile.length, "layer tower overlays the previous command");
 
 // 2. intent tagging + score
 const blocked = !v.allowed;
@@ -63,18 +72,40 @@ for (let i = 0; i < chips.length; i++) {
      `example "${label}" judged live: ${v ? (v.allowed ? "allowed" : "refused") : "NO RESPONSE"}`);
 }
 
-// 4. mistakes list + reset
+// 4. matched pairs: two live readings, both drawn
+const pairs = await p.$$("[data-testid=pair]");
+ok(pairs.length === 3, "three matched pairs offered");
+for (let i = 0; i < pairs.length; i++) {
+  n = verdicts.length;
+  await pairs[i].click();
+  await p.waitForFunction(() => document.querySelector(".pair-grid") && !document.querySelector(".pair-btn").disabled, null, { timeout: 60000 });
+  await p.waitForTimeout(150);
+  const two = verdicts.slice(n);
+  const words = await p.$$eval(".pair-side .p-word b", (bs) => bs.map((b) => b.textContent));
+  ok(two.length === 2 && words[0] === (two[0].allowed ? "Allowed" : "Refused") && words[1] === (two[1].allowed ? "Allowed" : "Refused"),
+     `pair ${i + 1} measured live: ${words.join(" / ")}`);
+}
+
+// 5. clicking a reference dot re-measures that command live
+n = verdicts.length;
+const firstRef = await p.$eval("#swarm circle.dot", (c) => c.getAttribute("aria-label").split(", measured")[0]);
+await p.$eval("#swarm circle.dot", (c) => c.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+v = await settle(n);
+ok(v && (await p.inputValue("[data-testid=cmd]")) === firstRef, "clicking a dot loads and measures that command");
+
+// 6. mistakes list + reset
 await p.click(".misses summary");
 ok((await p.$$("#misses li")).length > 0, "mistake list opens and lists commands");
 await p.click("[data-testid=y-reset]");
 ok((await p.textContent("[data-testid=y-total]")) === "0", "reset clears your score");
 
-// 5. phone width: no horizontal page scroll
+// 7. phone width: no horizontal page scroll
 const phone = await b.newPage({ viewport: { width: 390, height: 844 } });
-await phone.goto(`${base}/index.html`, { waitUntil: "networkidle" });
+await phone.goto(`${base}/index.html`, { waitUntil: "load" });
+await phone.waitForSelector("#verdict:not([hidden])", { timeout: 30000 });
 ok(await phone.evaluate(() => document.documentElement.scrollWidth <= 390), "no horizontal scroll at 390px");
 
-// 6. legacy link
+// 8. legacy link
 const d = await b.newPage();
 await d.goto(`${base}/demo.html`);
 await d.waitForURL(/index\.html/, { timeout: 5000 }).catch(() => {});
