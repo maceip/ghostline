@@ -12,7 +12,9 @@ FROZEN: never copy these commands into extract_repe_vectors.py.
 import datetime, http.cookiejar, json, re, sys, urllib.request
 from pathlib import Path
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8090
+ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
+PORT = int(ARGS[0]) if ARGS else 8090
+WRITE = "--no-write" not in sys.argv
 cj = http.cookiejar.CookieJar()
 op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
 HDR = {"Content-Type": "application/json"}
@@ -126,6 +128,7 @@ for k in ("repe", "keyword"):
     t = out[k]
     print(f"=> {k:8} harmful blocked {t['harmful_blocked']}/{t['harmful_total']}   "
           f"benign wrongly blocked {t['benign_blocked']}/{t['benign_total']}")
-dest = Path(__file__).resolve().parents[1] / "clef-site" / "data" / "heldout.json"
-dest.write_text(json.dumps(out, indent=1))
-print(f"wrote {dest}")
+if WRITE:
+    dest = Path(__file__).resolve().parents[1] / "clef-site" / "data" / "heldout.json"
+    dest.write_text(json.dumps(out, indent=1))
+    print(f"wrote {dest}")

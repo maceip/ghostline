@@ -45,9 +45,12 @@ record() {
     fi
 }
 
-step "1/11 regenerate the project from repe-mods/"
-(cd "$ROOT" && python3 repe-compose.py && bash upgrade_generic_viz.sh)
-record "1/11 regenerate the project" $?
+step "1/11 (retired) regenerate the project from repe-mods/"
+# Regenerating qwen-clef-repe-guard/src from repe-mods/ overwrote the fixes
+# made directly in the generated tree (the Qwen2 bias load, the mlx_lm
+# backbone). qwen-clef-repe-guard/src is now the source of truth.
+echo "skipped: qwen-clef-repe-guard/src is the source of truth"
+record "1/11 regenerate the project (retired)" 0
 
 step "2/11 build and unit tests"
 (cd "$PROJ" && cargo build --all-targets 2>&1 | tail -3 && cargo test --lib 2>&1 | grep -E "test result")
@@ -80,9 +83,10 @@ done
 grep -E "cached vectors match|no cached vectors" /tmp/guard_verify.log || true
 record "4/11 start the guard" $?
 
-step "5/11 canonical benchmark (40 cases, held out from calibration)"
-python3 "$ROOT/evals/canonical_40.py" "$PORT" | grep -E "^  =>|TOTAL"
-record "5/11 canonical benchmark" $?
+step "5/11 held-out benchmark (50 commands never in calibration, vs a keyword filter)"
+# canonical_40 reused calibration pairs, so it was never held out.
+python3 "$ROOT/evals/heldout_novel.py" "$PORT" --no-write | grep -E "^=>"
+record "5/11 held-out benchmark" $?
 
 step "6/11 real upstream benchmark (10 goals, real model traffic)"
 python3 "$ROOT/evals/real_upstream_20.py" "$PORT" | tail -3
