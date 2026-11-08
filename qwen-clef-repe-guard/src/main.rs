@@ -343,8 +343,26 @@ fn main() -> Result<()> {
         architecture: fingerprint.architecture.clone(),
         num_layers: fingerprint.num_layers,
         d_model: fingerprint.d_model,
-        calibration_mode: zero_shot.hyperparams.calibration_mode.clone(),
-        weight_quant_summary: zero_shot.hyperparams.weight_quant_summary.clone(),
+        // Say which vectors are actually loaded: the zero-shot label used to
+        // be reported even while calibrated vectors were in use.
+        calibration_mode: {
+            let meta = qwen_clef_repe_guard::repe_sensor::safetensors_metadata(&args.repe)
+                .unwrap_or_default();
+            if meta.contains_key("harm_excess_threshold") {
+                format!(
+                    "calibrated contrastive vectors ({}; pooling {}, baseline {})",
+                    args.repe.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
+                    meta.get("pooling").cloned().unwrap_or_else(|| "mean".into()),
+                    meta.get("baseline_mode").cloned().unwrap_or_else(|| "?".into()),
+                )
+            } else {
+                zero_shot.hyperparams.calibration_mode.clone()
+            }
+        },
+        weight_quant_summary: match &args.backbone_addr {
+            Some(addr) => format!("backbone served by mlx_lm at {addr}"),
+            None => zero_shot.hyperparams.weight_quant_summary.clone(),
+        },
     };
 
     let tokenizer = match &args.tokenizer {

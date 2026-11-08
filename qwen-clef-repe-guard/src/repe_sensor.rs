@@ -180,6 +180,10 @@ pub struct RepeProbeTelemetry {
     pub attribution_cosine: f32,
     /// How many tokens the tool-call span covered.
     pub span_tokens: usize,
+    /// Per-token score of every cluster over the span, row-major `[t * C + c]`.
+    pub token_scores: Vec<f32>,
+    /// The first token of the span (absolute index in the sequence).
+    pub span_start: usize,
 }
 
 /// How the residual stream is collapsed over the tool-call span.
@@ -968,6 +972,8 @@ impl RepeSensor {
         }
 
         Ok(RepeProbeTelemetry {
+            token_scores: span_scores.token_scores.clone(),
+            span_start: span_scores.span_start,
             layer_idx: self.target_layer,
             harm_cosine,
             drift_cosine,
