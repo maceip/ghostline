@@ -54,16 +54,33 @@ main { max-width: 1080px; margin: 0 auto; padding: 0 16px 80px; }
   backdrop-filter: blur(10px); border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; gap: 10px; align-items: center; font-weight: 700; text-decoration: none; letter-spacing: -.01em; }
-.nav { display: flex; gap: 22px; font-size: 14px; margin-right: auto; margin-left: 24px; }
+.nav { display: flex; gap: 22px; font-size: 14px; margin-right: auto; margin-left: 24px; align-items: center; }
 .nav a { text-decoration: none; color: var(--ink-2); }
 .nav a:hover { color: var(--ink); }
+.nav a.nav-demo {
+  font: 700 11px "Space Mono", monospace; letter-spacing: .08em; text-transform: uppercase;
+  padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink);
+}
+.nav a.nav-demo:hover { border-color: var(--red); color: var(--red); }
+.seg-theme {
+  display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 2px; background: var(--panel);
+}
+.seg-theme .seg-btn {
+  font: 700 10px "Space Mono", monospace; letter-spacing: .1em; padding: 4px 10px; border: 0; border-radius: 999px;
+  background: transparent; color: var(--ink-3); cursor: pointer;
+}
+.seg-theme .seg-btn.is-on { background: var(--ink); color: var(--bg); }
 .engine { font: 12px "Space Mono", monospace; color: var(--ink-3); white-space: nowrap; }
 .engine.is-live::before { content: "●"; color: var(--green); margin-right: 6px; animation: pulse 2s infinite; }
 .engine.is-off { color: var(--red); }
 @keyframes pulse { 50% { opacity: .35; } }
 
 /* ---------- intro ---------- */
-.intro { padding: 72px 0 40px; }
+.intro { position: relative; padding: 72px 0 40px; overflow: hidden; }
+.intro-field {
+  position: absolute; top: 0; right: -40px; width: 420px; height: 320px; pointer-events: none; opacity: .55; z-index: 0;
+}
+.intro > *:not(.intro-field) { position: relative; z-index: 1; }
 .kicker, .tag {
   font: 700 12px "Space Mono", monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 14px;
 }

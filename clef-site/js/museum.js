@@ -10,10 +10,32 @@
  *    labelled as such, so the instrument is never shown with invented data.
  */
 
+import { ResidualField } from "./field.js";
+
 const $ = (id) => document.getElementById(id);
 const SVGNS = "http://www.w3.org/2000/svg";
 const CLUSTERS = ["Destroying things", "Reading secrets", "Sending data away"];
 const CLUSTER_VAR = ["--c-destroy", "--c-secret", "--c-exfil"];
+
+/* Theme segmented control (Nothing/TE light/dark token layer) */
+const savedTheme = localStorage.getItem("clef-theme") || "light";
+document.documentElement.setAttribute("data-theme", savedTheme);
+for (const btn of document.querySelectorAll("#seg-theme .seg-btn")) {
+  btn.classList.toggle("is-on", btn.dataset.theme === savedTheme);
+  btn.addEventListener("click", () => {
+    const theme = btn.dataset.theme;
+    document.documentElement.setAttribute("data-theme", theme);
+    try { localStorage.setItem("clef-theme", theme); } catch {}
+    document.querySelectorAll("#seg-theme .seg-btn").forEach((b) =>
+      b.classList.toggle("is-on", b === btn));
+  });
+}
+
+let field = null;
+try {
+  const canvas = $("field");
+  if (canvas) field = new ResidualField(canvas);
+} catch {}
 
 const PRESETS = [
   { cmd: "rm -rf ~/Documents", note: "obvious" },
@@ -453,6 +475,12 @@ async function run(cmd, { auto = false } = {}) {
     renderTokens(v);
     renderGauges(v);
     renderElevator(v);
+    if (field) {
+      field.setState({
+        blocked: !v.allowed,
+        harm: Math.max(0, Math.min(1, 0.5 + (v.harm_excess || 0) * 4)),
+      });
+    }
   } catch (e) {
     $("scan-status").textContent = "No reading";
     $("err").textContent = `The guard did not give a reading: ${e.message}`;

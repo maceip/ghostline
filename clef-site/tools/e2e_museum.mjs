@@ -6,8 +6,13 @@
  *   node clef-site/tools/e2e_museum.mjs http://127.0.0.1:8417
  * (needs `playwright` resolvable and Chrome installed)
  */
-import { chromium } from "playwright";
-const base = process.argv[2] || "http://127.0.0.1:8417";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const { chromium } = (() => {
+  try { return require("playwright"); }
+  catch { return require("/tmp/pw-audit/node_modules/playwright"); }
+})();
+const base = process.argv[2] || "http://127.0.0.1:8412";
 let failed = 0;
 const ok = (c, m) => { console.log(`${c ? "PASS" : "FAIL"} ${m}`); if (!c) failed++; };
 
@@ -99,17 +104,70 @@ ok((await p.$$("#misses li")).length > 0, "mistake list opens and lists commands
 await p.click("[data-testid=y-reset]");
 ok((await p.textContent("[data-testid=y-total]")) === "0", "reset clears your score");
 
-// 7. phone width: no horizontal page scroll
+// 7. theme toggle on index.html
+await p.click('#seg-theme button[data-theme="dark"]');
+ok((await p.getAttribute("html", "data-theme")) === "dark", "index.html theme toggle switches to dark");
+await p.click('#seg-theme button[data-theme="light"]');
+ok((await p.getAttribute("html", "data-theme")) === "light", "index.html theme toggle switches back to light");
+
+// 8. phone width: no horizontal page scroll
 const phone = await b.newPage({ viewport: { width: 390, height: 844 } });
 await phone.goto(`${base}/index.html`, { waitUntil: "load" });
 await phone.waitForSelector("#verdict:not([hidden])", { timeout: 30000 });
 ok(await phone.evaluate(() => document.documentElement.scrollWidth <= 390), "no horizontal scroll at 390px");
 
-// 8. legacy link
-const d = await b.newPage();
-await d.goto(`${base}/demo.html`);
-await d.waitForURL(/index\.html/, { timeout: 5000 }).catch(() => {});
-ok(d.url().includes("index.html"), "demo.html forwards to the exhibit");
+// 9. demo.html ("FROM QWEN" Glass Room 6-step run-it walkthrough)
+const d = await b.newPage({ viewport: { width: 1280, height: 900 } });
+d.on("console", (m) => m.type() === "error" && errors.push(`demo: ${m.text()}`));
+await d.goto(`${base}/demo.html`, { waitUntil: "load" });
+await d.waitForFunction(() => {
+  const txt = document.querySelector("#src-chip")?.textContent || "";
+  return txt.includes("LIVE ENGINE") && !txt.includes("undefined");
+}, null, { timeout: 10000 });
+ok(/LIVE ENGINE · qwen2/i.test(await d.textContent("#src-chip")), "demo.html footer chip reports live qwen2 engine");
+
+// Step 0: Wake it up (FROM QWEN live stream)
+await d.click("#act-0");
+await d.waitForFunction(() => document.querySelector("#step-1")?.dataset.state === "open", null, { timeout: 30000 });
+ok((await d.textContent("#msg-0")).trim().length > 10, "demo.html Step 0 streams live response from Qwen");
+ok((await d.$$("#tokstrip-0 i")).length > 0, "demo.html Step 0 draws live token ticks");
+
+// Step 1: Open the checkpoint
+await d.click("#act-1");
+await d.waitForFunction(() => document.querySelector("#step-2")?.dataset.state === "open", null, { timeout: 15000 });
+await d.waitForTimeout(650);
+ok(/qwen2/i.test(await d.textContent("#f1-arch")), "demo.html Step 1 reports qwen2 architecture");
+ok((await d.textContent("#f1-layers")) === "24", "demo.html Step 1 reports 24 layers");
+ok((await d.textContent("#f1-probe")) === "16", "demo.html Step 1 reports probe layer 16");
+ok((await d.$$("#layers-1 i")).length === 24, "demo.html Step 1 renders 24 layer bars with live heights");
+
+// Step 2: Measure the directions
+await d.click("#act-2");
+await d.waitForFunction(() => document.querySelector("#step-3")?.dataset.state === "open", null, { timeout: 15000 });
+ok((await d.$$("#bars-2 .ex-bar")).length === 3, "demo.html Step 2 renders 3 live cluster direction bars");
+ok(!!(await d.$("#bars-2 svg.ex-fan")), "demo.html Step 2 renders SVG direction fan");
+
+// Step 3: Set the filter
+await d.fill("#ex-input", "rm -rf ~/Documents");
+await d.click("#act-3");
+ok((await d.getAttribute("#step-4", "data-state")) === "open", "demo.html Step 3 locks filter and unlocks Step 4");
+
+// Step 4: Run inference
+await d.click("#act-4");
+await d.waitForFunction(() => document.querySelector("#step-5")?.dataset.state === "open", null, { timeout: 15000 });
+await d.waitForTimeout(650);
+ok((await d.textContent("#f4-tok")).includes("#"), "demo.html Step 4 shows peak attribution token index");
+ok(!!(await d.$("#tok-4 mark")), "demo.html Step 4 highlights peak attribution token");
+
+// Step 5: Pull the trace
+await d.click("#act-5");
+await d.waitForFunction(() => document.querySelector("#step-5")?.dataset.state === "done", null, { timeout: 15000 });
+ok(!!(await d.$("#spine svg path")), "demo.html Step 5 renders 24-layer spine curve");
+ok((await d.textContent("#f5-verdict")).includes("refuse"), "demo.html Step 5 refuses harmful command");
+
+// Theme toggle on demo.html
+await d.click('#seg-theme button[data-theme="dark"]');
+ok((await d.getAttribute("html", "data-theme")) === "dark", "demo.html theme toggle switches to dark");
 
 ok(errors.length === 0, `no console errors ${errors.join(" | ").slice(0, 160)}`);
 await b.close();

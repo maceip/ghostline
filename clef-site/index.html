@@ -15,13 +15,18 @@
   <header class="top">
     <a class="brand" href="./index.html"><img src="./assets/mark.svg" alt="" width="22" height="22" /> AgentVector</a>
     <nav class="nav" aria-label="Exhibit rooms">
-      <a href="#try">Try it</a><a href="#line">Alarm line</a><a href="#pairs">Pairs</a><a href="#score">Scoreboard</a>
+      <a href="#try">Try it</a><a href="#line">Alarm line</a><a href="#pairs">Pairs</a><a href="#score">Scoreboard</a><a href="./demo.html" class="nav-demo" data-testid="nav-demo">Glass room →</a>
     </nav>
+    <div class="seg-theme" id="seg-theme" data-testid="seg-theme" role="group" aria-label="Theme">
+      <button type="button" class="seg-btn" data-theme="dark">DARK</button>
+      <button type="button" class="seg-btn is-on" data-theme="light">LIGHT</button>
+    </div>
     <span class="engine" id="engine" data-testid="engine">connecting…</span>
   </header>
 
   <main>
     <section class="intro">
+      <canvas id="field" class="intro-field" aria-hidden="true"></canvas>
       <p class="kicker">An exhibit about representation engineering</p>
       <h1>When an AI agent reaches for a tool,<br />what is it <em>thinking</em>?</h1>
       <p class="lede">
