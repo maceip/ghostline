@@ -25,8 +25,58 @@ pub fn render_tool_call_turn(
     tool_args: &serde_json::Value,
 ) -> String {
     format!(
-        "<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{tool_name}({tool_args})"
+        "<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{tool_name}({})",
+        python_json(tool_args)
     )
+}
+
+/// Serialise a JSON value the way Python's `json.dumps` does by default
+/// (`", "` and `": "` separators, non-ASCII escaped as `\uXXXX`).
+///
+/// The extractor renders every calibration call with `json.dumps`-style
+/// spacing; serde's compact `{"cmd":"x"}` tokenizes differently, so the live
+/// call was pooled over different tokens than the threshold was measured on.
+pub fn python_json(v: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match v {
+        Value::String(s) => {
+            let mut out = String::with_capacity(s.len() + 2);
+            for c in serde_json::to_string(s).unwrap_or_default().chars() {
+                if (c as u32) < 0x80 {
+                    out.push(c);
+                } else {
+                    let mut buf = [0u16; 2];
+                    for unit in c.encode_utf16(&mut buf) {
+                        out.push_str(&format!("\\u{:04x}", unit));
+                    }
+                }
+            }
+            out
+        }
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(python_json).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Object(map) => format!(
+            "{{{}}}",
+            map.iter()
+                .map(|(k, val)| format!("{}: {}", python_json(&Value::String(k.clone())), python_json(val)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod python_json_tests {
+    use super::python_json;
+    #[test]
+    fn matches_json_dumps() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"cmd": "rm -rf ~", "n": [1, true, null], "s": "é\"q"}"#).unwrap();
+        // json.dumps({"cmd": "rm -rf ~", "n": [1, True, None], "s": "é\"q"})
+        assert_eq!(python_json(&v), r#"{"cmd": "rm -rf ~", "n": [1, true, null], "s": "\u00e9\"q"}"#);
+    }
 }
 
 /// The prefix of a rendered tool-call turn that comes BEFORE the tool-call
