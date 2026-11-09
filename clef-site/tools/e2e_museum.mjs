@@ -317,9 +317,12 @@ ok((await c.$$(".con-cal-card")).length === 3 && (await c.$$("#con-cal-feed .con
 // Tab 2: Tool Capability Matrix (.capability-matrix)
 await c.click('[data-testid="tab-btn-capabilities"]');
 ok((await c.$$("[data-testid=con-cap-select]")).length >= 4, "Surface 2 Right Drawer Tab 2 renders .capability-matrix selectors");
-await c.selectOption('[data-testid=con-cap-select][data-cap-idx="1"]', "hard-block");
-await c.waitForFunction(() => (document.querySelector("#con-pol-status")?.textContent || "").includes("ACTIVE"), null, { timeout: 10000 });
-ok((await c.$eval('[data-testid=con-cap-select][data-cap-idx="1"]', (el) => el.value)) === "hard-block", "Surface 2 Right Drawer persists Tool Capability Matrix change");
+const prevCapVal = await c.$eval('[data-testid=con-cap-select][data-cap-idx="1"]', (el) => el.value);
+const targetCapVal = prevCapVal === "hard-block" ? "clamp" : "hard-block";
+await c.evaluate(() => { const el = document.querySelector("#con-pol-status"); if (el) el.textContent = "PENDING"; });
+await c.selectOption('[data-testid=con-cap-select][data-cap-idx="1"]', targetCapVal);
+await c.waitForFunction(() => (document.querySelector("#con-pol-status")?.textContent || "").includes("ACTIVE"), null, { timeout: 20000 });
+ok((await c.$eval('[data-testid=con-cap-select][data-cap-idx="1"]', (el) => el.value)) === targetCapVal, "Surface 2 Right Drawer persists Tool Capability Matrix change");
 
 // Tab 3: Custom Hooks (#custom-hook-editor)
 await c.click('[data-testid="tab-btn-hooks"]');

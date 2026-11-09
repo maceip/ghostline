@@ -140,9 +140,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 payload = resp.read()
                 self.send_response(resp.status)
                 for key, value in resp.headers.items():
-                    if key.lower() in ("transfer-encoding", "connection"):
+                    if key.lower() in ("transfer-encoding", "connection", "content-length"):
                         continue
                     self.send_header(key, value)
+                self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(payload)
