@@ -227,6 +227,34 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         clean = self.path.split("?")[0]
+        if clean == "/version.json":
+            rev = os.environ.get("GHOSTLINE_REVISION", "unknown")
+            vfile = pathlib.Path(SITE_ROOT).parent / "version.json"
+            if vfile.is_file():
+                try:
+                    payload = vfile.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                except OSError:
+                    pass
+            payload = json.dumps({
+                "service": "ghostline",
+                "revision": rev,
+                "origin": "https://ghostline.secure.build",
+                "guard_upstream": self.guard,
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if clean in ("/arena", "/arena/"):
             self.path = "/demo.html"
             clean = "/demo.html"

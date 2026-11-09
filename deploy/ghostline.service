@@ -1,0 +1,27 @@
+[Unit]
+Description=ghostline.secure.build — Ghostline Pre-Flight AI Guard Web & Telemetry Proxy (127.0.0.1:5197)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=devuser
+Group=devuser
+WorkingDirectory=/opt/ghostline/current/clef-site
+Environment=PYTHONUNBUFFERED=1
+Environment=MODEL_SERVER=http://100.80.211.36:8443/gen
+Environment=MODEL_ID=/Users/mac/.cache/huggingface/hub/models--mlx-community--Qwen3-4B-Instruct-2507-4bit/snapshots/50d427756c6b1b2fe0c0a10f67fbda1fc8e82c1b/
+ExecStart=/usr/bin/python3 /opt/ghostline/current/clef-site/tools/serve.py --bind 127.0.0.1 --port 5197 --guard http://100.80.211.36:8443 --model-server http://100.80.211.36:8443/gen
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ghostline
+
+[Install]
+WantedBy=multi-user.target

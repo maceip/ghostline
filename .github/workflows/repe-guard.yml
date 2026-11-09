@@ -1,64 +1,66 @@
-name: repe-guard
+name: Ghostline CI & Auto-Deploy (ghostline.secure.build)
 
-# The guard itself needs Apple Silicon (mlx-rs is Metal-only), so the full
-# benchmark suite cannot run here. What CAN run is the part that is pure
-# arithmetic and has no MLX dependency: the Ledoit-Wolf whitening, the
-# cross-turn trajectory, and the conformal thresholding. Those are exactly
-# the parts where a silent numerical regression would be invisible until a
-# calibration run hours later.
-#
-# The full end-to-end verification lives in `evals/verify_all.sh` and is run
-# locally on the Apple Silicon machine before a release.
 on:
   push:
     branches: [main]
-    paths:
-      - "repe-mods/**"
-      - "repe-compose.py"
-      - "upgrade_generic_viz.sh"
-      - "evals/**"
-      - "deploy/**"
-      - ".github/workflows/repe-guard.yml"
   pull_request:
-    paths:
-      - "repe-mods/**"
-      - "repe-compose.py"
-      - "upgrade_generic_viz.sh"
-      - "evals/**"
-      - "deploy/**"
-      - ".github/workflows/repe-guard.yml"
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Production operation on ghostline.secure.build
+        required: false
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - verify
+          - status
+          - rollback
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghostline-production
+  cancel-in-progress: false
 
 jobs:
-  pure-math:
-    name: pure arithmetic + generator sync
+  lint-and-check:
+    name: Lint, Pure-Math & Frontend/Caddy Verification
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Node.js v22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
-      # The generator must be assembled from the module workspace. If the two
-      # drift apart, the next local rebuild silently rewrites the project
-      # with stale sources — this is the check that stops that.
-      - name: generator is in sync with repe-mods/
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check generator sync with repe-mods/
         run: python3 repe-compose.py --check
 
-      # The trajectory module is std-only, so it compiles and tests on its own.
-      - name: trajectory tests
+      - name: Check repe-mods/ and qwen-clef-repe-guard/ source parity
+        run: |
+          for f in repe-mods/src/*.rs; do
+            base="$(basename "$f")"
+            diff -u "$f" "qwen-clef-repe-guard/src/$base"
+          done
+
+      - name: Trajectory module unit tests
         run: |
           rustc --edition 2021 --test repe-mods/src/trajectory.rs -o /tmp/trajectory_test
           /tmp/trajectory_test
 
-      # The whitening module is std-only as well.
-      - name: whitening module type-checks
+      - name: Whitening module type-check
         run: rustc --edition 2021 --crate-type lib repe-mods/src/whiten.rs -o /tmp/libwhiten.rlib
 
-      # The access-control module is pure arithmetic too — the bearer
-      # comparison, the sliding rate-limit window and the X-Forwarded-For
-      # rule. It needs `sha2` for the constant-time digest comparison, so it
-      # is built as a tiny standalone crate rather than with rustc alone.
-      - name: access control module tests
+      - name: Access control module unit tests
         run: |
           mkdir -p /tmp/access_test/src
           cp repe-mods/src/access.rs /tmp/access_test/src/lib.rs
@@ -73,10 +75,7 @@ jobs:
           EOF
           cd /tmp/access_test && cargo test --quiet
 
-      # The session module is the same story: the HMAC signing, the device
-      # binding and the replay refusals are all pure logic, and a silent
-      # regression there would be invisible until it was deployed.
-      - name: session module tests
+      - name: Session module unit tests
         run: |
           mkdir -p /tmp/session_test/src
           cp repe-mods/src/session.rs /tmp/session_test/src/lib.rs
@@ -91,40 +90,161 @@ jobs:
           EOF
           cd /tmp/session_test && cargo test --quiet
 
-      # The public edge config must actually LOAD, and it must load only
-      # on a Caddy that has the rate_limit module.  A Caddyfile that
-      # refuses to start is a deploy that cannot happen, so this builds
-      # that binary and runs the edge check against the SHIPPED
-      # deploy/Caddyfile: it must validate, a stock Caddy must refuse it,
-      # the limit must shed load before the backend sees it, and the
-      # configuration as the box will really run it — a bare hostname,
-      # :443, /opt/zcode/site — must validate too, with the zones and
-      # their limits in the adapted config.
-      - name: the Caddy edge config loads and rate limits by IP
+      - name: Lint Python scripts & server
         run: |
+          python3 -m py_compile \
+            extract_repe_vectors.py \
+            repe-compose.py \
+            clef-site/tools/serve.py \
+            evals/canonical_40.py \
+            evals/real_upstream_20.py \
+            evals/access_control.py \
+            evals/session_guard.py \
+            evals/caddy_edge.py \
+            evals/site_claims.py
+
+      - name: Lint JavaScript modules, Web Components & E2E harness
+        run: |
+          for js in \
+            clef-site/js/app.js \
+            clef-site/js/console.js \
+            clef-site/js/exhibit.js \
+            clef-site/js/ghostline-core.js \
+            clef-site/js/spine.js \
+            clef-site/js/components/index.js \
+            clef-site/js/components/token-stream.js \
+            clef-site/js/components/layer-scrubber.js \
+            clef-site/js/components/pca-canvas.js \
+            clef-site/js/components/zero-wait-snapshot.js \
+            clef-site/tools/e2e_museum.mjs; do
+            node --check "$js"
+          done
+
+      - name: Verify Dual-Surface HTML & Zero-Wait TraceFrame contract
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import { ZERO_WAIT_ARENA_SNAPSHOT } from "./clef-site/js/components/zero-wait-snapshot.js";
+            const demoHtml = fs.readFileSync("clef-site/demo.html", "utf8");
+            const consoleHtml = fs.readFileSync("clef-site/console.html", "utf8");
+            for (const tag of ["<ghostline-token-stream", "<ghostline-layer-scrubber", "<ghostline-pca-canvas"]) {
+              if (!demoHtml.includes(tag)) throw new Error(`demo.html missing ${tag}`);
+              if (!consoleHtml.includes(tag)) throw new Error(`console.html missing ${tag}`);
+            }
+            if (!Array.isArray(ZERO_WAIT_ARENA_SNAPSHOT?.steps) || ZERO_WAIT_ARENA_SNAPSHOT.steps.length < 3) {
+              throw new Error("ZERO_WAIT_ARENA_SNAPSHOT must contain 3 real trajectory steps");
+            }
+            const f = ZERO_WAIT_ARENA_SNAPSHOT.primary_frame;
+            if (!f || f.num_layers !== 24 || f.decision_layer !== 16 || f.layers?.length !== 24) {
+              throw new Error("ZERO_WAIT_ARENA_SNAPSHOT primary_frame invalid");
+            }
+            console.log("Dual-surface HTML & Zero-Wait TraceFrame contract verified.");
+          '
+
+      - name: Verify headline numbers match shipped heldout.json
+        run: python3 evals/site_claims.py
+
+      - name: Lint deploy scripts and validate Caddy configs
+        run: |
+          bash -n scripts/deploy-secure-build.sh
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
           mkdir -p /tmp/caddy-rl
           "$(go env GOPATH)/bin/xcaddy" build --with github.com/mholt/caddy-ratelimit --output /tmp/caddy-rl/caddy
-          # A stock Caddy, to prove the shipped config genuinely needs the
-          # module rather than quietly working without it.
           curl -fsSL -o /tmp/caddy-stock.tar.gz \
             "https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_linux_amd64.tar.gz"
           tar -xzf /tmp/caddy-stock.tar.gz -C /tmp caddy
           ZCODE_CADDY_BIN=/tmp/caddy-rl/caddy ZCODE_CADDY_STOCK=/tmp/caddy \
             python3 evals/caddy_edge.py
+          cat > /tmp/ghostline-check.Caddyfile <<'EOF'
+          (security_headers) {
+            header {
+              Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+              X-Content-Type-Options "nosniff"
+              -Server
+            }
+          }
+          EOF
+          cat deploy/ghostline.Caddyfile >> /tmp/ghostline-check.Caddyfile
+          /tmp/caddy validate --config /tmp/ghostline-check.Caddyfile --adapter caddyfile
 
-      # The Python extractor's LSE pooling must agree with the Rust one to
-      # within float32 round-off. The reference implementation recomputes the
-      # statistic independently and compares.
-      - name: Python extractor parses
-        run: python3 -c "import ast, pathlib; ast.parse(pathlib.Path('extract_repe_vectors.py').read_text()); print('extract_repe_vectors.py parses')"
+  deploy:
+    name: Auto-Deploy to ghostline.secure.build
+    needs: [lint-and-check]
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: Production
+      url: https://ghostline.secure.build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: evaluation scripts parse
+      - name: Configure pinned deployment SSH identity for secure.build
+        shell: bash
+        env:
+          DEPLOY_PRIVATE_KEY: ${{ secrets.GHOSTLINE_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.GHOSTLINE_DEPLOY_KNOWN_HOSTS }}
         run: |
-          python3 -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text()) for p in ['evals/canonical_40.py','evals/real_upstream_20.py','evals/access_control.py','evals/session_guard.py','evals/caddy_edge.py','evals/site_claims.py']]; print('eval scripts parse')"
+          set -euo pipefail
+          [[ -n "$DEPLOY_PRIVATE_KEY" ]] || {
+            echo "GHOSTLINE_DEPLOY_SSH_KEY is not configured" >&2
+            exit 1
+          }
+          [[ -n "$DEPLOY_KNOWN_HOSTS" ]] || {
+            echo "GHOSTLINE_DEPLOY_KNOWN_HOSTS is not configured" >&2
+            exit 1
+          }
+          install -d -m 0700 "$HOME/.ssh"
+          key_path="$RUNNER_TEMP/ghostline-deploy-ed25519"
+          known_hosts_path="$HOME/.ssh/known_hosts"
+          config_path="$HOME/.ssh/config"
+          umask 077
+          printf '%s\n' "$DEPLOY_PRIVATE_KEY" > "$key_path"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts_path"
+          ssh-keygen -F secure.build -f "$known_hosts_path" >/dev/null || {
+            echo "GHOSTLINE_DEPLOY_KNOWN_HOSTS does not pin secure.build" >&2
+            exit 1
+          }
+          {
+            echo 'Host secure.build'
+            echo '  HostName secure.build'
+            echo '  User devuser'
+            echo "  IdentityFile $key_path"
+            echo '  IdentitiesOnly yes'
+            echo '  BatchMode yes'
+            echo '  StrictHostKeyChecking yes'
+            echo '  ClearAllForwardings yes'
+            echo '  RequestTTY no'
+            echo "  UserKnownHostsFile $known_hosts_path"
+          } > "$config_path"
+          chmod 0600 "$config_path" "$known_hosts_path" "$key_path"
 
-      # The public site states numbers ("17/18 findings blocked").  Those
-      # numbers have to be the ones its own shipped dataset supports, or
-      # the page is making a claim nothing backs.
-      - name: the site's headline numbers match the shipped data
-        run: python3 evals/site_claims.py
+      - name: Execute deployment to ghostline.secure.build
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation || 'deploy' }}
+        run: |
+          set -euo pipefail
+          bash scripts/deploy-secure-build.sh "$OPERATION"
+
+      - name: Record production deployment receipt
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo "### Ghostline Production Deployment"
+            echo ""
+            echo "- Origin: https://ghostline.secure.build"
+            echo "- Surfaces: \`/\` (Exhibit), \`/arena\` (Public Interactive Arena), \`/console\` (Operator Control Plane)"
+            echo "- Revision: \`$(git rev-parse HEAD)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove deployment credentials
+        if: always()
+        shell: bash
+        run: |
+          rm -f -- "$RUNNER_TEMP/ghostline-deploy-ed25519" "$HOME/.ssh/config" "$HOME/.ssh/known_hosts"

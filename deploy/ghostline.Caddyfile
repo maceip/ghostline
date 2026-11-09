@@ -1,0 +1,29 @@
+# ── ghostline.secure.build — Ghostline Pre-Flight AI Guard (Arena + Console) ──
+# Appended to /etc/caddy/Caddyfile on secure.build (vectorheart).
+# Terminates TLS, applies shared security_headers + zstd/gzip compression,
+# drops scanner noise, and reverse-proxies unbuffered (for SSE /v1/telemetry)
+# to ghostline.service listening on 127.0.0.1:5197.
+ghostline.secure.build, www.ghostline.secure.build {
+	import security_headers
+	encode zstd gzip
+
+	@www host www.ghostline.secure.build
+	redir @www https://ghostline.secure.build{uri} permanent
+
+	@spam path /.env /.git* /wp-admin* /wp-login.php /xmlrpc.php /phpmyadmin* /cgi-bin* /vendor/phpunit* /actuator* /server-status
+	handle @spam {
+		abort
+	}
+
+	reverse_proxy 127.0.0.1:5197 {
+		flush_interval -1
+		header_up X-Real-IP {remote_host}
+		lb_try_duration 3s
+		lb_try_interval 250ms
+		transport http {
+			read_timeout 0
+			write_timeout 0
+			dial_timeout 5s
+		}
+	}
+}
