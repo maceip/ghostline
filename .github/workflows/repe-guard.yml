@@ -106,11 +106,13 @@ jobs:
       - name: Lint JavaScript modules, Web Components & E2E harness
         run: |
           for js in \
-            clef-site/js/app.js \
+            clef-site/js/clef-viz.js \
             clef-site/js/console.js \
             clef-site/js/exhibit.js \
+            clef-site/js/field.js \
             clef-site/js/ghostline-core.js \
-            clef-site/js/spine.js \
+            clef-site/js/icons.js \
+            clef-site/js/museum.js \
             clef-site/js/components/index.js \
             clef-site/js/components/token-stream.js \
             clef-site/js/components/layer-scrubber.js \
