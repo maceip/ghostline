@@ -4,16 +4,17 @@
  */
 
 :root {
-  --con-bg: #0b0c10;
-  --con-panel: #12141b;
-  --con-panel-alt: #171a24;
-  --con-border: rgba(255, 255, 255, 0.11);
-  --con-text: #ecebe4;
-  --con-muted: #9296a6;
-  --con-red: #D71921;
-  --con-amber: #C9971F;
-  --con-green: #38a169;
-  --mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --con-bg: #0B0E14;
+  --con-panel: #131822;
+  --con-panel-alt: #0E131D;
+  --con-border: #1E2638;
+  --con-text: #ECEBE4;
+  --con-muted: #9296A6;
+  --con-cyan: #00F0FF;
+  --con-red: #FF3B5C;
+  --con-amber: #FFB800;
+  --con-green: #10B981;
+  --mono: "JetBrains Mono", "Space Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --sans: "Space Grotesk", -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
@@ -75,8 +76,10 @@ body.console-surface {
 }
 
 .con-brand {
+  font-family: var(--sans);
   font-weight: 700;
-  letter-spacing: 0.12em;
+  font-size: 12px;
+  letter-spacing: 0.04em;
   color: var(--con-text);
   text-decoration: none;
   display: inline-flex;
@@ -88,9 +91,9 @@ body.console-surface {
   font-size: 10px;
   padding: 2px 7px;
   border-radius: 4px;
-  background: rgba(215, 25, 33, 0.16);
-  color: var(--con-red);
-  border: 1px solid rgba(215, 25, 33, 0.4);
+  background: rgba(0, 240, 255, 0.12);
+  color: var(--con-cyan);
+  border: 1px solid rgba(0, 240, 255, 0.35);
 }
 
 .con-mode-seg {
@@ -105,8 +108,7 @@ body.console-surface {
 .con-mode-btn {
   font-family: var(--mono);
   font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: 0.04em;
   padding: 4px 8px;
   border: 0;
   border-radius: 4px;
@@ -116,8 +118,8 @@ body.console-surface {
 }
 
 .con-mode-btn.is-active {
-  background: var(--con-red);
-  color: #fff;
+  background: var(--con-cyan);
+  color: #0B0E14;
   font-weight: 700;
 }
 
@@ -222,6 +224,12 @@ body.console-surface {
   cursor: pointer;
 }
 
+.con-btn.con-btn-cyan {
+  background: var(--con-cyan);
+  color: #0B0E14;
+  border-color: var(--con-cyan);
+}
+
 .con-btn:hover:not(:disabled) {
   background: var(--con-red);
   color: #fff;
@@ -246,8 +254,8 @@ body.console-surface {
 }
 
 .con-filter-btn.is-active {
-  border-color: var(--con-text);
-  color: var(--con-text);
+  border-color: var(--con-cyan);
+  color: var(--con-cyan);
   font-weight: 700;
 }
 
@@ -276,8 +284,8 @@ body.console-surface {
 }
 
 .con-turn-item.is-selected {
-  border-color: var(--con-red);
-  box-shadow: inset 2px 0 0 var(--con-red);
+  border-color: var(--con-cyan);
+  box-shadow: inset 2px 0 0 var(--con-cyan);
 }
 
 .con-turn-top {
@@ -296,17 +304,17 @@ body.console-surface {
 }
 
 .con-v-badge.is-allow {
-  background: rgba(56, 161, 105, 0.18);
+  background: rgba(16, 185, 129, 0.18);
   color: var(--con-green);
 }
 
 .con-v-badge.is-clamped {
-  background: rgba(201, 151, 31, 0.2);
+  background: rgba(255, 184, 0, 0.2);
   color: var(--con-amber);
 }
 
 .con-v-badge.is-blocked {
-  background: rgba(215, 25, 33, 0.2);
+  background: rgba(255, 59, 92, 0.2);
   color: var(--con-red);
 }
 
@@ -336,7 +344,7 @@ body.console-surface {
 
 .con-stage-mid {
   display: grid;
-  grid-template-columns: 1.3fr 1fr;
+  grid-template-columns: 1.25fr 1fr;
   gap: 10px;
 }
 
@@ -351,9 +359,62 @@ body.console-surface {
   flex-direction: column;
 }
 
+.con-drawer-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 8px 14px;
+  background: var(--con-panel-alt);
+  border-bottom: 1px solid var(--con-border);
+}
+
+.con-tab-btn {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  padding: 5px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--con-border);
+  background: var(--con-panel);
+  color: var(--con-muted);
+  cursor: pointer;
+}
+
+.con-tab-btn.is-active {
+  border-color: var(--con-cyan);
+  color: var(--con-cyan);
+  font-weight: 700;
+}
+
 .con-drawer-sec {
   padding: 12px 14px;
   border-bottom: 1px solid var(--con-border);
+}
+
+.con-field-lbl {
+  display: block;
+  font-size: 9.5px;
+  color: var(--con-muted);
+  margin: 6px 0 3px 0;
+}
+
+.con-contrastive-box textarea,
+.con-code-editor {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--con-border);
+  background: var(--con-panel-alt);
+  color: var(--con-text);
+  resize: vertical;
+}
+
+.con-status-line {
+  font-size: 9.5px;
+  color: var(--con-cyan);
+  margin-top: 5px;
+  min-height: 14px;
 }
 
 .con-form-row {
@@ -436,7 +497,7 @@ body.console-surface {
 
 .con-cal-feed {
   margin-top: 8px;
-  max-height: 140px;
+  max-height: 120px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -459,23 +520,4 @@ body.console-surface {
   border: 1px solid var(--con-border);
   border-radius: 8px;
   padding: 10px 12px;
-}
-
-.console-surface .gl-tok-chip {
-  background: var(--con-panel-alt);
-  border-color: var(--con-border);
-  color: var(--con-text);
-}
-
-.console-surface .gl-pass-pill {
-  background: var(--con-panel-alt);
-}
-
-.console-surface .gl-layer-dot {
-  fill: var(--con-text);
-}
-
-.console-surface .gl-layer-dot.is-decision,
-.console-surface .gl-layer-dot.is-active {
-  fill: var(--con-red);
 }

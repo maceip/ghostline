@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" width="28" height="28" fill="none" role="img" aria-label="Ghostline Fedora Ghost Mark">
+  <!-- Fedora crown & brim -->
+  <path d="M10 14L12.5 6.5C13 5.2 14.4 4.8 15.8 5.5L18 6.6L20.2 5.5C21.6 4.8 23 5.2 23.5 6.5L26 14" stroke="#00F0FF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="#131822"/>
+  <path d="M5 14.5C10.5 12.6 25.5 12.6 31 14.5" stroke="#00F0FF" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M10.4 12.3H25.6" stroke="#FF3B5C" stroke-width="1.6" stroke-linecap="round"/>
+  <!-- Ghost shroud & glowing residual eyes -->
+  <path d="M8.5 15.5V28.5L11.8 26L15 28.8L18 26L21 28.8L24.2 26L27.5 28.5V15.5" stroke="#E2E8F0" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="#131822" fill-opacity="0.85"/>
+  <circle cx="14.2" cy="19.8" r="1.7" fill="#00F0FF"/>
+  <circle cx="21.8" cy="19.8" r="1.7" fill="#FF3B5C"/>
+</svg>

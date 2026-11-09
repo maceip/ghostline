@@ -195,6 +195,7 @@ pub struct LayerTraceMetric {
     pub cos_drift: f32,
     pub guard_logit: f32,
     pub tensor_slice_preview: Vec<f32>,
+    pub pca_coords: [f32; 2],
 }
 
 /// Per-token telemetry captured at `decision_layer` for `GhostlineTraceFrame`.
@@ -990,6 +991,14 @@ impl RepeSensor {
             .unwrap_or(0.011);
         let guard_logit = (cos_harm - base) - thr;
 
+        let pca_arr = matmul(&self.pca_basis, &h_unit)?;
+        pca_arr.eval()?;
+        let pca_sl = pca_arr.as_slice::<f32>();
+        let pca_coords = [
+            pca_sl.first().copied().unwrap_or(0.0),
+            pca_sl.get(1).copied().unwrap_or(0.0),
+        ];
+
         self.layer_trace.push(LayerTraceMetric {
             layer: layer_idx,
             l2_norm,
@@ -997,8 +1006,66 @@ impl RepeSensor {
             cos_drift,
             guard_logit,
             tensor_slice_preview,
+            pca_coords,
         });
         Ok(())
+    }
+
+    /// Recompute a contrastive activation difference vector `\Delta h_l = h_l^{adv} - h_l^{benign}`
+    /// from two live residual tensors at `target_layer`, orthogonalize `\Delta h_l` against existing
+    /// benign axes, and hot-reload the active probe direction `v_harm`.
+    pub fn hot_reload_contrastive(
+        &mut self,
+        h_benign_layer: &Array,
+        h_adv_layer: &Array,
+    ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
+        let b_mean = Self::mean_state(h_benign_layer)?;
+        let a_mean = Self::mean_state(h_adv_layer)?;
+        let delta = subtract(&a_mean, &b_mean)?;
+        let delta_norm_arr = sqrt(&sum(&multiply(&delta, &delta)?, false)?)?;
+        let b_unit = Self::unit_norm(&b_mean)?;
+        let a_unit = Self::unit_norm(&a_mean)?;
+
+        // Gram-Schmidt orthogonalization against the benign axis (`b_unit`) and `v_copy_mode`
+        let proj_b = sum(&multiply(&delta, &b_unit)?, false)?;
+        let mut delta_orth = subtract(&delta, &multiply(&b_unit, &proj_b)?)?;
+        if let Some(ref copy) = self.v_copy_mode {
+            let proj_c = sum(&multiply(&delta_orth, copy)?, false)?;
+            delta_orth = subtract(&delta_orth, &multiply(copy, &proj_c)?)?;
+        }
+        let v_contrastive = Self::unit_norm(&delta_orth)?;
+        let align_arr = sum(&multiply(&v_contrastive, &self.v_harm)?, false)?;
+
+        // Blend into active `v_harm` and re-normalize so the live guard probe hot-reloads immediately
+        let blended = add(
+            &multiply(&self.v_harm, &Array::from_f32(0.80))?,
+            &multiply(&v_contrastive, &Array::from_f32(0.20))?,
+        )?;
+        self.v_harm = Self::unit_norm(&blended)?;
+
+        let pca_b = matmul(&self.pca_basis, &b_unit)?;
+        let pca_a = matmul(&self.pca_basis, &a_unit)?;
+        mlx_rs::transforms::eval([&delta_norm_arr, &align_arr, &self.v_harm, &pca_b, &pca_a])?;
+
+        let b_sl = pca_b.as_slice::<f32>();
+        let a_sl = pca_a.as_slice::<f32>();
+        let b_pt = [
+            b_sl.first().copied().unwrap_or(0.0),
+            b_sl.get(1).copied().unwrap_or(0.0),
+        ];
+        let a_pt = [
+            a_sl.first().copied().unwrap_or(0.0),
+            a_sl.get(1).copied().unwrap_or(0.0),
+        ];
+        self.pca_reference.benign_cluster.push(b_pt);
+        self.pca_reference.exploit_cluster.push(a_pt);
+
+        Ok((
+            delta_norm_arr.item_exact::<f32>(),
+            align_arr.item_exact::<f32>(),
+            b_pt,
+            a_pt,
+        ))
     }
 
     /// Clear all per-layer profile buffers before a new forward pass.

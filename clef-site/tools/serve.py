@@ -248,10 +248,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(405)
 
+    def do_PATCH(self):  # noqa: N802
+        if self._wants_proxy(self.path.split("?")[0]):
+            self._proxy("PATCH")
+        else:
+            self.send_error(405)
+
     def do_OPTIONS(self):  # noqa: N802
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
         self.send_header(
             "Access-Control-Allow-Headers",
             "Content-Type, Authorization, X-Require-Auth",

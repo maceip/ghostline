@@ -268,6 +268,16 @@ pub trait GuardableEngine {
             span_tokens_clamped: telem.span_tokens,
         })
     }
+
+    /// Recompute `\Delta h_l = h_l^{adv} - h_l^{benign}` at `target_layer`, orthogonalize
+    /// against benign axes, and hot-reload the active guard probe direction.
+    fn hot_reload_contrastive_pair(
+        &mut self,
+        _benign_ids: &Array,
+        _adv_ids: &Array,
+    ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
+        Ok((0.0, 0.0, [0.0, 0.0], [0.0, 0.0]))
+    }
 }
 
 impl<L: QwenDecoderLayer> GuardableEngine for HookedQwenClefEngine<L> {
@@ -444,6 +454,26 @@ impl<L: QwenDecoderLayer> GuardableEngine for HookedQwenClefEngine<L> {
         alpha: f32,
     ) -> Result<RollbackSpanTelemetry> {
         self.clamp_and_rollback_span_impl(input_ids, span_start, alpha)
+    }
+
+    fn hot_reload_contrastive_pair(
+        &mut self,
+        benign_ids: &Array,
+        adv_ids: &Array,
+    ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
+        let hook_layer = self
+            .repe_sensor
+            .target_layer
+            .min(self.layers.len().saturating_sub(1));
+        let mut h_b = self.embed_tokens.take_axis(benign_ids, 0)?;
+        for layer in self.layers.iter_mut().take(hook_layer + 1) {
+            h_b = layer.forward(&h_b, 0.0)?;
+        }
+        let mut h_a = self.embed_tokens.take_axis(adv_ids, 0)?;
+        for layer in self.layers.iter_mut().take(hook_layer + 1) {
+            h_a = layer.forward(&h_a, 0.0)?;
+        }
+        self.repe_sensor.hot_reload_contrastive(&h_b, &h_a)
     }
 }
 
@@ -852,6 +882,26 @@ impl GuardableEngine for HybridGuardEngine {
             }
         }
         Ok(())
+    }
+
+    fn hot_reload_contrastive_pair(
+        &mut self,
+        benign_ids: &Array,
+        adv_ids: &Array,
+    ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
+        let hook_layer = self
+            .repe_sensor
+            .target_layer
+            .min(self.backbone.layers.len().saturating_sub(1));
+        let mut h_b = self.backbone.embed(benign_ids)?;
+        for layer in self.backbone.layers.iter().take(hook_layer + 1) {
+            h_b = layer.forward(&self.backbone.cfg, &h_b)?;
+        }
+        let mut h_a = self.backbone.embed(adv_ids)?;
+        for layer in self.backbone.layers.iter().take(hook_layer + 1) {
+            h_a = layer.forward(&self.backbone.cfg, &h_a)?;
+        }
+        self.repe_sensor.hot_reload_contrastive(&h_b, &h_a)
     }
 }
 
