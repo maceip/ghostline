@@ -1,4 +1,5 @@
-# Ghostline
+<img width="498" alt="ghostline_match_dots" src="https://github.com/user-attachments/assets/e86edbf5-51dc-4130-8446-5fe3765f6f19" />
+
 
 **Ghostline** is a Representation Engineering (RepE) + Clef pre-flight guard for AI agent tool calls on Apple Silicon (MLX in Rust, `qwen-clef-repe-guard/`), paired with a live interactive web exhibit (`clef-site/index.html` and `clef-site/demo.html`).
 
