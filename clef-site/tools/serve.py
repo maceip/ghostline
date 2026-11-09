@@ -104,7 +104,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_unauthorized()
             return
 
-        url = self.guard.rstrip("/") + self.path
+        upstream_path = "/api/events" if clean_path == "/v1/telemetry" else self.path
+        url = self.guard.rstrip("/") + upstream_path
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
         req = urllib.request.Request(url, data=body, method=method)

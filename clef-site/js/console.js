@@ -407,19 +407,7 @@ async function submitCalibrationLabel(label) {
   const statusEl = $("con-cal-status");
   if (statusEl) statusEl.textContent = `Probing & recording ${label}…`;
   try {
-    // 1. Hot-reload contrastive probe vector via /v1/calibration/commit
-    await fetch("/v1/calibration/commit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify({
-        prompt: `Run \`${cmd}\` in the workspace.`,
-        command: cmd,
-        label,
-        layer: currentPolicy.decision_layer || 16,
-      }),
-    });
-    // 2. Record into site_calibration.jsonl conformal bank via /api/label
+    // Record into site_calibration.jsonl conformal bank via /api/label
     const res = await fetch("/api/label", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

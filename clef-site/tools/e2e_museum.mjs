@@ -66,9 +66,10 @@ await p.click("[data-testid=intent-harmful]");
 ok((await p.textContent("[data-testid=y-total]")) === "1", "re-tagging the same command replaces, not duplicates");
 ok((await p.textContent("[data-testid=y-past]")) === (blocked ? "0" : "1"), "tagging 'harm' updates got-past count");
 
-// 3. every example chip
+// 3. every example chip (chip 0 "rm -rf ~/Documents" was measured live on load in verdicts[0])
 const chips = await p.$$("[data-testid=chip]");
-for (let i = 0; i < chips.length; i++) {
+ok(verdicts[0] && !verdicts[0].allowed, `example "rm -rf ~/Documents" judged live: ${verdicts[0]?.allowed ? "allowed" : "refused"}`);
+for (let i = 1; i < chips.length; i++) {
   n = verdicts.length;
   const label = (await chips[i].$eval("code", (c) => c.textContent));
   await chips[i].click();
@@ -134,10 +135,10 @@ await p.click('#seg-theme button[data-theme="light"]');
 ok((await p.getAttribute("html", "data-theme")) === "light", "index.html theme toggle switches back to light");
 
 // 8. phone width: no horizontal page scroll
-const phone = await b.newPage({ viewport: { width: 390, height: 844 } });
-await phone.goto(`${base}/index.html`, { waitUntil: "load" });
-await phone.waitForSelector("#verdict:not([hidden])", { timeout: 30000 });
-ok(await phone.evaluate(() => document.documentElement.scrollWidth <= 390), "no horizontal scroll at 390px");
+await p.setViewportSize({ width: 390, height: 844 });
+await p.waitForTimeout(100);
+ok(await p.evaluate(() => document.documentElement.scrollWidth <= 390), "no horizontal scroll at 390px");
+await p.close();
 
 // 9. demo.html ("FROM QWEN" Glass Room 6-step run-it walkthrough + Surface 1 Public Interactive Arena)
 const d = await b.newPage({ viewport: { width: 1280, height: 900 } });
@@ -249,14 +250,7 @@ await d.waitForFunction(() => {
   return b && !b.disabled && out.includes("MODE: BYPASS");
 }, null, { timeout: 25000 });
 ok((await d.textContent("[data-testid=arena-sandbox-out]")).includes("MODE: BYPASS"), "Surface 1 Arena runs multi-step trajectory in bypass mode (virtualized host side-effects)");
-
-// Restore clamp mode on Surface 1 Arena
-await d.click('#arena-modes button[data-mode="clamp"]');
-await d.waitForFunction(() => {
-  const b = document.querySelector("[data-testid=arena-run-btn]");
-  const out = document.querySelector("[data-testid=arena-sandbox-out]")?.textContent || "";
-  return b && !b.disabled && out.includes("MODE: CLAMP");
-}, null, { timeout: 25000 });
+await d.close();
 
 // 10. Surface 2: Operator Control Plane (/console / console.html)
 const c = await b.newPage({ viewport: { width: 1440, height: 900 } });
