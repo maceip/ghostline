@@ -6342,6 +6342,8 @@ pub struct RuntimePolicy {
     pub custom_hook_script: String,
     #[serde(skip)]
     pub threshold_override: Option<f32>,
+    #[serde(skip)]
+    pub calibrated_default_threshold: f32,
 }
 
 /// Whether the proxy refuses unsafe tool calls or only reports them.
@@ -7061,6 +7063,7 @@ impl Enforcer {
             )
             .to_string(),
             threshold_override: None,
+            calibrated_default_threshold: config.block_threshold,
         }));
         let recent_frames = Arc::new(std::sync::Mutex::new(
             std::collections::VecDeque::<GhostlineTraceFrame>::with_capacity(64),
@@ -7079,11 +7082,10 @@ impl Enforcer {
                 };
                 if let Ok(mut pol) = engine_policy.write() {
                     pol.decision_layer = engine.target_layer();
-                    if pol.threshold_override.is_none() {
-                        let (_, viol_thr) = engine.compliance_excess_thresholds();
-                        if let Some(cal_thr) =
-                            engine.calibrated_harm_excess_threshold().or(viol_thr)
-                        {
+                    let (_, viol_thr) = engine.compliance_excess_thresholds();
+                    if let Some(cal_thr) = engine.calibrated_harm_excess_threshold().or(viol_thr) {
+                        pol.calibrated_default_threshold = cal_thr;
+                        if pol.threshold_override.is_none() {
                             pol.block_threshold = cal_thr;
                         }
                     }
@@ -8103,13 +8105,17 @@ pub fn evaluate_probe_with_override(
     }
 
     if engine.clef_head_calibrated() {
+        let clef_gate = match threshold_override {
+            Some(ovr) => harm_excess >= ovr,
+            None => excess_threshold.is_none() || harm_excess > 0.0,
+        };
         for (q, d) in questions.iter().zip(decisions.iter()) {
             if clef_flags_unsafe(q, d) {
-                if excess_threshold.is_none() || harm_excess > 0.0 {
+                if clef_gate {
                     reasons.push(format!("clef question `{}` flagged: {}", d.id, d.pick));
                 } else {
                     advisories.push(format!(
-                        "clef stage-2 advisory `{}`: {} (suppressed by benign RepE excess {:.4} <= 0)",
+                        "clef stage-2 advisory `{}`: {} (suppressed by RepE excess {:.4} below gate)",
                         d.id, d.pick, harm_excess
                     ));
                 }
@@ -8893,6 +8899,7 @@ async fn get_policy(State(state): State<EnforcerState>) -> Json<RuntimePolicy> {
             capabilities: Vec::new(),
             custom_hook_script: String::new(),
             threshold_override: None,
+            calibrated_default_threshold: state.enforcer.config.block_threshold,
         });
     Json(pol)
 }
@@ -8911,7 +8918,10 @@ fn normalize_mode_label(raw: &str) -> Option<&'static str> {
 pub struct PolicyUpdateRequest {
     pub mode: Option<String>,
     pub clamp_alpha: Option<f32>,
+    #[serde(default, alias = "threshold")]
     pub block_threshold: Option<f32>,
+    #[serde(default)]
+    pub clear_threshold_override: Option<bool>,
     pub capabilities: Option<Vec<ToolCapabilityRule>>,
     pub custom_hook_script: Option<String>,
 }
@@ -8949,8 +8959,12 @@ async fn update_policy(
         if let Some(a) = req.clamp_alpha {
             pol.clamp_alpha = a.clamp(-2.0, 3.0);
         }
+        if req.clear_threshold_override == Some(true) {
+            pol.threshold_override = None;
+            pol.block_threshold = pol.calibrated_default_threshold;
+        }
         if let Some(t) = req.block_threshold {
-            let clamped = t.clamp(-0.20, 0.50);
+            let clamped = t.clamp(-1.0, 2.0);
             pol.block_threshold = clamped;
             pol.threshold_override = Some(clamped);
         }
@@ -8981,6 +8995,7 @@ async fn patch_runtime_mode(
             mode: Some(req.mode),
             clamp_alpha: None,
             block_threshold: None,
+            clear_threshold_override: None,
             capabilities: None,
             custom_hook_script: None,
         }),
