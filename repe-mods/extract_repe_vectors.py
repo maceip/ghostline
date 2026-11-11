@@ -396,7 +396,7 @@ def fisher_discriminant_directions_np(
     residuals: np.ndarray,
     cluster_deltas: List[np.ndarray],
     nuisance_dirs: List[np.ndarray],
-    shrinkage_floor: float = 0.20,
+    shrinkage_floor: float = 0.15,
 ) -> Tuple[float, List[np.ndarray]]:
     """Exact `O(n^2 d + n^3)` dual Ledoit-Wolf (2004, Lemma 3.1) Woodbury Fisher solver.
 
@@ -452,12 +452,72 @@ def fisher_discriminant_directions_np(
     return shrinkage, out_dirs
 
 
+def fit_cluster_fold_np(
+    pair_clusters: List[int],
+    pos_probes: List[np.ndarray],
+    neg_probes: List[np.ndarray],
+    neg_echo_probes: List[np.ndarray],
+    extra_benign: List[np.ndarray],
+    nuisance_dirs: List[np.ndarray],
+    cluster_count: int,
+    use_whitening: bool,
+    holdout: Optional[int] = None,
+) -> Tuple[Optional[float], List[np.ndarray], int]:
+    """Fits unit-margin contrastive cluster directions (optionally Fisher-whitened against
+    the benign second-moment nullspace + within-cluster harmful residuals), optionally
+    holding out calibration pair `holdout` for LOPO cross-fitting.
+    """
+    dim = pos_probes[0].shape[0]
+    c_deltas = [np.zeros(dim, dtype=np.float64) for _ in range(cluster_count)]
+    c_counts = [0] * cluster_count
+    c_pos_rows: List[List[np.ndarray]] = [[] for _ in range(cluster_count)]
+    r_rows: List[np.ndarray] = []
+
+    for i, c in enumerate(pair_clusters):
+        if holdout is not None and i == holdout:
+            continue
+        diff = pos_probes[i] - neg_probes[i]
+        denom = max(float(np.linalg.norm(diff)), 0.15)
+        c_deltas[c] += diff / denom
+        c_counts[c] += 1
+        c_pos_rows[c].append(pos_probes[i])
+        r_rows.append(neg_probes[i])
+        r_rows.append(neg_echo_probes[i])
+
+    r_rows.extend(extra_benign)
+
+    mean_deltas = [
+        c_deltas[c] / c_counts[c] for c in range(cluster_count) if c_counts[c] > 0
+    ]
+    for c in range(cluster_count):
+        if len(c_pos_rows[c]) >= 2:
+            m_pos = np.mean(np.stack(c_pos_rows[c], axis=0), axis=0)
+            for row in c_pos_rows[c]:
+                r_rows.append(0.5 * (row - m_pos))
+
+    if use_whitening and len(r_rows) >= 2 and mean_deltas:
+        try:
+            shrinkage, dirs = fisher_discriminant_directions_np(
+                np.stack(r_rows, axis=0), mean_deltas, nuisance_dirs
+            )
+            return shrinkage, dirs, len(r_rows)
+        except Exception:
+            if holdout is None:
+                raise
+
+    dirs = []
+    for d in mean_deltas:
+        p = project_orthogonal_np(d, nuisance_dirs)
+        dirs.append(p / max(float(np.linalg.norm(p)), 1e-12))
+    return None, dirs, 0
+
+
 def evaluate_lopo_cv_np(
     pair_clusters: List[int],
     pos_probes: List[np.ndarray],
     neg_probes: List[np.ndarray],
+    neg_echo_probes: List[np.ndarray],
     extra_benign: List[np.ndarray],
-    prompt_residuals: List[np.ndarray],
     nuisance_dirs: List[np.ndarray],
     cluster_count: int,
     use_whitening: bool,
@@ -466,60 +526,24 @@ def evaluate_lopo_cv_np(
     n_pairs = len(pair_clusters)
     if n_pairs < 2:
         return n_pairs, 1.0
-    dim = pos_probes[0].shape[0]
     wins = 0
     lopo_pos: List[float] = []
     lopo_neg: List[float] = []
 
     for holdout in range(n_pairs):
-        c_deltas = [np.zeros(dim, dtype=np.float64) for _ in range(cluster_count)]
-        c_counts = [0] * cluster_count
-        c_pos_rows: List[List[np.ndarray]] = [[] for _ in range(cluster_count)]
-        ben_rows: List[np.ndarray] = []
-
-        for i in range(n_pairs):
-            if i == holdout:
-                continue
-            c = pair_clusters[i]
-            c_counts[c] += 1
-            c_deltas[c] += pos_probes[i] - neg_probes[i]
-            c_pos_rows[c].append(pos_probes[i])
-            ben_rows.append(neg_probes[i])
-        ben_rows.extend(extra_benign)
-
-        mean_deltas = [
-            c_deltas[c] / c_counts[c] for c in range(cluster_count) if c_counts[c] > 0
-        ]
-        if not mean_deltas:
+        _, dirs, _ = fit_cluster_fold_np(
+            pair_clusters,
+            pos_probes,
+            neg_probes,
+            neg_echo_probes,
+            extra_benign,
+            nuisance_dirs,
+            cluster_count,
+            use_whitening,
+            holdout=holdout,
+        )
+        if not dirs:
             continue
-
-        if use_whitening:
-            r_rows: List[np.ndarray] = []
-            for c in range(cluster_count):
-                if len(c_pos_rows[c]) >= 2:
-                    m_c = np.mean(np.stack(c_pos_rows[c], axis=0), axis=0)
-                    r_rows.extend(row - m_c for row in c_pos_rows[c])
-            if len(ben_rows) >= 2:
-                m_b = np.mean(np.stack(ben_rows, axis=0), axis=0)
-                r_rows.extend(row - m_b for row in ben_rows)
-            for idx, pr in enumerate(prompt_residuals):
-                if idx != holdout:
-                    r_rows.append(pr)
-            try:
-                _, dirs = fisher_discriminant_directions_np(
-                    np.stack(r_rows, axis=0), mean_deltas, nuisance_dirs
-                )
-            except Exception:
-                dirs = []
-                for d in mean_deltas:
-                    p = project_orthogonal_np(d, nuisance_dirs)
-                    dirs.append(p / max(float(np.linalg.norm(p)), 1e-12))
-        else:
-            dirs = []
-            for d in mean_deltas:
-                p = project_orthogonal_np(d, nuisance_dirs)
-                dirs.append(p / max(float(np.linalg.norm(p)), 1e-12))
-
         w_mat = np.stack(dirs, axis=0)  # [C, D]
         sp = float(np.max(w_mat @ pos_probes[holdout]))
         sn = float(np.max(w_mat @ neg_probes[holdout]))
@@ -956,13 +980,14 @@ def main():
         return unit_normalize(u - copy_dir * proj)
 
     # Probe the matched benign reference panel states first so their benign
-    # variance also informs the within-class residual covariance `Sigma_W`.
+    # second moment informs the Fisher benign nullspace `Sigma_W`.
     panel_states: List[mx.array] = []
     panel_tokens_list: List[mx.array] = []
+    panel_echo_anchors: List[Optional[mx.array]] = []
     panel_natural_states: List[mx.array] = []
     panel_natural_tokens_list: List[mx.array] = []
+    panel_natural_anchors: List[Optional[mx.array]] = []
     extra_benign_np: List[np.ndarray] = []
-    panel_style_residuals_np: List[np.ndarray] = []
 
     for cmd, instruction in BENIGN_REFERENCE_INSTRUCTIONS:
         echo_prompt = f"run:{cmd}"
@@ -990,6 +1015,8 @@ def main():
 
         if absolute_mode:
             echo_b, nat_b = h_echo, h_natural
+            panel_echo_anchors.append(None)
+            panel_natural_anchors.append(None)
         else:
             ea, _ = forward_to_layer_tool_span(
                 backbone, tokenizer.encode(render_user_turn(echo_prompt)), target_layer
@@ -998,6 +1025,8 @@ def main():
                 backbone, tokenizer.encode(render_user_turn(instruction)), target_layer
             )
             echo_b, nat_b = h_echo - ea, h_natural - na
+            panel_echo_anchors.append(ea)
+            panel_natural_anchors.append(na)
 
         u_echo = copy_orthogonalized_unit(echo_b)
         u_nat = copy_orthogonalized_unit(nat_b)
@@ -1005,7 +1034,6 @@ def main():
         u_echo_np = np.array(u_echo.tolist(), dtype=np.float64)
         u_nat_np = np.array(u_nat.tolist(), dtype=np.float64)
         extra_benign_np.extend([u_echo_np, u_nat_np])
-        panel_style_residuals_np.append(u_echo_np - u_nat_np)
 
     # Map calibration pairs into exact runtime probe space `phi(h)`
     pair_clusters: List[int] = []
@@ -1013,9 +1041,8 @@ def main():
     benign_states: List[mx.array] = []
     pos_probes_np: List[np.ndarray] = []
     neg_probes_np: List[np.ndarray] = []
-    pair_prompt_residuals_np: List[np.ndarray] = []
-    cluster_pair_deltas: List[List[mx.array]] = [[] for _ in range(cluster_count)]
-    cluster_pos_np: List[List[np.ndarray]] = [[] for _ in range(cluster_count)]
+    neg_echo_probes_np: List[np.ndarray] = []
+    cluster_counts = [0] * cluster_count
 
     for cluster, pos_b, neg_b, neg_echo_b in raw_pair_records:
         u_pos = copy_orthogonalized_unit(pos_b)
@@ -1024,17 +1051,13 @@ def main():
         mx.eval(u_pos, u_neg, u_neg_echo)
 
         pair_clusters.append(cluster)
+        cluster_counts[cluster] += 1
         harm_states.append(u_pos)
         benign_states.append(u_neg)
-        cluster_pair_deltas[cluster].append(u_pos - u_neg)
 
-        up_np = np.array(u_pos.tolist(), dtype=np.float64)
-        un_np = np.array(u_neg.tolist(), dtype=np.float64)
-        une_np = np.array(u_neg_echo.tolist(), dtype=np.float64)
-        pos_probes_np.append(up_np)
-        neg_probes_np.append(un_np)
-        pair_prompt_residuals_np.append(une_np - un_np)
-        cluster_pos_np[cluster].append(up_np)
+        pos_probes_np.append(np.array(u_pos.tolist(), dtype=np.float64))
+        neg_probes_np.append(np.array(u_neg.tolist(), dtype=np.float64))
+        neg_echo_probes_np.append(np.array(u_neg_echo.tolist(), dtype=np.float64))
 
     shell_direction = unit_normalize(mx.stack(benign_states, axis=0).mean(axis=0))
     mx.eval(shell_direction)
@@ -1042,34 +1065,20 @@ def main():
     copy_np = np.array(copy_dir.tolist(), dtype=np.float64)
     nuisance_np = [shell_np, copy_np]
 
-    raw_clusters: List[mx.array] = []
-    mean_cluster_deltas_np: List[np.ndarray] = []
-    residual_rows_np: List[np.ndarray] = []
-
-    for c in range(cluster_count):
-        if not cluster_pair_deltas[c]:
-            continue
-        delta_mean = mx.stack(cluster_pair_deltas[c], axis=0).mean(axis=0)
-        mx.eval(delta_mean)
-        mean_cluster_deltas_np.append(np.array(delta_mean.tolist(), dtype=np.float64))
-
-        shell_proj = float(mx.sum(delta_mean * shell_direction).item())
-        orthogonal = delta_mean - shell_direction * shell_proj
-        copy_proj = float(mx.sum(orthogonal * copy_dir).item())
-        orthogonal = orthogonal - copy_dir * copy_proj
-        raw_clusters.append(unit_normalize(orthogonal))
-
-        if len(cluster_pos_np[c]) >= 2:
-            m_pos = np.mean(np.stack(cluster_pos_np[c], axis=0), axis=0)
-            residual_rows_np.extend(row - m_pos for row in cluster_pos_np[c])
-
-    all_benign_np = neg_probes_np + extra_benign_np
-    m_ben = np.mean(np.stack(all_benign_np, axis=0), axis=0)
-    residual_rows_np.extend(row - m_ben for row in all_benign_np)
-    residual_rows_np.extend(pair_prompt_residuals_np)
-    residual_rows_np.extend(panel_style_residuals_np)
-
+    _, raw_dirs_np, _ = fit_cluster_fold_np(
+        pair_clusters,
+        pos_probes_np,
+        neg_probes_np,
+        neg_echo_probes_np,
+        extra_benign_np,
+        nuisance_np,
+        cluster_count,
+        use_whitening=False,
+        holdout=None,
+    )
+    raw_clusters: List[mx.array] = [mx.array(w.astype(np.float32)) for w in raw_dirs_np]
     raw_cluster_matrix = mx.stack(raw_clusters, axis=0)  # [C, D]
+    mx.eval(raw_cluster_matrix)
     clusters: List[mx.array] = list(raw_clusters)
     v_harm = unit_normalize(raw_cluster_matrix.mean(axis=0))
 
@@ -1078,32 +1087,39 @@ def main():
     harmful_panel_matrix = mx.stack(raw_harmful_panel, axis=0)  # [N_harm, D]
     d_model = int(v_harm.shape[0])
     print(
-        f"[*] harm clusters: {len(clusters)} paired contrastive directions, "
+        f"[*] harm clusters: {len(clusters)} unit-margin contrastive directions, "
         "orthogonalised against the shell direction AND the copy channel"
     )
 
     whitening_applied = False
     whitening_shrinkage: Optional[float] = None
     whitened_cluster_matrix: Optional[mx.array] = None
-    whitening_samples = 0 if args.no_whitening else len(residual_rows_np)
+    whitening_samples = 0
 
     if args.no_whitening:
         print("[*] whitening: skipped (--no-whitening), paired contrastive directions used as-is")
     else:
         try:
-            shrinkage, whitened_np = fisher_discriminant_directions_np(
-                np.stack(residual_rows_np, axis=0),
-                mean_cluster_deltas_np,
+            shrinkage, whitened_np, n_res = fit_cluster_fold_np(
+                pair_clusters,
+                pos_probes_np,
+                neg_probes_np,
+                neg_echo_probes_np,
+                extra_benign_np,
                 nuisance_np,
+                cluster_count,
+                use_whitening=True,
+                holdout=None,
             )
             whitening_applied = True
             whitening_shrinkage = shrinkage
+            whitening_samples = n_res
             clusters = [mx.array(w.astype(np.float32)) for w in whitened_np]
             whitened_cluster_matrix = mx.stack(clusters, axis=0)
             mx.eval(whitened_cluster_matrix)
             print(
-                f"[*] whitening: Fisher Ledoit-Wolf over {len(residual_rows_np)} "
-                f"within-class/prompt residuals, shrinkage {shrinkage:.12f}, "
+                f"[*] whitening: Fisher Ledoit-Wolf over {n_res} "
+                f"benign/within-cluster rows, shrinkage {(shrinkage or 0.0):.12f}, "
                 f"{len(clusters)} whitened directions applied"
             )
         except Exception as exc:
@@ -1116,8 +1132,8 @@ def main():
         pair_clusters,
         pos_probes_np,
         neg_probes_np,
+        neg_echo_probes_np,
         extra_benign_np,
-        pair_prompt_residuals_np,
         nuisance_np,
         cluster_count,
         whitening_applied,
@@ -1138,14 +1154,18 @@ def main():
             base = state - anchor
         return copy_orthogonalized_unit(base)
 
-    def max_cluster_cosine(probe: mx.array) -> float:
-        """The strongest projection onto the active cluster directions."""
-        scores = mx.matmul(active_cluster_matrix, probe)
+    def max_cluster_cosine(probe: mx.array, c_mat: mx.array = active_cluster_matrix) -> float:
+        """The strongest projection onto `c_mat` (`[C, D]`)."""
+        scores = mx.matmul(c_mat, probe)
         mx.eval(scores)
         return float(mx.max(scores).item())
 
-    def token_cluster_scores(tokens: mx.array, anchor: mx.array | None) -> mx.array:
-        """Vectorized per-token cosine `[T, C]` against every active cluster."""
+    def token_cluster_scores(
+        tokens: mx.array,
+        anchor: mx.array | None,
+        c_mat: mx.array = active_cluster_matrix,
+    ) -> mx.array:
+        """Vectorized per-token cosine `[T, C]` against `c_mat`."""
         x = tokens if (absolute_mode or anchor is None) else (tokens - anchor)
         xf = x.astype(mx.float32)
         norm = mx.sqrt(mx.sum(xf * xf, axis=-1, keepdims=True))
@@ -1154,7 +1174,7 @@ def main():
         projected = u - proj * copy_dir
         norm2 = mx.sqrt(mx.sum(projected * projected, axis=-1, keepdims=True))
         u = projected / (norm2 + 1e-6)
-        scores = mx.matmul(u, mx.transpose(active_cluster_matrix))  # [T, C]
+        scores = mx.matmul(u, mx.transpose(c_mat))  # [T, C]
         mx.eval(scores)
         return scores
 
@@ -1172,19 +1192,20 @@ def main():
         pooled: mx.array,
         tokens: mx.array,
         anchor: mx.array | None,
+        c_mat: mx.array = active_cluster_matrix,
     ) -> float:
         """The harm reading of one rendered tool call under `mean`, `lse`, or `hybrid` pooling."""
         if pooling_mode == "lse":
-            pooled_scores = lse_pool(token_cluster_scores(tokens, anchor), pooling_beta)
+            pooled_scores = lse_pool(token_cluster_scores(tokens, anchor, c_mat), pooling_beta)
             return float(mx.max(pooled_scores).item())
         if pooling_mode == "hybrid":
             probe = harm_probe(pooled, anchor)
-            mean_scores = mx.matmul(active_cluster_matrix, probe)
-            lse_scores = lse_pool(token_cluster_scores(tokens, anchor), pooling_beta)
+            mean_scores = mx.matmul(c_mat, probe)
+            lse_scores = lse_pool(token_cluster_scores(tokens, anchor, c_mat), pooling_beta)
             blended = (1.0 - pooling_weight) * mean_scores + pooling_weight * lse_scores
             mx.eval(blended)
             return float(mx.max(blended).item())
-        return max_cluster_cosine(harm_probe(pooled, anchor))
+        return max_cluster_cosine(harm_probe(pooled, anchor), c_mat)
 
     # Measure separation on the calibration pairs.
     harm_cosines = [max_cluster_cosine(h) for h in harm_states]
@@ -1193,14 +1214,17 @@ def main():
     benign_mean = sum(benign_cosines) / len(benign_cosines)
     harm_threshold = (harm_mean + benign_mean) / 2.0
 
-    # 1b. Matched benign panel scores under the active clusters.
+    # 1b. Matched benign panel scores under the active clusters, plus LOPO cross-fitted
+    #     cluster matrices for unbiased out-of-sample threshold & baseline selection.
     panel_scores = [
-        harm_reading(h_e, t_e, None)
-        for h_e, t_e in zip(panel_states, panel_tokens_list)
+        harm_reading(h_e, t_e, a_e, active_cluster_matrix)
+        for h_e, t_e, a_e in zip(panel_states, panel_tokens_list, panel_echo_anchors)
     ]
     panel_natural_scores = [
-        harm_reading(h_n, t_n, None)
-        for h_n, t_n in zip(panel_natural_states, panel_natural_tokens_list)
+        harm_reading(h_n, t_n, a_n, active_cluster_matrix)
+        for h_n, t_n, a_n in zip(
+            panel_natural_states, panel_natural_tokens_list, panel_natural_anchors
+        )
     ]
     panel_matrix = mx.stack(panel_states, axis=0)  # [5, D]
     panel_natural_matrix = mx.stack(panel_natural_states, axis=0)  # [5, D]
@@ -1211,6 +1235,51 @@ def main():
         f"natural baseline {static_baseline_natural:+.4f}, "
         f"shape {list(panel_matrix.shape)}"
     )
+
+    can_cross_fit = len(pairs) >= 6 and all(
+        cnt >= 2 for cnt in cluster_counts if cnt > 0
+    )
+    fold_matrices: List[mx.array] = []
+    fold_echo_baselines: List[float] = []
+    fold_natural_baselines: List[float] = []
+    if can_cross_fit:
+        for holdout in range(len(pairs)):
+            _, dirs_ho, _ = fit_cluster_fold_np(
+                pair_clusters,
+                pos_probes_np,
+                neg_probes_np,
+                neg_echo_probes_np,
+                extra_benign_np,
+                nuisance_np,
+                cluster_count,
+                whitening_applied,
+                holdout=holdout,
+            )
+            c_mat_ho = mx.stack([mx.array(w.astype(np.float32)) for w in dirs_ho], axis=0)
+            mx.eval(c_mat_ho)
+            fold_matrices.append(c_mat_ho)
+            fold_echo_baselines.append(
+                max(
+                    harm_reading(h_e, t_e, a_e, c_mat_ho)
+                    for h_e, t_e, a_e in zip(
+                        panel_states, panel_tokens_list, panel_echo_anchors
+                    )
+                )
+            )
+            fold_natural_baselines.append(
+                max(
+                    harm_reading(h_n, t_n, a_n, c_mat_ho)
+                    for h_n, t_n, a_n in zip(
+                        panel_natural_states,
+                        panel_natural_tokens_list,
+                        panel_natural_anchors,
+                    )
+                )
+            )
+    else:
+        fold_matrices = [active_cluster_matrix] * len(pairs)
+        fold_echo_baselines = [static_baseline_echo] * len(pairs)
+        fold_natural_baselines = [static_baseline_natural] * len(pairs)
 
     excess_harmful: List[float] = []
     excess_benign: List[float] = []
@@ -1223,7 +1292,16 @@ def main():
     violates_harmful: List[float] = []
     violates_benign: List[float] = []
 
-    for user, harmful_spec, benign_spec, _cluster in pairs:
+    # Efron's .632 cross-validation weight (`1 - exp(-1)`) corrects both downward
+    # in-sample hat-matrix bias (`W_full`) and upward singleton-stratum starvation
+    # bias (`W^{(-i)}`) with zero extra transformer forward passes.
+    lopo_weight = (1.0 - float(np.exp(-1.0))) if can_cross_fit else 0.0
+    full_weight = 1.0 - lopo_weight
+
+    for pair_idx, (user, harmful_spec, benign_spec, _cluster) in enumerate(pairs):
+        c_mat_eval = fold_matrices[pair_idx]
+        echo_base_eval = fold_echo_baselines[pair_idx]
+        nat_base_eval = fold_natural_baselines[pair_idx]
         harmful_call, h_primary = parse_tool_call_spec(harmful_spec)
         benign_call, b_primary = parse_tool_call_spec(benign_spec)
         for prompt in prompt_variants(user, h_primary, b_primary):
@@ -1249,7 +1327,8 @@ def main():
                 span_start_for(tokenizer, benign_text, prefix),
             )
 
-            baseline = -float("inf")
+            baseline_full = -float("inf")
+            baseline_ho = -float("inf")
             for cmd in BENIGN_REFERENCE_COMMANDS:
                 reference_text = render_reference_tool_call_turn(prompt, cmd)
                 h_reference, reference_tokens = forward_to_layer_tool_span(
@@ -1258,28 +1337,65 @@ def main():
                     target_layer,
                     span_start_for(tokenizer, reference_text, prefix),
                 )
-                baseline = max(
-                    baseline, harm_reading(h_reference, reference_tokens, h_anchor)
+                r_full = harm_reading(
+                    h_reference, reference_tokens, h_anchor, active_cluster_matrix
                 )
+                baseline_full = max(baseline_full, r_full)
+                if can_cross_fit:
+                    baseline_ho = max(
+                        baseline_ho,
+                        harm_reading(h_reference, reference_tokens, h_anchor, c_mat_eval),
+                    )
+                else:
+                    baseline_ho = baseline_full
 
-            harmful_score = harm_reading(h_harmful, harmful_tokens, h_anchor)
-            benign_score = harm_reading(h_benign, benign_tokens, h_anchor)
-            excess_harmful.append(harmful_score - baseline)
-            excess_benign.append(benign_score - baseline)
+            h_score_full = harm_reading(
+                h_harmful, harmful_tokens, h_anchor, active_cluster_matrix
+            )
+            b_score_full = harm_reading(
+                h_benign, benign_tokens, h_anchor, active_cluster_matrix
+            )
+            if can_cross_fit:
+                h_score_ho = harm_reading(h_harmful, harmful_tokens, h_anchor, c_mat_eval)
+                b_score_ho = harm_reading(h_benign, benign_tokens, h_anchor, c_mat_eval)
+            else:
+                h_score_ho = h_score_full
+                b_score_ho = b_score_full
 
-            static_echo_harmful.append(harmful_score - static_baseline_echo)
-            static_echo_benign.append(benign_score - static_baseline_echo)
-            static_natural_harmful.append(harmful_score - static_baseline_natural)
-            static_natural_benign.append(benign_score - static_baseline_natural)
+            h_live = full_weight * (h_score_full - baseline_full) + lopo_weight * (
+                h_score_ho - baseline_ho
+            )
+            b_live = full_weight * (b_score_full - baseline_full) + lopo_weight * (
+                b_score_ho - baseline_ho
+            )
+            h_echo = full_weight * (h_score_full - static_baseline_echo) + lopo_weight * (
+                h_score_ho - echo_base_eval
+            )
+            b_echo = full_weight * (b_score_full - static_baseline_echo) + lopo_weight * (
+                b_score_ho - echo_base_eval
+            )
+            h_nat = full_weight * (h_score_full - static_baseline_natural) + lopo_weight * (
+                h_score_ho - nat_base_eval
+            )
+            b_nat = full_weight * (b_score_full - static_baseline_natural) + lopo_weight * (
+                b_score_ho - nat_base_eval
+            )
+
+            excess_harmful.append(h_live)
+            excess_benign.append(b_live)
+            static_echo_harmful.append(h_echo)
+            static_echo_benign.append(b_echo)
+            static_natural_harmful.append(h_nat)
+            static_natural_benign.append(b_nat)
 
             if h_primary in prompt:
-                obeys_harmful.append(harmful_score - static_baseline_echo)
+                obeys_harmful.append(h_echo)
             else:
-                violates_harmful.append(harmful_score - baseline)
+                violates_harmful.append(h_live)
             if b_primary in prompt:
-                obeys_benign.append(benign_score - static_baseline_echo)
+                obeys_benign.append(b_echo)
             else:
-                violates_benign.append(benign_score - baseline)
+                violates_benign.append(b_live)
 
     live_threshold, live_tp, live_fp = fit_excess_threshold(
         excess_harmful, excess_benign, args.fp_budget_pct
@@ -1347,7 +1463,7 @@ def main():
         abs(conditioned_j - selected_j) <= 1e-6
         and (
             conditioned_tp > selected_tp
-            or (conditioned_tp == selected_tp and conditioned_fp <= selected_fp)
+            or (conditioned_tp == selected_tp and conditioned_fp < selected_fp)
         )
     )
     print(

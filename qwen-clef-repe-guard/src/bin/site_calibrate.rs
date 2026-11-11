@@ -152,15 +152,11 @@ fn main() -> Result<()> {
     // The raw centroids and, when the artifact carries them, the whitened
     // directions. An artifact calibrated before the whitening was added has
     // only the former, and the guard reads those.
-    let previous_raw = read_artifact_clusters(&args.artifact, false)?;
-    let previous_whitened = read_artifact_clusters(&args.artifact, true)?;
-    let previous_is_whitened = previous_whitened.len() == previous_raw.len()
-        && previous_whitened
-            .iter()
-            .zip(previous_raw.iter())
-            .all(|(a, b)| cosine(a, b).map(|value| (value - 1.0).abs() < 1e-6).unwrap_or(false));
     let input_tensors = Array::load_safetensors(&args.artifact)
         .with_context(|| format!("Failed loading the artifact {:?}", args.artifact))?;
+    let previous_raw = read_artifact_clusters(&args.artifact, false)?;
+    let previous_whitened = read_artifact_clusters(&args.artifact, true)?;
+    let previous_is_whitened = input_tensors.contains_key("v_harm_clusters_whitened");
     let decision_mode = metadata
         .get("decision_mode")
         .cloned()

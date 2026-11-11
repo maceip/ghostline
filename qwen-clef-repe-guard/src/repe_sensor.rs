@@ -693,8 +693,13 @@ impl RepeSensor {
             arr.eval().ok()?;
             arr.item_exact::<f32>().into()
         };
-        let matched_baseline = read_scalar("benign_baseline_matched")
-            .or_else(|| read_scalar("benign_baseline"));
+        let has_compliance_split = tensors.contains_key("harm_excess_threshold_obeys")
+            && tensors.contains_key("harm_excess_threshold_violates");
+        let matched_baseline = if has_compliance_split {
+            read_scalar("benign_baseline_matched").or_else(|| read_scalar("benign_baseline"))
+        } else {
+            read_scalar("benign_baseline")
+        };
 
         // The whitened cluster directions take precedence over the raw ones.
         //

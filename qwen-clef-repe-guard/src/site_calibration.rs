@@ -858,8 +858,19 @@ pub fn whiten_clusters(clusters: &[Array]) -> Result<(f64, Vec<Array>)> {
     Ok((model.shrinkage, directions))
 }
 
+/// Normalizes a paired contrastive shift `u_pos - u_neg` with norm floor `0.15`
+/// so matched-verb pairs (`rm -rf ~/Documents` vs `rm -rf ./dist`) carry equal
+/// directional weight to cross-verb pairs without amplifying near-zero noise.
+fn unit_margin_delta(diff: &Array) -> Result<Array> {
+    let df = diff.as_type::<f32>()?;
+    let nrm = sqrt(&sum(&multiply(&df, &df)?, false)?)?;
+    nrm.eval()?;
+    let denom = nrm.item_exact::<f32>().max(0.15);
+    Ok(divide(&df, &Array::from_f32(denom))?)
+}
+
 /// Fits regularized Fisher discriminant cluster directions `Sigma_W^{-1} delta_c`
-/// from zero-mean within-class / benign / prompt-shape residuals using the
+/// from benign second-moment + within-cluster harmful residuals using the
 /// `O(n^2 d + n^3)` dual Ledoit-Wolf Woodbury solver.
 pub fn whiten_clusters_fisher(
     residuals: &[Array],
@@ -869,7 +880,7 @@ pub fn whiten_clusters_fisher(
     let r64 = arrays_to_f64(residuals)?;
     let d64 = arrays_to_f64(cluster_deltas)?;
     let n64 = arrays_to_f64(nuisance_dirs)?;
-    let (model, dirs64) = whiten::fisher_discriminant_directions(&r64, &d64, &n64, 0.20)
+    let (model, dirs64) = whiten::fisher_discriminant_directions(&r64, &d64, &n64, 0.15)
         .map_err(|message| anyhow::anyhow!("{message}"))?;
     let dim = d64[0].len() as i32;
     let directions = dirs64
@@ -920,6 +931,7 @@ pub struct Refit {
 }
 
 /// Refit the harm directions in absolute reading mode (default).
+#[allow(dead_code)]
 pub fn refit(
     engine: &mut SiteEngine,
     tokenizer: &tokenizers::Tokenizer,
@@ -1087,36 +1099,39 @@ pub fn refit_with_mode(
     //    (copy-orthogonalized unit vector in the active decision_mode basis).
     let mut cluster_pos_probes: Vec<Vec<Array>> = vec![Vec::new(); CLUSTER_COUNT];
     let mut cluster_pair_deltas: Vec<Vec<Array>> = vec![Vec::new(); CLUSTER_COUNT];
-    let mut benign_probes: Vec<Array> = Vec::new();
-    let mut prompt_style_residuals: Vec<Array> = Vec::new();
+    let mut shell_benign_probes: Vec<Array> = Vec::new();
+    let mut benign_second_moment: Vec<Array> = Vec::new();
 
     for (cluster, pos_b, neg_b, neg_echo_b, _anchor) in &raw_pair_records {
         let u_pos = copy_orthogonalized_unit(pos_b, &copy_dir)?;
         let u_neg = copy_orthogonalized_unit(neg_b, &copy_dir)?;
         let u_neg_echo = copy_orthogonalized_unit(neg_echo_b, &copy_dir)?;
-        cluster_pair_deltas[*cluster].push(subtract(&u_pos, &u_neg)?);
+        cluster_pair_deltas[*cluster].push(unit_margin_delta(&subtract(&u_pos, &u_neg)?)?);
         cluster_pos_probes[*cluster].push(u_pos);
-        prompt_style_residuals.push(subtract(&u_neg_echo, &u_neg)?);
-        benign_probes.push(u_neg);
+        shell_benign_probes.push(u_neg.clone());
+        benign_second_moment.push(u_neg);
+        benign_second_moment.push(u_neg_echo);
     }
     for (benign_b, echo_b) in &labelled_benign_bases {
         let u_neg = copy_orthogonalized_unit(benign_b, &copy_dir)?;
         let u_echo = copy_orthogonalized_unit(echo_b, &copy_dir)?;
-        prompt_style_residuals.push(subtract(&u_echo, &u_neg)?);
-        benign_probes.push(u_neg);
+        shell_benign_probes.push(u_neg.clone());
+        benign_second_moment.push(u_neg);
+        benign_second_moment.push(u_echo);
     }
 
-    let benign_probe_mean = mean_axes(&stack(&benign_probes, 0)?, &[0], false)?;
+    let benign_probe_mean = mean_axes(&stack(&shell_benign_probes, 0)?, &[0], false)?;
     let shell_direction = unit_normalize(&benign_probe_mean)?;
 
     for (cluster, harm_b) in &labelled_harmful_bases {
         let u_pos = copy_orthogonalized_unit(harm_b, &copy_dir)?;
-        cluster_pair_deltas[*cluster].push(subtract(&u_pos, &benign_probe_mean)?);
+        cluster_pair_deltas[*cluster]
+            .push(unit_margin_delta(&subtract(&u_pos, &benign_probe_mean)?)?);
         cluster_pos_probes[*cluster].push(u_pos);
     }
 
     // 5. Probe the matched benign reference panel states (needed both for the
-    //    within-class benign covariance and for the artifact's panel tensors).
+    //    benign second-moment nullspace and for the artifact's panel tensors).
     let mut panel_states: Vec<Array> = Vec::new();
     let mut panel_natural_states: Vec<Array> = Vec::new();
     for (cmd, instruction) in BENIGN_REFERENCE_INSTRUCTIONS.iter() {
@@ -1141,19 +1156,28 @@ pub fn refit_with_mode(
         )?;
         panel_natural_states.push(h_nat.clone());
 
-        if absolute_reading {
-            let u_echo = copy_orthogonalized_unit(&h_echo, &copy_dir)?;
-            let u_nat = copy_orthogonalized_unit(&h_nat, &copy_dir)?;
-            prompt_style_residuals.push(subtract(&u_echo, &u_nat)?);
-            benign_probes.push(u_echo);
-            benign_probes.push(u_nat);
-        }
+        let echo_b = if absolute_reading {
+            h_echo
+        } else {
+            let ea = anchor_state(engine, tokenizer, &render_user_turn(&echo_prompt))?;
+            subtract(&h_echo, &ea)?
+        };
+        let nat_b = if absolute_reading {
+            h_nat
+        } else {
+            let na = anchor_state(engine, tokenizer, &render_user_turn(instruction))?;
+            subtract(&h_nat, &na)?
+        };
+        benign_second_moment.push(copy_orthogonalized_unit(&echo_b, &copy_dir)?);
+        benign_second_moment.push(copy_orthogonalized_unit(&nat_b, &copy_dir)?);
     }
 
-    // 6. Paired contrastive cluster directions (unwhitened) + zero-mean residual matrix R.
+    // 6. Paired contrastive cluster directions (unwhitened) + benign second-moment
+    //    nullspace & within-cluster harmful residual matrix R.
     let mut raw_clusters: Vec<Array> = Vec::with_capacity(CLUSTER_COUNT);
     let mut mean_cluster_deltas: Vec<Array> = Vec::with_capacity(CLUSTER_COUNT);
-    let mut residuals: Vec<Array> = Vec::new();
+    let mut residuals: Vec<Array> = benign_second_moment;
+    let half = Array::from_f32(0.5);
 
     for c in 0..CLUSTER_COUNT {
         let delta_mean = mean_axes(&stack(&cluster_pair_deltas[c], 0)?, &[0], false)?;
@@ -1168,16 +1192,10 @@ pub fn refit_with_mode(
         if cluster_pos_probes[c].len() >= 2 {
             let pos_mean = mean_axes(&stack(&cluster_pos_probes[c], 0)?, &[0], false)?;
             for u_pos in &cluster_pos_probes[c] {
-                residuals.push(subtract(u_pos, &pos_mean)?);
+                residuals.push(multiply(&subtract(u_pos, &pos_mean)?, &half)?);
             }
         }
     }
-
-    let all_benign_mean = mean_axes(&stack(&benign_probes, 0)?, &[0], false)?;
-    for u_neg in &benign_probes {
-        residuals.push(subtract(u_neg, &all_benign_mean)?);
-    }
-    residuals.extend(prompt_style_residuals);
 
     // 7. Regularized Fisher Ledoit-Wolf whitening (`Sigma_W^{-1} delta_c`).
     let nuisance_dirs = [shell_direction.clone(), copy_dir.clone()];

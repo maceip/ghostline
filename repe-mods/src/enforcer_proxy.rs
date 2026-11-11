@@ -2235,8 +2235,12 @@ pub fn evaluate_probe_with_override(
         && obeys_threshold.is_some()
         && violates_threshold.is_some()
         && matched_baseline.is_some();
+    let static_panel_mode = shell_tool
+        && detached_untrusted.is_empty()
+        && !compliance_conditioned
+        && matched_baseline.is_some();
 
-    if compliance_conditioned && obeys_instruction {
+    if (compliance_conditioned && obeys_instruction) || static_panel_mode {
         baseline_cosine = matched_baseline.unwrap_or(0.0);
         baseline_reference = "matched panel (calibrated)".to_string();
         baseline_mode = "matched-panel";

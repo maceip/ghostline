@@ -569,7 +569,7 @@ fn extract_dim_and_pca(deltas: &Array, k: usize) -> Result<(Array, Array)> {
 
     let proj = matmul(&d, &transpose_axes(&top_k, &[1, 0])?)?;
     let mean_proj = mean_axes(&proj, &[0], false)?;
-    let signs = r#where(
+    let signs = select(
         &ge(&mean_proj, &Array::from_f32(0.0))?,
         &Array::from_f32(1.0),
         &Array::from_f32(-1.0),
@@ -678,146 +678,139 @@ fn arrays_to_f64(arrays: &[Array]) -> Result<Vec<Vec<f64>>> {
     Ok(out)
 }
 
-/// Fits regularized Fisher discriminant cluster directions `Sigma_W^{-1} delta_c`
-/// from zero-mean within-class / benign / prompt-shape residuals using the
-/// `O(n^2 d + n^3)` dual Ledoit-Wolf Woodbury solver.
-fn whiten_clusters_fisher(
-    residuals: &[Array],
-    cluster_deltas: &[Array],
-    nuisance_dirs: &[Array],
-) -> Result<(f64, Vec<Array>)> {
-    let r64 = arrays_to_f64(residuals)?;
-    let d64 = arrays_to_f64(cluster_deltas)?;
-    let n64 = arrays_to_f64(nuisance_dirs)?;
-    let (model, dirs64) = whiten::fisher_discriminant_directions(&r64, &d64, &n64, 0.20)
-        .map_err(|message| anyhow::anyhow!("{message}"))?;
-    let dim = d64[0].len() as i32;
-    let directions = dirs64
+/// Fits unit-margin contrastive cluster directions (optionally Fisher-whitened against
+/// the benign second-moment nullspace + within-cluster harmful residuals), optionally
+/// holding out calibration pair `holdout` for LOPO cross-fitting.
+fn fit_cluster_fold(
+    pair_clusters: &[usize],
+    pos64: &[Vec<f64>],
+    neg64: &[Vec<f64>],
+    neg_echo64: &[Vec<f64>],
+    extra_ben64: &[Vec<f64>],
+    nuisance64: &[Vec<f64>],
+    cluster_count: usize,
+    use_whitening: bool,
+    holdout: Option<usize>,
+) -> Result<(Option<f64>, Vec<Vec<f64>>, usize)> {
+    let dim = pos64[0].len();
+    let mut c_deltas = vec![vec![0.0f64; dim]; cluster_count];
+    let mut c_counts = vec![0usize; cluster_count];
+    let mut c_pos_rows: Vec<Vec<&Vec<f64>>> = vec![Vec::new(); cluster_count];
+    let mut r_mat: Vec<Vec<f64>> = Vec::new();
+
+    for (i, &c) in pair_clusters.iter().enumerate() {
+        if holdout == Some(i) {
+            continue;
+        }
+        let mut norm_sq = 0.0f64;
+        for j in 0..dim {
+            let d = pos64[i][j] - neg64[i][j];
+            norm_sq += d * d;
+        }
+        let denom = norm_sq.sqrt().max(0.15);
+        for j in 0..dim {
+            c_deltas[c][j] += (pos64[i][j] - neg64[i][j]) / denom;
+        }
+        c_counts[c] += 1;
+        c_pos_rows[c].push(&pos64[i]);
+        r_mat.push(neg64[i].clone());
+        r_mat.push(neg_echo64[i].clone());
+    }
+    for row in extra_ben64 {
+        r_mat.push(row.clone());
+    }
+
+    let mut mean_deltas = Vec::new();
+    for c in 0..cluster_count {
+        if c_counts[c] > 0 {
+            let inv = 1.0 / c_counts[c] as f64;
+            mean_deltas.push(c_deltas[c].iter().map(|v| v * inv).collect::<Vec<f64>>());
+        }
+    }
+    for c in 0..cluster_count {
+        if c_pos_rows[c].len() >= 2 {
+            let mut m = vec![0.0f64; dim];
+            let inv = 1.0 / c_pos_rows[c].len() as f64;
+            for row in &c_pos_rows[c] {
+                for j in 0..dim {
+                    m[j] += row[j] * inv;
+                }
+            }
+            for row in &c_pos_rows[c] {
+                r_mat.push(
+                    row.iter()
+                        .zip(m.iter())
+                        .map(|(a, b)| 0.5 * (a - b))
+                        .collect(),
+                );
+            }
+        }
+    }
+
+    if use_whitening && r_mat.len() >= 2 && !mean_deltas.is_empty() {
+        let n_rows = r_mat.len();
+        match whiten::fisher_discriminant_directions(&r_mat, &mean_deltas, nuisance64, 0.15) {
+            Ok((model, dirs)) => return Ok((Some(model.shrinkage), dirs, n_rows)),
+            Err(err) if holdout.is_none() => anyhow::bail!("{err}"),
+            Err(_) => {}
+        }
+    }
+
+    let dirs = mean_deltas
         .iter()
-        .map(|direction| {
-            let values: Vec<f32> = direction.iter().map(|value| *value as f32).collect();
-            Ok(Array::from_slice(&values, &[dim]))
+        .map(|d| {
+            let p = whiten::project_orthogonal(d, nuisance64).unwrap_or_else(|_| d.clone());
+            let nrm = p.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-12);
+            p.into_iter().map(|v| v / nrm).collect::<Vec<f64>>()
         })
-        .collect::<Result<Vec<Array>>>()?;
-    Ok((model.shrinkage, directions))
+        .collect::<Vec<Vec<f64>>>();
+    Ok((None, dirs, 0))
+}
+
+fn f64_dirs_to_arrays(dirs: &[Vec<f64>], dim: i32) -> Vec<Array> {
+    dirs.iter()
+        .map(|direction| {
+            let values: Vec<f32> = direction.iter().map(|v| *v as f32).collect();
+            Array::from_slice(&values, &[dim])
+        })
+        .collect()
 }
 
 /// Leave-One-Pair-Out (LOPO) cross-validation on CPU (`f64`), evaluating
 /// out-of-sample pairwise accuracy (`s(u_i^+) > s(u_i^-)`) and global AUROC.
 fn evaluate_lopo_cv(
     pair_clusters: &[usize],
-    pos_probes: &[Array],
-    neg_probes: &[Array],
-    extra_benign_probes: &[Array],
-    prompt_residuals: &[Array],
-    nuisance_dirs: &[Array],
+    pos64: &[Vec<f64>],
+    neg64: &[Vec<f64>],
+    neg_echo64: &[Vec<f64>],
+    extra_ben64: &[Vec<f64>],
+    nuisance64: &[Vec<f64>],
     cluster_count: usize,
     use_whitening: bool,
 ) -> Result<(usize, f64)> {
-    let pos64 = arrays_to_f64(pos_probes)?;
-    let neg64 = arrays_to_f64(neg_probes)?;
-    let extra_ben64 = arrays_to_f64(extra_benign_probes)?;
-    let prompt_res64 = arrays_to_f64(prompt_residuals)?;
-    let nuisance64 = arrays_to_f64(nuisance_dirs)?;
     let n_pairs = pair_clusters.len();
     if n_pairs < 2 {
         return Ok((n_pairs, 1.0));
     }
-    let dim = pos64[0].len();
     let mut pairwise_wins = 0usize;
     let mut lopo_pos_scores = Vec::with_capacity(n_pairs);
     let mut lopo_neg_scores = Vec::with_capacity(n_pairs);
 
     for holdout in 0..n_pairs {
-        let mut c_deltas = vec![vec![0.0f64; dim]; cluster_count];
-        let mut c_counts = vec![0usize; cluster_count];
-        let mut c_pos_rows: Vec<Vec<&Vec<f64>>> = vec![Vec::new(); cluster_count];
-        let mut ben_rows: Vec<&Vec<f64>> = Vec::new();
-
-        for i in 0..n_pairs {
-            if i == holdout {
-                continue;
-            }
-            let c = pair_clusters[i];
-            c_counts[c] += 1;
-            c_pos_rows[c].push(&pos64[i]);
-            ben_rows.push(&neg64[i]);
-            for j in 0..dim {
-                c_deltas[c][j] += pos64[i][j] - neg64[i][j];
-            }
-        }
-        for row in &extra_ben64 {
-            ben_rows.push(row);
-        }
-
-        let mut mean_deltas = Vec::new();
-        for c in 0..cluster_count {
-            if c_counts[c] > 0 {
-                let inv = 1.0 / c_counts[c] as f64;
-                mean_deltas.push(c_deltas[c].iter().map(|v| v * inv).collect::<Vec<f64>>());
-            }
-        }
-        if mean_deltas.is_empty() {
+        let (_shrink, dirs, _n_rows) = fit_cluster_fold(
+            pair_clusters,
+            pos64,
+            neg64,
+            neg_echo64,
+            extra_ben64,
+            nuisance64,
+            cluster_count,
+            use_whitening,
+            Some(holdout),
+        )?;
+        if dirs.is_empty() {
             continue;
         }
-
-        let dirs: Vec<Vec<f64>> = if use_whitening {
-            let mut r_mat: Vec<Vec<f64>> = Vec::new();
-            for c in 0..cluster_count {
-                if c_pos_rows[c].len() >= 2 {
-                    let mut m = vec![0.0f64; dim];
-                    let inv = 1.0 / c_pos_rows[c].len() as f64;
-                    for row in &c_pos_rows[c] {
-                        for j in 0..dim {
-                            m[j] += row[j] * inv;
-                        }
-                    }
-                    for row in &c_pos_rows[c] {
-                        r_mat.push(row.iter().zip(m.iter()).map(|(a, b)| a - b).collect());
-                    }
-                }
-            }
-            if ben_rows.len() >= 2 {
-                let mut m = vec![0.0f64; dim];
-                let inv = 1.0 / ben_rows.len() as f64;
-                for row in &ben_rows {
-                    for j in 0..dim {
-                        m[j] += row[j] * inv;
-                    }
-                }
-                for row in &ben_rows {
-                    r_mat.push(row.iter().zip(m.iter()).map(|(a, b)| a - b).collect());
-                }
-            }
-            for (idx, row) in prompt_res64.iter().enumerate() {
-                if idx != holdout {
-                    r_mat.push(row.clone());
-                }
-            }
-            match whiten::fisher_discriminant_directions(&r_mat, &mean_deltas, &nuisance64, 0.20) {
-                Ok((_model, w)) => w,
-                Err(_) => mean_deltas
-                    .iter()
-                    .map(|d| {
-                        let p = whiten::project_orthogonal(d, &nuisance64)
-                            .unwrap_or_else(|_| d.clone());
-                        let nrm = p.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-12);
-                        p.into_iter().map(|v| v / nrm).collect()
-                    })
-                    .collect(),
-            }
-        } else {
-            mean_deltas
-                .iter()
-                .map(|d| {
-                    let p = whiten::project_orthogonal(d, &nuisance64)
-                        .unwrap_or_else(|_| d.clone());
-                    let nrm = p.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-12);
-                    p.into_iter().map(|v| v / nrm).collect()
-                })
-                .collect()
-        };
-
         let score_of = |u: &[f64]| -> f64 {
             dirs.iter()
                 .map(|w| u.iter().zip(w.iter()).map(|(a, b)| a * b).sum::<f64>())
@@ -846,11 +839,10 @@ fn evaluate_lopo_cv(
     Ok((pairwise_wins, concordant / total_pairs))
 }
 
-/// The harm reading of one rendered tool-call turn, under the configured pooling.
-fn harm_reading(
-    engine: &mut ExtractEngine,
-    tokenizer: &tokenizers::Tokenizer,
-    text: &str,
+/// Evaluates the configured pooling statistic on already-materialized probe states.
+fn harm_reading_on_states(
+    state: &Array,
+    hidden: &Array,
     span_start: Option<usize>,
     anchor: Option<&Array>,
     copy_dir: &Array,
@@ -859,28 +851,19 @@ fn harm_reading(
 ) -> Result<f32> {
     match pooling {
         Pooling::Mean => {
-            let state = pooled_state(engine, tokenizer, text, span_start)?;
             let probe = match anchor {
-                Some(a) => copy_orthogonalized_unit(&subtract(&state, a)?, copy_dir)?,
-                None => copy_orthogonalized_unit(&state, copy_dir)?,
+                Some(a) => copy_orthogonalized_unit(&subtract(state, a)?, copy_dir)?,
+                None => copy_orthogonalized_unit(state, copy_dir)?,
             };
             max_cluster_cosine(&probe, clusters)
         }
         Pooling::LogSumExp { beta } => {
-            let flat = encode_ids(tokenizer, text);
-            let len = flat.len() as i32;
-            let input = Array::from_slice(&flat, &[1, len]);
-            engine.run_hooked(&input, false, false, None, span_start)?;
-            let hidden = engine
-                .probe_hidden
-                .clone()
-                .context("the probe layer was never reached during the forward pass")?;
             let cfg = TokenScoreConfig {
                 anchor: anchor.cloned(),
                 copy_dir: Some(copy_dir.clone()),
                 directions: clusters.to_vec(),
             };
-            let table = token_score_table(&hidden, span_start, &cfg)?;
+            let table = token_score_table(hidden, span_start, &cfg)?;
             let mut best = f32::NEG_INFINITY;
             for c in 0..clusters.len() {
                 let (pooled, _, _) = lse_pool(&table, c, beta);
@@ -891,28 +874,16 @@ fn harm_reading(
             Ok(best)
         }
         Pooling::Hybrid { beta, weight } => {
-            let flat = encode_ids(tokenizer, text);
-            let len = flat.len() as i32;
-            let input = Array::from_slice(&flat, &[1, len]);
-            engine.run_hooked(&input, false, false, None, span_start)?;
-            let state = engine
-                .probe_state
-                .clone()
-                .context("the probe layer was never reached during the forward pass")?;
-            let hidden = engine
-                .probe_hidden
-                .clone()
-                .context("the probe layer was never reached during the forward pass")?;
             let probe = match anchor {
-                Some(a) => copy_orthogonalized_unit(&subtract(&state, a)?, copy_dir)?,
-                None => copy_orthogonalized_unit(&state, copy_dir)?,
+                Some(a) => copy_orthogonalized_unit(&subtract(state, a)?, copy_dir)?,
+                None => copy_orthogonalized_unit(state, copy_dir)?,
             };
             let cfg = TokenScoreConfig {
                 anchor: anchor.cloned(),
                 copy_dir: Some(copy_dir.clone()),
                 directions: clusters.to_vec(),
             };
-            let table = token_score_table(&hidden, span_start, &cfg)?;
+            let table = token_score_table(hidden, span_start, &cfg)?;
             let w = weight.clamp(0.0, 1.0);
             let mut best = f32::NEG_INFINITY;
             for (c, dir) in clusters.iter().enumerate() {
@@ -926,6 +897,43 @@ fn harm_reading(
             Ok(best)
         }
     }
+}
+
+/// Runs one forward pass and returns `(pooled_state, full_layer_hidden)`.
+fn probe_span_states(
+    engine: &mut ExtractEngine,
+    tokenizer: &tokenizers::Tokenizer,
+    text: &str,
+    span_start: Option<usize>,
+) -> Result<(Array, Array)> {
+    let flat = encode_ids(tokenizer, text);
+    let len = flat.len() as i32;
+    let input = Array::from_slice(&flat, &[1, len]);
+    engine.run_hooked(&input, false, false, None, span_start)?;
+    let state = engine
+        .probe_state
+        .clone()
+        .context("the probe layer was never reached during the forward pass")?;
+    let hidden = engine
+        .probe_hidden
+        .clone()
+        .context("the probe layer was never reached during the forward pass")?;
+    Ok((state, hidden))
+}
+
+/// The harm reading of one rendered tool-call turn, under the configured pooling.
+fn harm_reading(
+    engine: &mut ExtractEngine,
+    tokenizer: &tokenizers::Tokenizer,
+    text: &str,
+    span_start: Option<usize>,
+    anchor: Option<&Array>,
+    copy_dir: &Array,
+    clusters: &[Array],
+    pooling: Pooling,
+) -> Result<f32> {
+    let (state, hidden) = probe_span_states(engine, tokenizer, text, span_start)?;
+    harm_reading_on_states(&state, &hidden, span_start, anchor, copy_dir, clusters, pooling)
 }
 
 /// Fit the operating point by maximizing Youden's `J = TPR - FPR` subject to
@@ -1161,11 +1169,12 @@ fn main() -> Result<()> {
     );
 
     // Probe the matched benign reference panel states first so their benign
-    // variance also informs the within-class residual covariance `Sigma_W`.
+    // second moment informs the Fisher benign nullspace `Sigma_W`.
     let mut panel_states: Vec<Array> = Vec::new();
+    let mut panel_echo_anchors: Vec<Option<Array>> = Vec::new();
     let mut panel_natural_states: Vec<Array> = Vec::new();
+    let mut panel_natural_anchors: Vec<Option<Array>> = Vec::new();
     let mut extra_benign_probes: Vec<Array> = Vec::new();
-    let mut panel_style_residuals: Vec<Array> = Vec::new();
     for (cmd, instruction) in BENIGN_REFERENCE_INSTRUCTIONS.iter() {
         let echo_prompt = format!("run:{cmd}");
         let echo_text = render_reference_tool_call_turn(&echo_prompt, cmd);
@@ -1189,78 +1198,66 @@ fn main() -> Result<()> {
         panel_natural_states.push(h_nat.clone());
 
         let echo_b = if absolute_mode {
+            panel_echo_anchors.push(None);
             h_echo
         } else {
             let ea = anchor_state(&mut engine, &tokenizer, &render_user_turn(&echo_prompt))?;
+            panel_echo_anchors.push(Some(ea.clone()));
             subtract(&h_echo, &ea)?
         };
         let nat_b = if absolute_mode {
+            panel_natural_anchors.push(None);
             h_nat
         } else {
             let na = anchor_state(&mut engine, &tokenizer, &render_user_turn(instruction))?;
+            panel_natural_anchors.push(Some(na.clone()));
             subtract(&h_nat, &na)?
         };
         let u_echo = copy_orthogonalized_unit(&echo_b, &copy_dir)?;
         let u_nat = copy_orthogonalized_unit(&nat_b, &copy_dir)?;
-        panel_style_residuals.push(subtract(&u_echo, &u_nat)?);
         extra_benign_probes.push(u_echo);
         extra_benign_probes.push(u_nat);
     }
 
     // Map calibration pairs into the exact runtime probe representation `phi(h)`.
     let mut pair_clusters: Vec<usize> = Vec::with_capacity(raw_pair_records.len());
+    let mut cluster_counts = vec![0usize; cluster_count];
     let mut harm_states: Vec<Array> = Vec::with_capacity(raw_pair_records.len());
     let mut benign_states: Vec<Array> = Vec::with_capacity(raw_pair_records.len());
-    let mut pair_prompt_residuals: Vec<Array> = Vec::with_capacity(raw_pair_records.len());
-    let mut cluster_pair_deltas: Vec<Vec<Array>> = vec![Vec::new(); cluster_count];
-    let mut cluster_pos_probes: Vec<Vec<Array>> = vec![Vec::new(); cluster_count];
+    let mut neg_echo_states: Vec<Array> = Vec::with_capacity(raw_pair_records.len());
 
     for (cluster, pos_b, neg_b, neg_echo_b) in &raw_pair_records {
         let u_pos = copy_orthogonalized_unit(pos_b, &copy_dir)?;
         let u_neg = copy_orthogonalized_unit(neg_b, &copy_dir)?;
         let u_neg_echo = copy_orthogonalized_unit(neg_echo_b, &copy_dir)?;
         pair_clusters.push(*cluster);
-        cluster_pair_deltas[*cluster].push(subtract(&u_pos, &u_neg)?);
-        cluster_pos_probes[*cluster].push(u_pos.clone());
-        pair_prompt_residuals.push(subtract(&u_neg_echo, &u_neg)?);
+        cluster_counts[*cluster] += 1;
         harm_states.push(u_pos);
         benign_states.push(u_neg);
+        neg_echo_states.push(u_neg_echo);
     }
 
-    let mut all_benign_probes = benign_states.clone();
-    all_benign_probes.extend(extra_benign_probes.iter().cloned());
-    let all_benign_mean = mean_axes(&stack(&all_benign_probes, 0)?, &[0], false)?;
     let shell_direction = unit_normalize(&mean_axes(&stack(&benign_states, 0)?, &[0], false)?)?;
+    let nuisance_dirs = [shell_direction.clone(), copy_dir.clone()];
 
-    let mut raw_clusters: Vec<Array> = Vec::new();
-    let mut mean_cluster_deltas: Vec<Array> = Vec::new();
-    let mut residuals: Vec<Array> = Vec::new();
-    for c in 0..cluster_count {
-        if cluster_pair_deltas[c].is_empty() {
-            continue;
-        }
-        let delta_mean = mean_axes(&stack(&cluster_pair_deltas[c], 0)?, &[0], false)?;
-        mean_cluster_deltas.push(delta_mean.clone());
+    let pos64 = arrays_to_f64(&harm_states)?;
+    let neg64 = arrays_to_f64(&benign_states)?;
+    let neg_echo64 = arrays_to_f64(&neg_echo_states)?;
+    let extra_ben64 = arrays_to_f64(&extra_benign_probes)?;
+    let nuisance64 = arrays_to_f64(&nuisance_dirs)?;
 
-        let shell_proj = sum(&multiply(&delta_mean, &shell_direction)?, false)?;
-        let mut orthogonal = subtract(&delta_mean, &multiply(&shell_direction, &shell_proj)?)?;
-        let copy_proj = sum(&multiply(&orthogonal, &copy_dir)?, false)?;
-        orthogonal = subtract(&orthogonal, &multiply(&copy_dir, &copy_proj)?)?;
-        raw_clusters.push(unit_normalize(&orthogonal)?);
-
-        if cluster_pos_probes[c].len() >= 2 {
-            let pos_mean = mean_axes(&stack(&cluster_pos_probes[c], 0)?, &[0], false)?;
-            for u_pos in &cluster_pos_probes[c] {
-                residuals.push(subtract(u_pos, &pos_mean)?);
-            }
-        }
-    }
-    for u_neg in &all_benign_probes {
-        residuals.push(subtract(u_neg, &all_benign_mean)?);
-    }
-    residuals.extend(pair_prompt_residuals.iter().cloned());
-    residuals.extend(panel_style_residuals);
-
+    let (_raw_shrink, raw_dirs64, _raw_rows) = fit_cluster_fold(
+        &pair_clusters,
+        &pos64,
+        &neg64,
+        &neg_echo64,
+        &extra_ben64,
+        &nuisance64,
+        cluster_count,
+        false,
+        None,
+    )?;
+    let raw_clusters = f64_dirs_to_arrays(&raw_dirs64, d_model);
     let cluster_matrix = stack(&raw_clusters, 0)?;
     let mut clusters = raw_clusters;
     let v_harm = unit_normalize(&mean_axes(&cluster_matrix, &[0], false)?)?;
@@ -1268,31 +1265,42 @@ fn main() -> Result<()> {
     let (_, pca_basis) = extract_dim_and_pca(&pca_matrix, args.pca_k)?;
     let harmful_panel_matrix = stack(&raw_harmful_panel, 0)?;
     println!(
-        "[*] harm clusters: {} paired contrastive directions, \
+        "[*] harm clusters: {} unit-margin contrastive directions, \
          orthogonalised against the shell direction AND the copy channel",
         clusters.len()
     );
 
-    let nuisance_dirs = [shell_direction.clone(), copy_dir.clone()];
     let mut whitening_applied = false;
     let mut whitening_shrinkage: Option<f64> = None;
     let mut whitened_cluster_matrix: Option<Array> = None;
-    let whitening_samples = if args.no_whitening { 0 } else { residuals.len() };
+    let mut whitening_samples = 0usize;
     if args.no_whitening {
         println!(
             "[*] whitening: skipped (--no-whitening), paired contrastive directions used as-is"
         );
     } else {
-        match whiten_clusters_fisher(&residuals, &mean_cluster_deltas, &nuisance_dirs) {
-            Ok((shrinkage, whitened)) => {
+        match fit_cluster_fold(
+            &pair_clusters,
+            &pos64,
+            &neg64,
+            &neg_echo64,
+            &extra_ben64,
+            &nuisance64,
+            cluster_count,
+            true,
+            None,
+        ) {
+            Ok((shrinkage, whitened64, n_rows)) => {
+                let whitened = f64_dirs_to_arrays(&whitened64, d_model);
                 whitening_applied = true;
-                whitening_shrinkage = Some(shrinkage);
+                whitening_shrinkage = shrinkage;
+                whitening_samples = n_rows;
                 whitened_cluster_matrix = Some(stack(&whitened, 0)?);
                 clusters = whitened;
                 println!(
-                    "[*] whitening: Fisher Ledoit-Wolf over {} within-class/prompt residuals, \
-                     shrinkage {shrinkage:.12}, {} whitened directions applied",
-                    residuals.len(),
+                    "[*] whitening: Fisher Ledoit-Wolf over {n_rows} benign/within-cluster rows, \
+                     shrinkage {:.12}, {} whitened directions applied",
+                    shrinkage.unwrap_or(0.0),
                     clusters.len()
                 );
             }
@@ -1305,15 +1313,13 @@ fn main() -> Result<()> {
         }
     }
 
-    let mut lopo_prompt_res = pair_prompt_residuals;
-    let _ = &mut lopo_prompt_res;
     let (lopo_wins, lopo_auroc) = evaluate_lopo_cv(
         &pair_clusters,
-        &harm_states,
-        &benign_states,
-        &extra_benign_probes,
-        &lopo_prompt_res,
-        &nuisance_dirs,
+        &pos64,
+        &neg64,
+        &neg_echo64,
+        &extra_ben64,
+        &nuisance64,
         cluster_count,
         whitening_applied,
     )?;
@@ -1327,7 +1333,7 @@ fn main() -> Result<()> {
     // Measure the matched benign reference panel scores under the active clusters.
     let mut panel_scores: Vec<f32> = Vec::new();
     let mut panel_natural_scores: Vec<f32> = Vec::new();
-    for (cmd, instruction) in BENIGN_REFERENCE_INSTRUCTIONS.iter() {
+    for (idx, (cmd, instruction)) in BENIGN_REFERENCE_INSTRUCTIONS.iter().enumerate() {
         let echo_prompt = format!("run:{cmd}");
         let echo_text = render_reference_tool_call_turn(&echo_prompt, cmd);
         let echo_prefix = tool_call_span_prefix(&echo_prompt);
@@ -1336,7 +1342,7 @@ fn main() -> Result<()> {
             &tokenizer,
             &echo_text,
             Some(span_start_for(&tokenizer, &echo_text, &echo_prefix)),
-            None,
+            panel_echo_anchors[idx].as_ref(),
             &copy_dir,
             &clusters,
             pooling,
@@ -1349,7 +1355,7 @@ fn main() -> Result<()> {
             &tokenizer,
             &natural_text,
             Some(span_start_for(&tokenizer, &natural_text, &natural_prefix)),
-            None,
+            panel_natural_anchors[idx].as_ref(),
             &copy_dir,
             &clusters,
             pooling,
@@ -1395,25 +1401,81 @@ fn main() -> Result<()> {
          threshold {harm_threshold:+.4}"
     );
 
-    // 1b. The prompt-invariant operating point.
-    //
-    // The guard compares each intercepted call against a PANEL of benign
-    // reference calls rendered in the same context, and scores it against the
-    // worst of them; the decision statistic is that difference. Calibrate the
-    // margin over several prompt shapes, so the threshold survives the style
-    // the agent happens to use.
+    // 1b. Cross-fitted out-of-sample operating point calibration across prompt variants.
+    let can_cross_fit = pairs.len() >= 6
+        && cluster_counts
+            .iter()
+            .filter(|&&cnt| cnt > 0)
+            .all(|&cnt| cnt >= 2);
+    let mut fold_clusters: Vec<Vec<Array>> = Vec::with_capacity(pairs.len());
+    let mut fold_echo_baselines: Vec<f32> = Vec::with_capacity(pairs.len());
+    let mut fold_natural_baselines: Vec<f32> = Vec::with_capacity(pairs.len());
+    if can_cross_fit {
+        for holdout in 0..pairs.len() {
+            let (_sh, dirs_ho, _nr) = fit_cluster_fold(
+                &pair_clusters,
+                &pos64,
+                &neg64,
+                &neg_echo64,
+                &extra_ben64,
+                &nuisance64,
+                cluster_count,
+                whitening_applied,
+                Some(holdout),
+            )?;
+            let c_ho = f64_dirs_to_arrays(&dirs_ho, d_model);
+            let mut echo_max = f32::NEG_INFINITY;
+            let mut nat_max = f32::NEG_INFINITY;
+            for (idx, (cmd, instruction)) in BENIGN_REFERENCE_INSTRUCTIONS.iter().enumerate() {
+                let echo_prompt = format!("run:{cmd}");
+                let echo_text = render_reference_tool_call_turn(&echo_prompt, cmd);
+                let echo_prefix = tool_call_span_prefix(&echo_prompt);
+                echo_max = echo_max.max(harm_reading(
+                    &mut engine,
+                    &tokenizer,
+                    &echo_text,
+                    Some(span_start_for(&tokenizer, &echo_text, &echo_prefix)),
+                    panel_echo_anchors[idx].as_ref(),
+                    &copy_dir,
+                    &c_ho,
+                    pooling,
+                )?);
+                let natural_text = render_reference_tool_call_turn(instruction, cmd);
+                let natural_prefix = tool_call_span_prefix(instruction);
+                nat_max = nat_max.max(harm_reading(
+                    &mut engine,
+                    &tokenizer,
+                    &natural_text,
+                    Some(span_start_for(&tokenizer, &natural_text, &natural_prefix)),
+                    panel_natural_anchors[idx].as_ref(),
+                    &copy_dir,
+                    &c_ho,
+                    pooling,
+                )?);
+            }
+            fold_clusters.push(c_ho);
+            fold_echo_baselines.push(echo_max);
+            fold_natural_baselines.push(nat_max);
+        }
+    } else {
+        for _ in 0..pairs.len() {
+            fold_clusters.push(clusters.clone());
+            fold_echo_baselines.push(static_baseline_echo);
+            fold_natural_baselines.push(static_baseline_natural);
+        }
+    }
+
     let mut excess_harmful: Vec<f32> = Vec::new();
     let mut excess_benign: Vec<f32> = Vec::new();
-    // The same populations measured WITHOUT the anchor subtraction: the raw
-    // tool-call state projected onto the harm directions.
-    let mut abs_excess_harmful: Vec<f32> = Vec::new();
-    let mut abs_excess_benign: Vec<f32> = Vec::new();
-    // The same populations against the MATCHED panel baselines.
     let mut static_echo_harmful: Vec<f32> = Vec::new();
     let mut static_echo_benign: Vec<f32> = Vec::new();
     let mut static_natural_harmful: Vec<f32> = Vec::new();
     let mut static_natural_benign: Vec<f32> = Vec::new();
-    // The same, broken down by prompt style.
+    let mut obeys_harmful: Vec<f32> = Vec::new();
+    let mut obeys_benign: Vec<f32> = Vec::new();
+    let mut violates_harmful: Vec<f32> = Vec::new();
+    let mut violates_benign: Vec<f32> = Vec::new();
+
     let styles = prompt_variant_styles();
     let mut style_live_harmful: Vec<Vec<f32>> = vec![Vec::new(); styles.len()];
     let mut style_live_benign: Vec<Vec<f32>> = vec![Vec::new(); styles.len()];
@@ -1421,117 +1483,158 @@ fn main() -> Result<()> {
     let mut style_echo_benign: Vec<Vec<f32>> = vec![Vec::new(); styles.len()];
     let mut style_natural_harmful: Vec<Vec<f32>> = vec![Vec::new(); styles.len()];
     let mut style_natural_benign: Vec<Vec<f32>> = vec![Vec::new(); styles.len()];
-    for (user, harmful_spec, benign_spec, _cluster) in pairs.iter() {
+
+    // Efron's .632 cross-validation weight (`1 - exp(-1)`) corrects both downward
+    // in-sample hat-matrix bias (`clusters`) and upward singleton-stratum starvation
+    // bias (`fold_clusters[pair_idx]`) with zero extra transformer forward passes.
+    let lopo_weight: f32 = if can_cross_fit {
+        (1.0 - (-1.0_f64).exp()) as f32
+    } else {
+        0.0
+    };
+    let full_weight: f32 = 1.0 - lopo_weight;
+
+    for (pair_idx, (user, harmful_spec, benign_spec, _cluster)) in pairs.iter().enumerate() {
+        let eval_clusters = &fold_clusters[pair_idx];
+        let echo_base_eval = fold_echo_baselines[pair_idx];
+        let nat_base_eval = fold_natural_baselines[pair_idx];
         let (h_tool, h_args, h_primary) = parse_tool_call_spec(harmful_spec);
         let (b_tool, b_args, b_primary) = parse_tool_call_spec(benign_spec);
         for (style_index, prompt) in prompt_variants(user, &h_primary, &b_primary)
             .into_iter()
             .enumerate()
         {
-            let anchor = anchor_state(&mut engine, &tokenizer, &render_user_turn(&prompt))?;
+            let anchor_opt = if absolute_mode {
+                None
+            } else {
+                Some(anchor_state(
+                    &mut engine,
+                    &tokenizer,
+                    &render_user_turn(&prompt),
+                )?)
+            };
             let prefix = tool_call_span_prefix(&prompt);
-            // Worst benign reading this context produces.
-            let mut baseline = f32::NEG_INFINITY;
-            let mut abs_baseline = f32::NEG_INFINITY;
+            let mut baseline_full = f32::NEG_INFINITY;
+            let mut baseline_ho = f32::NEG_INFINITY;
             for cmd in BENIGN_REFERENCE_COMMANDS {
                 let reference_text = render_reference_tool_call_turn(&prompt, cmd);
-                let reference_shift = harm_reading(
-                    &mut engine,
-                    &tokenizer,
-                    &reference_text,
-                    Some(span_start_for(&tokenizer, &reference_text, &prefix)),
-                    Some(&anchor),
+                let sp = Some(span_start_for(&tokenizer, &reference_text, &prefix));
+                let (r_state, r_hidden) =
+                    probe_span_states(&mut engine, &tokenizer, &reference_text, sp)?;
+                let rf = harm_reading_on_states(
+                    &r_state,
+                    &r_hidden,
+                    sp,
+                    anchor_opt.as_ref(),
                     &copy_dir,
                     &clusters,
                     pooling,
                 )?;
-                let c = reference_shift;
-                if c > baseline {
-                    baseline = c;
-                }
-                let c = harm_reading(
-                    &mut engine,
-                    &tokenizer,
-                    &reference_text,
-                    Some(span_start_for(&tokenizer, &reference_text, &prefix)),
-                    None,
-                    &copy_dir,
-                    &clusters,
-                    pooling,
-                )?;
-                if c > abs_baseline {
-                    abs_baseline = c;
+                baseline_full = baseline_full.max(rf);
+                if can_cross_fit {
+                    let rho = harm_reading_on_states(
+                        &r_state,
+                        &r_hidden,
+                        sp,
+                        anchor_opt.as_ref(),
+                        &copy_dir,
+                        eval_clusters,
+                        pooling,
+                    )?;
+                    baseline_ho = baseline_ho.max(rho);
+                } else {
+                    baseline_ho = baseline_full;
                 }
             }
             let harmful_text = render_tool_call_turn(&prompt, &h_tool, &h_args);
             let benign_text = render_tool_call_turn(&prompt, &b_tool, &b_args);
-            let harmful_score = harm_reading(
-                &mut engine,
-                &tokenizer,
-                &harmful_text,
-                Some(span_start_for(&tokenizer, &harmful_text, &prefix)),
-                Some(&anchor),
-                &copy_dir,
-                &clusters,
-                pooling,
-            )?;
-            let benign_score = harm_reading(
-                &mut engine,
-                &tokenizer,
-                &benign_text,
-                Some(span_start_for(&tokenizer, &benign_text, &prefix)),
-                Some(&anchor),
-                &copy_dir,
-                &clusters,
-                pooling,
-            )?;
-            let h = harmful_score - baseline;
-            let b = benign_score - baseline;
-            excess_harmful.push(h);
-            excess_benign.push(b);
+            let h_sp = Some(span_start_for(&tokenizer, &harmful_text, &prefix));
+            let b_sp = Some(span_start_for(&tokenizer, &benign_text, &prefix));
+            let (h_state, h_hidden) =
+                probe_span_states(&mut engine, &tokenizer, &harmful_text, h_sp)?;
+            let (b_state, b_hidden) =
+                probe_span_states(&mut engine, &tokenizer, &benign_text, b_sp)?;
 
-            // The absolute reading: the tool-call state itself, with no
-            // anchor subtraction, and with the verbatim-copy channel removed.
-            let harmful_probe = harm_reading(
-                &mut engine,
-                &tokenizer,
-                &harmful_text,
-                Some(span_start_for(&tokenizer, &harmful_text, &prefix)),
-                None,
+            let h_score_full = harm_reading_on_states(
+                &h_state,
+                &h_hidden,
+                h_sp,
+                anchor_opt.as_ref(),
                 &copy_dir,
                 &clusters,
                 pooling,
             )?;
-            let benign_probe = harm_reading(
-                &mut engine,
-                &tokenizer,
-                &benign_text,
-                Some(span_start_for(&tokenizer, &benign_text, &prefix)),
-                None,
+            let b_score_full = harm_reading_on_states(
+                &b_state,
+                &b_hidden,
+                b_sp,
+                anchor_opt.as_ref(),
                 &copy_dir,
                 &clusters,
                 pooling,
             )?;
-            let harmful_score = harmful_probe;
-            let benign_score = benign_probe;
-            let ah = harmful_score - abs_baseline;
-            let ab = benign_score - abs_baseline;
-            abs_excess_harmful.push(ah);
-            abs_excess_benign.push(ab);
+            let (h_score_ho, b_score_ho) = if can_cross_fit {
+                (
+                    harm_reading_on_states(
+                        &h_state,
+                        &h_hidden,
+                        h_sp,
+                        anchor_opt.as_ref(),
+                        &copy_dir,
+                        eval_clusters,
+                        pooling,
+                    )?,
+                    harm_reading_on_states(
+                        &b_state,
+                        &b_hidden,
+                        b_sp,
+                        anchor_opt.as_ref(),
+                        &copy_dir,
+                        eval_clusters,
+                        pooling,
+                    )?,
+                )
+            } else {
+                (h_score_full, b_score_full)
+            };
 
-            // The same readings against the MATCHED panel baselines, where each
-            // benign reference is measured under the instruction it answers.
-            static_echo_harmful.push(harmful_score - static_baseline_echo);
-            static_echo_benign.push(benign_score - static_baseline_echo);
-            static_natural_harmful.push(harmful_score - static_baseline_natural);
-            static_natural_benign.push(benign_score - static_baseline_natural);
+            let h_live = full_weight * (h_score_full - baseline_full)
+                + lopo_weight * (h_score_ho - baseline_ho);
+            let b_live = full_weight * (b_score_full - baseline_full)
+                + lopo_weight * (b_score_ho - baseline_ho);
+            let h_echo = full_weight * (h_score_full - static_baseline_echo)
+                + lopo_weight * (h_score_ho - echo_base_eval);
+            let b_echo = full_weight * (b_score_full - static_baseline_echo)
+                + lopo_weight * (b_score_ho - echo_base_eval);
+            let h_nat = full_weight * (h_score_full - static_baseline_natural)
+                + lopo_weight * (h_score_ho - nat_base_eval);
+            let b_nat = full_weight * (b_score_full - static_baseline_natural)
+                + lopo_weight * (b_score_ho - nat_base_eval);
 
-            style_live_harmful[style_index].push(ah);
-            style_live_benign[style_index].push(ab);
-            style_echo_harmful[style_index].push(harmful_score - static_baseline_echo);
-            style_echo_benign[style_index].push(benign_score - static_baseline_echo);
-            style_natural_harmful[style_index].push(harmful_score - static_baseline_natural);
-            style_natural_benign[style_index].push(benign_score - static_baseline_natural);
+            excess_harmful.push(h_live);
+            excess_benign.push(b_live);
+            static_echo_harmful.push(h_echo);
+            static_echo_benign.push(b_echo);
+            static_natural_harmful.push(h_nat);
+            static_natural_benign.push(b_nat);
+
+            style_live_harmful[style_index].push(h_live);
+            style_live_benign[style_index].push(b_live);
+            style_echo_harmful[style_index].push(h_echo);
+            style_echo_benign[style_index].push(b_echo);
+            style_natural_harmful[style_index].push(h_nat);
+            style_natural_benign[style_index].push(b_nat);
+
+            if prompt.contains(h_primary.as_str()) {
+                obeys_harmful.push(h_echo);
+            } else {
+                violates_harmful.push(h_live);
+            }
+            if prompt.contains(b_primary.as_str()) {
+                obeys_benign.push(b_echo);
+            } else {
+                violates_benign.push(b_live);
+            }
         }
     }
 
@@ -1543,41 +1646,20 @@ fn main() -> Result<()> {
         .iter()
         .cloned()
         .fold(f32::NEG_INFINITY, f32::max);
-    let (harm_excess_threshold, excess_separated, excess_false_pos) =
+    let (live_threshold, live_blocked, live_fp) =
         fit_excess_threshold(&excess_harmful, &excess_benign, args.fp_budget_pct);
     println!(
-        "[*] harm excess (vs the per-session baseline): harmful min {harm_floor:+.4}, \
-         benign max {benign_ceiling:+.4}, threshold {harm_excess_threshold:+.4} \
-         -> blocks {excess_separated}/{} harmful, {excess_false_pos}/{} benign",
+        "[*] harm excess (live panel):          harmful min {harm_floor:+.4}, \
+         benign max {benign_ceiling:+.4}, threshold {live_threshold:+.4} \
+         -> blocks {live_blocked}/{} harmful, {live_fp}/{} benign",
         excess_harmful.len(),
         excess_benign.len()
-    );
-
-    // The same operating point computed on the ABSOLUTE reading, and against
-    // each of the three baselines. The one that separates the populations best
-    // on the calibration set is the one the guard runs with.
-    let abs_floor = abs_excess_harmful
-        .iter()
-        .cloned()
-        .fold(f32::INFINITY, f32::min);
-    let abs_ceiling = abs_excess_benign
-        .iter()
-        .cloned()
-        .fold(f32::NEG_INFINITY, f32::max);
-    let (abs_threshold, abs_blocked, abs_fp) =
-        fit_excess_threshold(&abs_excess_harmful, &abs_excess_benign, args.fp_budget_pct);
-    println!(
-        "[*] harm excess (ABSOLUTE, live panel):   harmful min {abs_floor:+.4}, \
-         benign max {abs_ceiling:+.4}, threshold {abs_threshold:+.4} \
-         -> blocks {abs_blocked}/{} harmful, {abs_fp}/{} benign",
-        abs_excess_harmful.len(),
-        abs_excess_benign.len()
     );
 
     let (echo_threshold, echo_blocked, echo_fp) =
         fit_excess_threshold(&static_echo_harmful, &static_echo_benign, args.fp_budget_pct);
     println!(
-        "[*] harm excess (ABSOLUTE, MATCHED panel): harmful min {:+.4}, \
+        "[*] harm excess (matched-echo panel):  harmful min {:+.4}, \
          benign max {:+.4}, threshold {echo_threshold:+.4} \
          -> blocks {echo_blocked}/{} harmful, {echo_fp}/{} benign",
         static_echo_harmful
@@ -1595,7 +1677,7 @@ fn main() -> Result<()> {
     let (natural_threshold, natural_blocked, natural_fp) =
         fit_excess_threshold(&static_natural_harmful, &static_natural_benign, args.fp_budget_pct);
     println!(
-        "[*] harm excess (ABSOLUTE, MATCHED natural): harmful min {:+.4}, \
+        "[*] harm excess (matched-natural):     harmful min {:+.4}, \
          benign max {:+.4}, threshold {natural_threshold:+.4} \
          -> blocks {natural_blocked}/{} harmful, {natural_fp}/{} benign",
         static_natural_harmful
@@ -1610,10 +1692,18 @@ fn main() -> Result<()> {
         static_natural_benign.len()
     );
 
-    // Pick the baseline with the best separation on the calibration set: most
-    // harmful calls caught, and among those the fewest false positives.
+    let n_total_h = excess_harmful.len().max(1) as f64;
+    let n_total_b = excess_benign.len().max(1) as f64;
+    let youden_of = |tp: usize, fp: usize| -> f64 {
+        ((tp as f64 / n_total_h) - (fp as f64 / n_total_b) * 1.0e6).round() / 1.0e6
+    };
+    let _ = youden_of;
+    let score_youden = |tp: usize, fp: usize| -> f64 {
+        (tp as f64 / n_total_h) - (fp as f64 / n_total_b)
+    };
+
     let candidates = [
-        ("live", abs_blocked, abs_fp, abs_threshold, f32::NEG_INFINITY),
+        ("live", live_blocked, live_fp, live_threshold, f32::NEG_INFINITY),
         ("matched-echo", echo_blocked, echo_fp, echo_threshold, static_baseline_echo),
         (
             "matched-natural",
@@ -1625,7 +1715,12 @@ fn main() -> Result<()> {
     ];
     let mut best = &candidates[0];
     for candidate in candidates.iter().skip(1) {
-        if candidate.1 > best.1 || (candidate.1 == best.1 && candidate.2 < best.2) {
+        let j_cand = score_youden(candidate.1, candidate.2);
+        let j_best = score_youden(best.1, best.2);
+        if j_cand > j_best + 1e-6
+            || ((j_cand - j_best).abs() <= 1e-6
+                && (candidate.1 > best.1 || (candidate.1 == best.1 && candidate.2 < best.2)))
+        {
             best = candidate;
         }
     }
@@ -1633,13 +1728,11 @@ fn main() -> Result<()> {
         "[*] baseline selected: {} (blocks {}/{} harmful, {}/{} benign)",
         best.0,
         best.1,
-        static_echo_harmful.len(),
+        excess_harmful.len(),
         best.2,
-        static_echo_benign.len()
+        excess_benign.len()
     );
 
-    // Per prompt style: a baseline can win overall and still lose a whole
-    // style, and the style it loses is the one the guard has to survive.
     println!("[*] per-style separation (blocks harmful / wrongly blocks benign):");
     println!(
         "    {:<14} {:>16} {:>16} {:>16}",
@@ -1649,11 +1742,11 @@ fn main() -> Result<()> {
         let live = (
             style_live_harmful[index]
                 .iter()
-                .filter(|v| **v >= abs_threshold)
+                .filter(|v| **v >= live_threshold)
                 .count(),
             style_live_benign[index]
                 .iter()
-                .filter(|v| **v >= abs_threshold)
+                .filter(|v| **v >= live_threshold)
                 .count(),
         );
         let echo = (
@@ -1683,84 +1776,7 @@ fn main() -> Result<()> {
             format!("{}/{}", natural.0, natural.1)
         );
     }
-    let _ = styles;
 
-    // The compliance-conditioned operating point.
-    //
-    // The panel penalty is a property of DISOBEYING the instruction, not of
-    // the command. When the intercepted call obeys the instruction and the
-    // panel references do not, the panel is inflated relative to the call and
-    // the excess is understated. When both violate, the penalty is on both
-    // sides and cancels. So the baseline follows the call:
-    //
-    //   the call obeys the instruction -> the matched panel (no penalty)
-    //   the call violates it          -> the live panel (penalty on both sides)
-    //
-    // "Obeys" is decidable at runtime: the command string appears in the
-    // instruction the agent was given.
-    let mut obeys_harmful: Vec<f32> = Vec::new();
-    let mut obeys_benign: Vec<f32> = Vec::new();
-    let mut violates_harmful: Vec<f32> = Vec::new();
-    let mut violates_benign: Vec<f32> = Vec::new();
-    let mut obeys_harmful_natural: Vec<f32> = Vec::new();
-    let mut obeys_benign_natural: Vec<f32> = Vec::new();
-    for (user, harmful_spec, benign_spec, _cluster) in pairs.iter() {
-        let (h_tool, h_args, h_primary) = parse_tool_call_spec(harmful_spec);
-        let (b_tool, b_args, b_primary) = parse_tool_call_spec(benign_spec);
-        for prompt in prompt_variants(user, &h_primary, &b_primary) {
-            let prefix = tool_call_span_prefix(&prompt);
-            let mut baseline = f32::NEG_INFINITY;
-            for cmd in BENIGN_REFERENCE_COMMANDS {
-                let reference_text = render_reference_tool_call_turn(&prompt, cmd);
-                let c = harm_reading(
-                    &mut engine,
-                    &tokenizer,
-                    &reference_text,
-                    Some(span_start_for(&tokenizer, &reference_text, &prefix)),
-                    None,
-                    &copy_dir,
-                    &clusters,
-                    pooling,
-                )?;
-                if c > baseline {
-                    baseline = c;
-                }
-            }
-            for ((tool_name, tool_args, primary), is_harmful) in [
-                ((&h_tool, &h_args, &h_primary), true),
-                ((&b_tool, &b_args, &b_primary), false),
-            ] {
-                let call_text = render_tool_call_turn(&prompt, tool_name, tool_args);
-                let score = harm_reading(
-                    &mut engine,
-                    &tokenizer,
-                    &call_text,
-                    Some(span_start_for(&tokenizer, &call_text, &prefix)),
-                    None,
-                    &copy_dir,
-                    &clusters,
-                    pooling,
-                )?;
-                let obeys = prompt.contains(primary.as_str());
-                if obeys {
-                    if is_harmful {
-                        obeys_harmful.push(score - static_baseline_echo);
-                        obeys_harmful_natural.push(score - static_baseline_natural);
-                    } else {
-                        obeys_benign.push(score - static_baseline_echo);
-                        obeys_benign_natural.push(score - static_baseline_natural);
-                    }
-                } else if is_harmful {
-                    violates_harmful.push(score - baseline);
-                } else {
-                    violates_benign.push(score - baseline);
-                }
-            }
-        }
-    }
-    let _ = (obeys_harmful_natural, obeys_benign_natural);
-
-    // Fit the two groups and report what the compliance-conditioned rule buys.
     let (obeys_threshold, obeys_tp, obeys_fp) =
         fit_excess_threshold(&obeys_harmful, &obeys_benign, args.fp_budget_pct);
     let (violates_threshold, violates_tp, violates_fp) =
@@ -1781,29 +1797,35 @@ fn main() -> Result<()> {
     let conditioned_fp = obeys_fp + violates_fp;
     println!(
         "[*] compliance-conditioned total: blocks {conditioned_tp}/{} harmful, \
-         {conditioned_fp}/{} benign  (live-panel baseline for comparison: \
-         {abs_blocked}/{} harmful, {abs_fp}/{} benign)",
+         {conditioned_fp}/{} benign  (best single baseline {}: \
+         {}/{} harmful, {}/{} benign)",
         obeys_harmful.len() + violates_harmful.len(),
         obeys_benign.len() + violates_benign.len(),
-        abs_excess_harmful.len(),
-        abs_excess_benign.len()
+        best.0,
+        best.1,
+        excess_harmful.len(),
+        best.2,
+        excess_benign.len()
     );
-    // The compliance-conditioned rule wins when it catches more harmful calls
-    // at no more than the live panel's false-positive count.
-    let use_compliance = conditioned_tp > abs_blocked
-        || (conditioned_tp == abs_blocked && conditioned_fp <= abs_fp);
+    let conditioned_j = score_youden(conditioned_tp, conditioned_fp);
+    let selected_j = score_youden(best.1, best.2);
+    let use_compliance = conditioned_j > selected_j + 1e-6
+        || ((conditioned_j - selected_j).abs() <= 1e-6
+            && (conditioned_tp > best.1
+                || (conditioned_tp == best.1 && conditioned_fp < best.2)));
     println!(
         "[*] operating point selected: {}",
         if use_compliance {
             "compliance-conditioned (matched panel for calls that obey the \
              instruction, live panel for calls that violate it)"
         } else {
-            "live panel"
+            best.0
         }
     );
     let selected_threshold = best.3;
     let selected_static_baseline = best.4;
     let use_static_panel = selected_static_baseline.is_finite();
+    let saved_excess_threshold = selected_threshold;
 
     // 2. Task-drift direction.
     let mut drift_deltas: Vec<Array> = Vec::new();
@@ -1859,11 +1881,7 @@ fn main() -> Result<()> {
     );
 
     // 3. Save in the schema `RepeSensor::load_safetensors` expects.
-    let (saved_excess_threshold, saved_threshold) = if absolute_mode {
-        (selected_threshold, harm_threshold)
-    } else {
-        (harm_excess_threshold, harm_threshold)
-    };
+    let saved_threshold = harm_threshold;
     println!(
         "[*] decision mode: {} (threshold {saved_excess_threshold:+.4})",
         if absolute_mode { "absolute" } else { "relative" }
@@ -1986,10 +2004,12 @@ fn main() -> Result<()> {
     metadata.insert("copy_mode_orthogonalized".to_string(), "true".to_string());
     metadata.insert("copy_channel_pairs".to_string(), copy_deltas.len().to_string());
     metadata.insert("baseline_mode".to_string(), best.0.to_string());
-    metadata.insert(
-        "benign_baseline".to_string(),
-        format!("{selected_static_baseline:.6}"),
-    );
+    if use_static_panel {
+        metadata.insert(
+            "benign_baseline".to_string(),
+            format!("{selected_static_baseline:.6}"),
+        );
+    }
     metadata.insert(
         "benign_baseline_matched".to_string(),
         format!("{static_baseline_echo:.6}"),
