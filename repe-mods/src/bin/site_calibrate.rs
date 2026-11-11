@@ -33,7 +33,7 @@ mod site_calibration;
 
 use site_calibration::{
     build_engine, conformal_upper_threshold, cosine, read_artifact_clusters,
-    read_artifact_metadata, read_labels, refit, remeasure_labels,
+    read_artifact_metadata, read_labels, refit_with_mode, remeasure_labels,
 };
 
 /// The tensors the refit does not touch and therefore carries over.
@@ -227,15 +227,17 @@ fn main() -> Result<()> {
         args.model.display()
     );
 
-    let refit = refit(
+    let absolute_reading = decision_mode.eq_ignore_ascii_case("absolute");
+    let refit = refit_with_mode(
         &mut engine,
         &tokenizer,
         &labels,
         &previous_raw,
         pooling,
+        absolute_reading,
     )?;
     println!(
-        "[*] refit: {} harmful examples + {} benign examples (the extractor's 18 calibration \
+        "[*] refit: {} harmful examples + {} benign examples (the extractor's 24 calibration \
          pairs are the base), {} echo-vs-goal copy pairs",
         refit.harmful_examples, refit.benign_examples, refit.copy_pairs
     );
@@ -248,7 +250,8 @@ fn main() -> Result<()> {
     }
     match refit.whitening_shrinkage {
         Some(shrinkage) => println!(
-            "[*] whitening: Ledoit-Wolf over {} cluster centroids, shrinkage {shrinkage:.12}",
+            "[*] whitening: Fisher Ledoit-Wolf over {} residuals ({} clusters), shrinkage {shrinkage:.12}",
+            refit.whitening_samples,
             refit.whitened_clusters.len()
         ),
         None => println!("[!] whitening: no shrinkage was fitted"),
@@ -307,7 +310,6 @@ fn main() -> Result<()> {
     // artifact's own convention (the same decision mode, the same matched
     // baseline), so the difference is the refit's and nothing else.
     // ---------------------------------------------------------------------
-    let absolute_reading = decision_mode.eq_ignore_ascii_case("absolute");
     let previous_baseline = metadata
         .get("benign_baseline_matched")
         .and_then(|value| value.trim().parse::<f32>().ok())
@@ -409,6 +411,10 @@ fn main() -> Result<()> {
     tensors.insert(
         "benign_panel_natural".to_string(),
         refit.panel_natural_states.as_type::<f32>()?,
+    );
+    tensors.insert(
+        "harmful_panel".to_string(),
+        refit.harmful_panel_states.as_type::<f32>()?,
     );
     tensors.insert(
         "benign_baseline_matched".to_string(),
@@ -547,7 +553,7 @@ fn main() -> Result<()> {
     }
     out_metadata.insert(
         "whitening_samples".to_string(),
-        refit.whitened_clusters.len().to_string(),
+        refit.whitening_samples.to_string(),
     );
     for key in ["harm_threshold", "drift_threshold"] {
         if let Some(value) = metadata.get(key) {
