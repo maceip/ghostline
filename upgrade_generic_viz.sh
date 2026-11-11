@@ -2034,9 +2034,9 @@ pub fn render_tool_call_turn(
     tool_name: &str,
     tool_args: &serde_json::Value,
 ) -> String {
+    let tool_args = python_json(tool_args);
     format!(
-        "<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{tool_name}({})",
-        python_json(tool_args)
+        "<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{tool_name}({tool_args})"
     )
 }
 
@@ -2230,21 +2230,17 @@ pub struct PcaReferenceTelemetry {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Pooling {
     /// The mean residual over the span, then a single cosine.
-    ///
-    /// The historical reading. A 30-token tool call dilutes a two-token
-    /// destructive command into the average of the whole JSON envelope.
     Mean,
-    /// Token-wise LogSumExp pooling: the cluster score is pooled across the
-    /// span's tokens with a temperature, so the strongest token dominates.
+    /// Length-invariant LogMeanExp pooling across per-token cosines:
+    /// `S_c = max_t s_c(t) + (1/beta) * ln((1/T) * sum_t exp(beta * (s_c(t) - max)))`.
     ///
-    /// `S_c = max_t s_c(t) + (1/beta) * ln sum_t exp(beta * (s_c(t) - max))`
-    ///
-    /// `beta` is the inverse temperature: large values approach a hard max,
-    /// small values approach the mean. The pooled value stays on the cosine
-    /// scale, so a threshold calibrated under this pooling is comparable in
-    /// magnitude to a mean-pooled one — but it is a *different statistic* and
-    /// has to be calibrated separately.
+    /// Strictly bounded in `[mean_t s_c(t), max_t s_c(t)]`: large `beta` approaches
+    /// the hard token maximum, small `beta` approaches the token mean, with zero
+    /// sequence-length bias.
     LogSumExp { beta: f32 },
+    /// Convex combination `(1 - weight) * mean_pooled_cosine + weight * LogMeanExp_beta`,
+    /// preserving holistic command semantics while surfacing short dangerous clauses.
+    Hybrid { beta: f32, weight: f32 },
 }
 
 impl Default for Pooling {
@@ -2254,21 +2250,53 @@ impl Default for Pooling {
 }
 
 impl Pooling {
-    /// Parse the `pooling` key of the artifact metadata.
-    ///
-    /// `mean` (the default) and `lse` / `lse:<beta>` are understood. An
-    /// unknown value falls back to the mean rather than silently changing
-    /// the reading the artifact was calibrated under.
-    pub fn from_metadata(meta: &HashMap<String, String>) -> Self {
-        match meta.get("pooling").map(|s| s.as_str()) {
-            Some("lse") => Pooling::LogSumExp { beta: 12.0 },
-            Some(spec) if spec.starts_with("lse:") => spec["lse:".len()..]
+    /// Parse a pooling specification string (`"mean"`, `"lse"`, `"lse:<beta>"`,
+    /// `"hybrid"`, or `"hybrid:<beta>:<weight>"`).
+    pub fn parse_spec(spec: &str) -> Self {
+        let trimmed = spec.trim();
+        if trimmed.eq_ignore_ascii_case("mean") || trimmed.is_empty() {
+            return Pooling::Mean;
+        }
+        if trimmed.eq_ignore_ascii_case("lse") {
+            return Pooling::LogSumExp { beta: 12.0 };
+        }
+        if let Some(rest) = trimmed.strip_prefix("lse:") {
+            return rest
                 .parse::<f32>()
                 .ok()
                 .filter(|b| b.is_finite() && *b > 0.0)
                 .map(|beta| Pooling::LogSumExp { beta })
-                .unwrap_or_default(),
-            _ => Pooling::Mean,
+                .unwrap_or_default();
+        }
+        if trimmed.eq_ignore_ascii_case("hybrid") {
+            return Pooling::Hybrid {
+                beta: 10.0,
+                weight: 0.35,
+            };
+        }
+        if let Some(rest) = trimmed.strip_prefix("hybrid:") {
+            let mut parts = rest.split(':');
+            let beta = parts
+                .next()
+                .and_then(|s| s.parse::<f32>().ok())
+                .filter(|b| b.is_finite() && *b > 0.0);
+            let weight = parts
+                .next()
+                .and_then(|s| s.parse::<f32>().ok())
+                .filter(|w| w.is_finite() && (0.0..=1.0).contains(w))
+                .unwrap_or(0.35);
+            if let Some(beta) = beta {
+                return Pooling::Hybrid { beta, weight };
+            }
+        }
+        Pooling::Mean
+    }
+
+    /// Parse the `pooling` key of the artifact metadata.
+    pub fn from_metadata(meta: &HashMap<String, String>) -> Self {
+        match meta.get("pooling").map(|s| s.as_str()) {
+            Some(spec) => Self::parse_spec(spec),
+            None => Pooling::Mean,
         }
     }
 
@@ -2277,6 +2305,7 @@ impl Pooling {
         match self {
             Pooling::Mean => "mean".to_string(),
             Pooling::LogSumExp { beta } => format!("lse:{beta}"),
+            Pooling::Hybrid { beta, weight } => format!("hybrid:{beta}:{weight}"),
         }
     }
 }
@@ -2403,49 +2432,50 @@ pub fn token_score_table(
         Some(s) => (s as i32).min(seq_len.saturating_sub(1)),
         None => seq_len.saturating_sub(1),
     };
-    let span = h_layer.index((0, start..seq_len, ..)).as_type::<f32>()?;
-    let span_len = (seq_len - start) as usize;
+    let span_len = (seq_len - start).max(1) as usize;
     let n_clusters = cfg.directions.len();
     if n_clusters == 0 {
         anyhow::bail!("token_score_table needs at least one direction");
     }
 
+    let span_raw = h_layer
+        .index((0, start..seq_len, ..))
+        .as_type::<f32>()?
+        .reshape(&[span_len as i32, -1])?;
+
     // Shift away from the trusted anchor, per token.
     let span = match cfg.anchor.as_ref() {
-        Some(anchor) => subtract(&span, anchor)?,
-        None => span,
+        Some(anchor) => {
+            let a = anchor.as_type::<f32>()?.reshape(&[1, -1])?;
+            subtract(&span_raw, &a)?
+        }
+        None => span_raw,
     };
 
-    // Unit length along the feature axis.
+    // Unit length along the feature axis: [T, D].
     let sq = multiply(&span, &span)?;
     let norm = sqrt(&sum_axis(&sq, -1, true)?)?;
     let mut unit = divide(&span, &add(&norm, &Array::from_f32(1e-6))?)?;
 
     // Project the copy channel out of every token, then renormalise.
     if let Some(copy) = cfg.copy_dir.as_ref() {
-        let copy_b = copy.reshape(&[1, 1, -1])?;
+        let copy_b = copy.as_type::<f32>()?.reshape(&[1, -1])?;
         let proj = sum_axis(&multiply(&unit, &copy_b)?, -1, true)?;
-        let projected = subtract(&unit, &multiply(&copy_b, &proj)?)?;
+        let projected = subtract(&unit, &multiply(&proj, &copy_b)?)?;
         let sq2 = multiply(&projected, &projected)?;
         let norm2 = sqrt(&sum_axis(&sq2, -1, true)?)?;
         unit = divide(&projected, &add(&norm2, &Array::from_f32(1e-6))?)?;
     }
 
-    // One row of per-token cosines per direction.
-    let mut per_direction: Vec<Vec<f32>> = Vec::with_capacity(n_clusters);
+    // Single batched GEMM `[T, D] @ [D, C] -> [T, C]` (already token-major).
+    let mut dir_cols = Vec::with_capacity(n_clusters);
     for dir in &cfg.directions {
-        let dir_b = dir.reshape(&[1, 1, -1])?;
-        let dots = sum_axis(&multiply(&unit, &dir_b)?, -1, false)?;
-        dots.eval()?;
-        per_direction.push(dots.as_slice::<f32>().to_vec());
+        dir_cols.push(dir.as_type::<f32>()?.reshape(&[-1])?);
     }
-    // Re-order to token-major so a token's scores sit next to each other.
-    let mut scores = vec![0f32; span_len * n_clusters];
-    for (c, row) in per_direction.iter().enumerate() {
-        for t in 0..span_len {
-            scores[t * n_clusters + c] = row[t];
-        }
-    }
+    let dir_mat_t = stack(&dir_cols, 1)?; // [D, C]
+    let scores_mat = matmul(&unit, &dir_mat_t)?.contiguous()?;
+    scores_mat.eval()?;
+    let scores = scores_mat.as_slice::<f32>().to_vec();
 
     Ok(TokenScoreTable {
         scores,
@@ -2469,20 +2499,26 @@ pub fn argmax_row(table: &TokenScoreTable, cluster: usize) -> (usize, f32) {
     (best_idx, best_val)
 }
 
-/// LogSumExp pooling of one cluster's token scores.
+/// Length-invariant LogMeanExp pooling of one cluster's token scores.
 ///
-/// `S = max_t s(t) + (1/beta) * ln sum_t exp(beta * (s(t) - max))`
+/// `S = max_t s(t) + (1/beta) * ln((1/T) * sum_t exp(beta * (s(t) - max)))`
 ///
-/// `beta` is the inverse temperature: large values approach a hard max,
-/// small values approach the mean. The result stays on the cosine scale.
+/// Dividing by `T` inside the logarithm eliminates the `+(ln T)/beta` sequence-length
+/// bias of unnormalised LogSumExp and keeps `S` strictly bounded inside
+/// `[mean_t s(t), max_t s(t)]` (and therefore inside `[-1, 1]`).
 pub fn lse_pool(table: &TokenScoreTable, cluster: usize, beta: f32) -> (f32, usize, f32) {
+    if table.span_len == 0 {
+        return (0.0, 0, 0.0);
+    }
+    let beta = beta.max(1e-4);
     let (peak_idx, peak_val) = argmax_row(table, cluster);
     let mut acc = 0f32;
     for t in 0..table.span_len {
         let v = table.scores[t * table.n_clusters + cluster];
         acc += (beta * (v - peak_val)).exp();
     }
-    let pooled = peak_val + acc.ln() / beta;
+    let mean_exp = (acc / table.span_len as f32).max(1e-30);
+    let pooled = peak_val + mean_exp.ln() / beta;
     (pooled, peak_idx, peak_val)
 }
 
@@ -2530,6 +2566,10 @@ pub struct RepeSensor {
     /// `None` means the artifact predates this measurement and no copy
     /// channel is removed.
     pub v_copy_mode: Option<Array>,
+    /// Unit vector [D] capturing the shared benign shell/tool-call syntax mode,
+    /// used to orthogonalize live contrastive hot-reloads against generic shell
+    /// boilerplate when the artifact measured it.
+    pub v_benign_shell: Option<Array>,
     /// Unit vector [D] for indirect prompt injection / task drift from untrusted repo files
     pub v_drift: Array,
     /// Orthonormal [K, D] PCA basis capturing multi-mode unsafe tool directions
@@ -2766,24 +2806,37 @@ impl RepeSensor {
         }
 
         let mut exploit_cluster = Vec::new();
-        for key in ["v_harm_clusters", "v_harm_clusters_whitened"] {
-            if let Some(cl) = tensors.get(key) {
-                if let Ok(cf) = cl.as_type::<f32>() {
-                    let rows = cf.shape().first().copied().unwrap_or(0);
-                    for r in 0..rows {
-                        let row = cf.index((r, ..));
-                        if let Some(pt) = project_2d(&row) {
-                            exploit_cluster.push(pt);
-                        }
+        if let Some(hpanel) = tensors.get("harmful_panel") {
+            if let Ok(hf) = hpanel.as_type::<f32>() {
+                let rows = hf.shape().first().copied().unwrap_or(0);
+                for r in 0..rows {
+                    let row = hf.index((r, ..));
+                    if let Some(pt) = project_2d(&row) {
+                        exploit_cluster.push(pt);
                     }
                 }
             }
         }
-        if let Some(pt) = project_2d(v_harm) {
-            exploit_cluster.push(pt);
-        }
-        if let Some(pt) = project_2d(v_drift) {
-            exploit_cluster.push(pt);
+        if exploit_cluster.is_empty() {
+            for key in ["v_harm_clusters", "v_harm_clusters_whitened"] {
+                if let Some(cl) = tensors.get(key) {
+                    if let Ok(cf) = cl.as_type::<f32>() {
+                        let rows = cf.shape().first().copied().unwrap_or(0);
+                        for r in 0..rows {
+                            let row = cf.index((r, ..));
+                            if let Some(pt) = project_2d(&row) {
+                                exploit_cluster.push(pt);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(pt) = project_2d(v_harm) {
+                exploit_cluster.push(pt);
+            }
+            if let Some(pt) = project_2d(v_drift) {
+                exploit_cluster.push(pt);
+            }
         }
 
         Ok(Self {
@@ -2804,6 +2857,10 @@ impl RepeSensor {
             },
             v_copy_mode: match tensors.get("v_copy_mode") {
                 Some(copy) => Some(Self::unit_norm(copy)?),
+                None => None,
+            },
+            v_benign_shell: match tensors.get("v_benign_shell") {
+                Some(bs) => Some(Self::unit_norm(bs)?),
                 None => None,
             },
             v_drift: Self::unit_norm(v_drift)?,
@@ -2848,6 +2905,7 @@ impl RepeSensor {
             v_harm,
             v_harm_clusters: Vec::new(),
             v_copy_mode: None,
+            v_benign_shell: None,
             v_drift,
             pca_basis,
             trusted_user_anchor: None,
@@ -2875,6 +2933,99 @@ impl RepeSensor {
         })
     }
 
+    /// Construct a calibrated `RepeSensor` directly in memory from RepE direction
+    /// tensors without requiring a `.safetensors` file on disk.
+    pub fn from_directions(
+        target_layer: usize,
+        harm_clusters: Vec<Array>,
+        v_drift: Array,
+        pca_basis: Option<Array>,
+        pooling: Pooling,
+        absolute_harm_reading: bool,
+    ) -> Result<Self> {
+        let v_drift_norm = Self::unit_norm(&v_drift)?;
+        let d_model = v_drift_norm.shape().first().copied().unwrap_or(0);
+        if d_model <= 0 {
+            anyhow::bail!("from_directions: v_drift must be a non-empty 1-D vector");
+        }
+        let mut norm_clusters = Vec::with_capacity(harm_clusters.len());
+        for c in &harm_clusters {
+            norm_clusters.push(Self::unit_norm(c)?);
+        }
+        let v_harm = if norm_clusters.is_empty() {
+            Array::zeros::<f32>(&[d_model])?
+        } else {
+            let stacked = stack(&norm_clusters, 0)?;
+            let mean_dir = mean_axes(&stacked, &[0], false)?;
+            Self::unit_norm(&mean_dir)?
+        };
+        let pca_basis = match pca_basis {
+            Some(b) => b.as_type::<f32>()?,
+            None => Array::zeros::<f32>(&[3, d_model])?,
+        };
+        mlx_rs::transforms::eval([&v_harm, &v_drift_norm, &pca_basis])?;
+        Ok(Self {
+            target_layer,
+            v_harm,
+            v_harm_clusters: norm_clusters,
+            v_copy_mode: None,
+            v_benign_shell: None,
+            v_drift: v_drift_norm,
+            pca_basis,
+            trusted_user_anchor: None,
+            clamp_threshold: None,
+            calibrated_harm_threshold: None,
+            calibrated_drift_threshold: None,
+            calibrated_harm_excess_threshold: None,
+            static_benign_baseline: None,
+            harm_excess_threshold_obeys: None,
+            harm_excess_threshold_violates: None,
+            layer_profile: Vec::new(),
+            layer_cluster_profile: Vec::new(),
+            layer_pca_profile: Vec::new(),
+            last_pca_coords: Vec::new(),
+            absolute_harm_reading,
+            pooling,
+            whitening: None,
+            whitening_shrinkage: None,
+            awq_channel_scales: None,
+            awq_salience_ratio: None,
+            user_anchor_by_layer: Vec::new(),
+            layer_trace: Vec::new(),
+            token_trace: Vec::new(),
+            pca_reference: PcaReferenceTelemetry::default(),
+        })
+    }
+
+    /// Attach a verbatim-copy nuisance direction `[D]` to project out at probe time.
+    pub fn with_copy_direction(mut self, v_copy: Array) -> Result<Self> {
+        let c = Self::unit_norm(&v_copy)?;
+        c.eval()?;
+        self.v_copy_mode = Some(c);
+        Ok(self)
+    }
+
+    /// Attach a shared shell-syntax direction `[D]` for live contrastive orthogonalization.
+    pub fn with_shell_direction(mut self, v_shell: Array) -> Result<Self> {
+        let s = Self::unit_norm(&v_shell)?;
+        s.eval()?;
+        self.v_benign_shell = Some(s);
+        Ok(self)
+    }
+
+    /// Configure static benign baseline and calibrated excess/drift thresholds.
+    pub fn with_thresholds(
+        mut self,
+        static_benign_baseline: Option<f32>,
+        harm_excess_threshold: Option<f32>,
+        drift_threshold: Option<f32>,
+    ) -> Self {
+        self.static_benign_baseline = static_benign_baseline;
+        self.calibrated_harm_excess_threshold = harm_excess_threshold;
+        self.calibrated_drift_threshold = drift_threshold;
+        self
+    }
+
     #[inline]
     pub fn unit_norm(v: &Array) -> Result<Array> {
         let vf = v.as_type::<f32>()?;
@@ -2882,29 +3033,41 @@ impl RepeSensor {
         Ok(divide(&vf, &add(&norm, &Array::from_f32(1e-6))?)?)
     }
 
-    /// Pool the residual over the tool-call span.
-    ///
-    /// `span_start` is the index of the first token of the span. When it is
-    /// unknown the last token is used — the historical behaviour. Averaging
-    /// over the span instead of reading one trailing token keeps the user's
-    /// own wording out of the measurement.
-    fn pooled_state(&self, h_layer: &Array, span_start: Option<usize>) -> Result<Array> {
+    /// Lazy mean residual over the tool-call span `[D]` (does not force a GPU sync).
+    #[inline]
+    fn pooled_state_lazy(&self, h_layer: &Array, span_start: Option<usize>) -> Result<Array> {
         let seq_len = h_layer.shape()[1];
         let start = match span_start {
             Some(s) => (s as i32).min(seq_len.saturating_sub(1)),
             None => seq_len.saturating_sub(1),
         };
         let slice = h_layer.index((0, start..seq_len, ..)).as_type::<f32>()?;
-        let pooled = mean_axes(&slice, &[0], false)?;
+        Ok(mean_axes(&slice, &[0], false)?)
+    }
+
+    /// Pool the residual over the tool-call span (`[D]`, evaluated).
+    ///
+    /// `span_start` is the index of the first token of the span. When it is
+    /// unknown the last token is used — the historical behaviour. Averaging
+    /// over the span instead of reading one trailing token keeps the user's
+    /// own wording out of the measurement.
+    pub fn pooled_state(&self, h_layer: &Array, span_start: Option<usize>) -> Result<Array> {
+        let pooled = self.pooled_state_lazy(h_layer, span_start)?;
         pooled.eval()?;
         Ok(pooled)
     }
 
-    /// The mean residual over every token of the sequence.
-    fn mean_state(h_layer: &Array) -> Result<Array> {
+    /// Lazy mean residual over every token of the sequence `[D]`.
+    #[inline]
+    fn mean_state_lazy(h_layer: &Array) -> Result<Array> {
         let seq_len = h_layer.shape()[1];
         let slice = h_layer.index((0, 0..seq_len, ..)).as_type::<f32>()?;
-        let pooled = mean_axes(&slice, &[0], false)?;
+        Ok(mean_axes(&slice, &[0], false)?)
+    }
+
+    /// The mean residual over every token of the sequence.
+    fn mean_state(h_layer: &Array) -> Result<Array> {
+        let pooled = Self::mean_state_lazy(h_layer)?;
         pooled.eval()?;
         Ok(pooled)
     }
@@ -2917,18 +3080,18 @@ impl RepeSensor {
     /// statistic has to shed.
     pub fn record_user_anchor(&mut self, h_layer: &Array) -> Result<()> {
         let anchor = Self::mean_state(h_layer)?;
-        anchor.eval()?;
         self.trusted_user_anchor = Some(anchor);
         Ok(())
     }
 
-    /// Record the mean user-turn anchor vector for a specific decoder layer `layer_idx`.
-    pub fn record_layer_anchor(&mut self, layer_idx: usize, h_layer: &Array) -> Result<()> {
+    /// Record a lazy mean user-turn anchor vector for `layer_idx` without forcing
+    /// a per-layer Metal synchronization; call `finalize_user_anchors` once after
+    /// `target_layer` to evaluate all layer anchors in a single batch.
+    pub fn record_layer_anchor_lazy(&mut self, layer_idx: usize, h_layer: &Array) -> Result<()> {
         if layer_idx == 0 {
             self.user_anchor_by_layer.clear();
         }
-        let anchor = Self::mean_state(h_layer)?;
-        anchor.eval()?;
+        let anchor = Self::mean_state_lazy(h_layer)?;
         if layer_idx == self.target_layer {
             self.trusted_user_anchor = Some(anchor.clone());
         }
@@ -2936,6 +3099,26 @@ impl RepeSensor {
             self.user_anchor_by_layer.push(anchor);
         } else if layer_idx < self.user_anchor_by_layer.len() {
             self.user_anchor_by_layer[layer_idx] = anchor;
+        }
+        Ok(())
+    }
+
+    /// Evaluate all queued user-turn layer anchors in a single GPU batch.
+    pub fn finalize_user_anchors(&mut self) -> Result<()> {
+        if !self.user_anchor_by_layer.is_empty() {
+            mlx_rs::transforms::eval(&self.user_anchor_by_layer)?;
+        }
+        if let Some(ref anchor) = self.trusted_user_anchor {
+            anchor.eval()?;
+        }
+        Ok(())
+    }
+
+    /// Record the mean user-turn anchor vector for a specific decoder layer `layer_idx`.
+    pub fn record_layer_anchor(&mut self, layer_idx: usize, h_layer: &Array) -> Result<()> {
+        self.record_layer_anchor_lazy(layer_idx, h_layer)?;
+        if let Some(last) = self.user_anchor_by_layer.get(layer_idx) {
+            last.eval()?;
         }
         Ok(())
     }
@@ -2958,6 +3141,120 @@ impl RepeSensor {
         Ok((harm, scores.cluster_scores, pca))
     }
 
+    /// Fused per-layer telemetry capture: computes `layer_profile`,
+    /// `layer_cluster_profile`, `layer_pca_profile`, and `layer_trace` in a single
+    /// batched MLX evaluation instead of 10+ synchronous per-layer `.eval()` calls.
+    ///
+    /// When `need_span_scores` is true (e.g. at `target_layer`), returns the cached
+    /// `(harm_cosine, SpanScores, pca_coords)` so `inspect_and_maybe_clamp_with_cached`
+    /// can reuse them directly without recomputation.
+    pub fn record_full_layer_telemetry(
+        &mut self,
+        layer_idx: usize,
+        h_layer: &Array,
+        span_start: Option<usize>,
+        need_span_scores: bool,
+    ) -> Result<Option<(f32, SpanScores, Vec<f32>)>> {
+        let pooled = self.pooled_state_lazy(h_layer, span_start)?;
+        let norm_arr = sqrt(&sum(&multiply(&pooled, &pooled)?, false)?)?;
+        let h_unit = Self::unit_norm(&pooled)?;
+        let pca_arr = matmul(&self.pca_basis, &h_unit)?.contiguous()?;
+
+        let seq_len = h_layer.shape()[1];
+        let d_model = h_layer.shape()[2];
+        let slice_len = d_model.min(8);
+        let last_slice = h_layer
+            .index((0, seq_len.saturating_sub(1), 0..slice_len))
+            .as_type::<f32>()?
+            .contiguous()?;
+
+        let anchor_ref = self
+            .user_anchor_by_layer
+            .get(layer_idx)
+            .or(self.trusted_user_anchor.as_ref());
+        let dot_opt = match anchor_ref {
+            Some(anchor) => {
+                let a_unit = Self::unit_norm(anchor)?;
+                Some(sum(&multiply(&h_unit, &a_unit)?, false)?)
+            }
+            None => None,
+        };
+
+        let (cos_harm, cluster_scores, pca_vec, cached_span) =
+            if !need_span_scores && matches!(self.pooling, Pooling::Mean) {
+                let dims = self.harm_directions();
+                let probe = self.probe_of(&pooled)?;
+                let dir_mat = stack(&dims, 0)?; // [C, D]
+                let cluster_arr = matmul(&dir_mat, &probe)?.contiguous()?;
+                if let Some(ref dot_arr) = dot_opt {
+                    mlx_rs::transforms::eval([
+                        &norm_arr,
+                        &cluster_arr,
+                        &pca_arr,
+                        &last_slice,
+                        dot_arr,
+                    ])?;
+                } else {
+                    mlx_rs::transforms::eval([&norm_arr, &cluster_arr, &pca_arr, &last_slice])?;
+                }
+                let clusters = cluster_arr.as_slice::<f32>().to_vec();
+                let harm = clusters
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let pca_v = pca_arr.as_slice::<f32>().to_vec();
+                (harm, clusters, pca_v, None)
+            } else {
+                if let Some(ref dot_arr) = dot_opt {
+                    mlx_rs::transforms::eval([&norm_arr, &pca_arr, &last_slice, dot_arr])?;
+                } else {
+                    mlx_rs::transforms::eval([&norm_arr, &pca_arr, &last_slice])?;
+                }
+                let (harm, scores) = self.span_harm_reading(h_layer, span_start)?;
+                let clusters = scores.cluster_scores.clone();
+                let pca_v = pca_arr.as_slice::<f32>().to_vec();
+                let cached = if need_span_scores {
+                    Some((harm, scores, pca_v.clone()))
+                } else {
+                    None
+                };
+                (harm, clusters, pca_v, cached)
+            };
+
+        let l2_norm = norm_arr.item_exact::<f32>();
+        let cos_drift = match dot_opt {
+            Some(dot_arr) => (1.0 - dot_arr.item_exact::<f32>()).clamp(0.0, 2.0),
+            None => 0.0,
+        };
+        let tensor_slice_preview = last_slice.as_slice::<f32>().to_vec();
+        let pca_coords_2d = [
+            pca_vec.first().copied().unwrap_or(0.0),
+            pca_vec.get(1).copied().unwrap_or(0.0),
+        ];
+
+        let base = self.static_benign_baseline.unwrap_or(0.0);
+        let thr = self
+            .calibrated_harm_excess_threshold
+            .or(self.harm_excess_threshold_violates)
+            .unwrap_or(0.011);
+        let guard_logit = (cos_harm - base) - thr;
+
+        self.layer_profile.push(cos_harm);
+        self.layer_cluster_profile.push(cluster_scores);
+        self.layer_pca_profile.push(pca_vec);
+        self.layer_trace.push(LayerTraceMetric {
+            layer: layer_idx,
+            l2_norm,
+            cos_harm,
+            cos_drift,
+            guard_logit,
+            tensor_slice_preview,
+            pca_coords: pca_coords_2d,
+        });
+
+        Ok(cached_span)
+    }
+
     /// Record a `LayerTraceMetric` (`l2_norm`, `cos_harm`, `cos_drift`, `guard_logit`,
     /// and the first 8 floats of `h_l[last_token]`) for `GhostlineTraceFrame`.
     pub fn record_layer_trace(
@@ -2967,9 +3264,18 @@ impl RepeSensor {
         span_start: Option<usize>,
         cos_harm: f32,
     ) -> Result<()> {
-        let pooled = self.pooled_state(h_layer, span_start)?;
+        let pooled = self.pooled_state_lazy(h_layer, span_start)?;
         let norm_arr = sqrt(&sum(&multiply(&pooled, &pooled)?, false)?)?;
         let h_unit = Self::unit_norm(&pooled)?;
+        let pca_arr = matmul(&self.pca_basis, &h_unit)?.contiguous()?;
+        let seq_len = h_layer.shape()[1];
+        let d_model = h_layer.shape()[2];
+        let slice_len = d_model.min(8);
+        let last_slice = h_layer
+            .index((0, seq_len.saturating_sub(1), 0..slice_len))
+            .as_type::<f32>()?
+            .contiguous()?;
+
         let anchor_ref = self
             .user_anchor_by_layer
             .get(layer_idx)
@@ -2977,21 +3283,13 @@ impl RepeSensor {
         let cos_drift = if let Some(anchor) = anchor_ref {
             let a_unit = Self::unit_norm(anchor)?;
             let dot_arr = sum(&multiply(&h_unit, &a_unit)?, false)?;
-            mlx_rs::transforms::eval([&norm_arr, &dot_arr])?;
+            mlx_rs::transforms::eval([&norm_arr, &dot_arr, &pca_arr, &last_slice])?;
             (1.0 - dot_arr.item_exact::<f32>()).clamp(0.0, 2.0)
         } else {
-            norm_arr.eval()?;
+            mlx_rs::transforms::eval([&norm_arr, &pca_arr, &last_slice])?;
             0.0
         };
         let l2_norm = norm_arr.item_exact::<f32>();
-
-        let seq_len = h_layer.shape()[1];
-        let d_model = h_layer.shape()[2];
-        let slice_len = d_model.min(8);
-        let last_slice = h_layer
-            .index((0, seq_len.saturating_sub(1), 0..slice_len))
-            .as_type::<f32>()?;
-        last_slice.eval()?;
         let tensor_slice_preview = last_slice.as_slice::<f32>().to_vec();
 
         let base = self.static_benign_baseline.unwrap_or(0.0);
@@ -3001,8 +3299,6 @@ impl RepeSensor {
             .unwrap_or(0.011);
         let guard_logit = (cos_harm - base) - thr;
 
-        let pca_arr = matmul(&self.pca_basis, &h_unit)?;
-        pca_arr.eval()?;
         let pca_sl = pca_arr.as_slice::<f32>();
         let pca_coords = [
             pca_sl.first().copied().unwrap_or(0.0),
@@ -3021,41 +3317,100 @@ impl RepeSensor {
         Ok(())
     }
 
-    /// Recompute a contrastive activation difference vector `\Delta h_l = h_l^{adv} - h_l^{benign}`
-    /// from two live residual tensors at `target_layer`, orthogonalize `\Delta h_l` against existing
-    /// benign axes, and hot-reload the active probe direction `v_harm`.
-    pub fn hot_reload_contrastive(
+    /// Span-aware contrastive hot-reload: extracts tool-call span representations
+    /// in the sensor's active probe basis, computes the paired contrastive direction
+    /// `unit(probe(h_adv) - probe(h_benign))` orthogonalized against nuisance axes,
+    /// and updates BOTH the best-matching cluster in `v_harm_clusters` and `v_harm`.
+    pub fn hot_reload_contrastive_spans(
         &mut self,
         h_benign_layer: &Array,
+        benign_span_start: Option<usize>,
         h_adv_layer: &Array,
+        adv_span_start: Option<usize>,
     ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
-        let b_mean = Self::mean_state(h_benign_layer)?;
-        let a_mean = Self::mean_state(h_adv_layer)?;
-        let delta = subtract(&a_mean, &b_mean)?;
-        let delta_norm_arr = sqrt(&sum(&multiply(&delta, &delta)?, false)?)?;
-        let b_unit = Self::unit_norm(&b_mean)?;
-        let a_unit = Self::unit_norm(&a_mean)?;
+        let b_pooled = match benign_span_start {
+            Some(s) => self.pooled_state_lazy(h_benign_layer, Some(s))?,
+            None => Self::mean_state_lazy(h_benign_layer)?,
+        };
+        let a_pooled = match adv_span_start {
+            Some(s) => self.pooled_state_lazy(h_adv_layer, Some(s))?,
+            None => Self::mean_state_lazy(h_adv_layer)?,
+        };
+        let raw_delta = subtract(&a_pooled, &b_pooled)?;
+        let delta_norm_arr = sqrt(&sum(&multiply(&raw_delta, &raw_delta)?, false)?)?;
 
-        // Gram-Schmidt orthogonalization against the benign axis (`b_unit`) and `v_copy_mode`
-        let proj_b = sum(&multiply(&delta, &b_unit)?, false)?;
-        let mut delta_orth = subtract(&delta, &multiply(&b_unit, &proj_b)?)?;
+        let b_unit = Self::unit_norm(&b_pooled)?;
+        let a_unit = Self::unit_norm(&a_pooled)?;
+        let b_probe = self.probe_of(&b_pooled)?;
+        let a_probe = self.probe_of(&a_pooled)?;
+
+        // Paired difference in the sensor's active probe basis cancels shared lexical
+        // and cone components between the matched benign and adversarial calls.
+        let mut delta_orth = subtract(&a_probe, &b_probe)?;
+        if let Some(ref shell) = self.v_benign_shell {
+            let proj_s = sum(&multiply(&delta_orth, shell)?, false)?;
+            delta_orth = subtract(&delta_orth, &multiply(shell, &proj_s)?)?;
+        }
         if let Some(ref copy) = self.v_copy_mode {
             let proj_c = sum(&multiply(&delta_orth, copy)?, false)?;
             delta_orth = subtract(&delta_orth, &multiply(copy, &proj_c)?)?;
         }
         let v_contrastive = Self::unit_norm(&delta_orth)?;
-        let align_arr = sum(&multiply(&v_contrastive, &self.v_harm)?, false)?;
 
-        // Blend into active `v_harm` and re-normalize so the live guard probe hot-reloads immediately
-        let blended = add(
-            &multiply(&self.v_harm, &Array::from_f32(0.80))?,
-            &multiply(&v_contrastive, &Array::from_f32(0.20))?,
-        )?;
-        self.v_harm = Self::unit_norm(&blended)?;
+        let align_val = if !self.v_harm_clusters.is_empty() {
+            let dir_mat = stack(&self.v_harm_clusters, 0)?; // [C, D]
+            let dots = matmul(&dir_mat, &v_contrastive)?.contiguous()?;
+            dots.eval()?;
+            let sl = dots.as_slice::<f32>();
+            let (best_idx, best_align) = sl
+                .iter()
+                .copied()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or((0, 0.0));
+            for (c_idx, &align_c) in sl.iter().enumerate() {
+                if c_idx == best_idx {
+                    let blended = add(
+                        &multiply(&self.v_harm_clusters[c_idx], &Array::from_f32(0.65))?,
+                        &multiply(&v_contrastive, &Array::from_f32(0.35))?,
+                    )?;
+                    let updated = Self::unit_norm(&blended)?;
+                    updated.eval()?;
+                    self.v_harm_clusters[c_idx] = updated;
+                } else if align_c < 0.0 {
+                    // Suppress false-positive cone alignment on any other cluster that
+                    // scored the benign command higher than the adversarial command,
+                    // while leaving orthogonal clusters untouched.
+                    let step = (-align_c * 0.50).min(0.35);
+                    let corrected = add(
+                        &self.v_harm_clusters[c_idx],
+                        &multiply(&v_contrastive, &Array::from_f32(step))?,
+                    )?;
+                    let updated = Self::unit_norm(&corrected)?;
+                    updated.eval()?;
+                    self.v_harm_clusters[c_idx] = updated;
+                }
+            }
 
-        let pca_b = matmul(&self.pca_basis, &b_unit)?;
-        let pca_a = matmul(&self.pca_basis, &a_unit)?;
-        mlx_rs::transforms::eval([&delta_norm_arr, &align_arr, &self.v_harm, &pca_b, &pca_a])?;
+            let updated_mat = stack(&self.v_harm_clusters, 0)?;
+            let mean_harm = mean_axes(&updated_mat, &[0], false)?;
+            self.v_harm = Self::unit_norm(&mean_harm)?;
+            best_align
+        } else {
+            let align_arr = sum(&multiply(&v_contrastive, &self.v_harm)?, false)?;
+            align_arr.eval()?;
+            let prev_align = align_arr.item_exact::<f32>();
+            let blended = add(
+                &multiply(&self.v_harm, &Array::from_f32(0.75))?,
+                &multiply(&v_contrastive, &Array::from_f32(0.25))?,
+            )?;
+            self.v_harm = Self::unit_norm(&blended)?;
+            prev_align
+        };
+
+        let pca_b = matmul(&self.pca_basis, &b_unit)?.contiguous()?;
+        let pca_a = matmul(&self.pca_basis, &a_unit)?.contiguous()?;
+        mlx_rs::transforms::eval([&delta_norm_arr, &self.v_harm, &pca_b, &pca_a])?;
 
         let b_sl = pca_b.as_slice::<f32>();
         let a_sl = pca_a.as_slice::<f32>();
@@ -3070,12 +3425,18 @@ impl RepeSensor {
         self.pca_reference.benign_cluster.push(b_pt);
         self.pca_reference.exploit_cluster.push(a_pt);
 
-        Ok((
-            delta_norm_arr.item_exact::<f32>(),
-            align_arr.item_exact::<f32>(),
-            b_pt,
-            a_pt,
-        ))
+        Ok((delta_norm_arr.item_exact::<f32>(), align_val, b_pt, a_pt))
+    }
+
+    /// Recompute a contrastive activation difference vector `\Delta h_l = h_l^{adv} - h_l^{benign}`
+    /// from two live residual tensors at `target_layer`, orthogonalize `\Delta h_l` against existing
+    /// benign axes, and hot-reload the active probe direction.
+    pub fn hot_reload_contrastive(
+        &mut self,
+        h_benign_layer: &Array,
+        h_adv_layer: &Array,
+    ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
+        self.hot_reload_contrastive_spans(h_benign_layer, None, h_adv_layer, None)
     }
 
     /// Clear all per-layer profile buffers before a new forward pass.
@@ -3089,9 +3450,9 @@ impl RepeSensor {
 
     /// The projection of the inspected state onto the PCA basis.
     pub fn pca_coordinates(&self, h_layer: &Array, span_start: Option<usize>) -> Result<Vec<f32>> {
-        let pooled = self.pooled_state(h_layer, span_start)?;
+        let pooled = self.pooled_state_lazy(h_layer, span_start)?;
         let h_unit = Self::unit_norm(&pooled)?;
-        let coords = matmul(&self.pca_basis, &h_unit)?;
+        let coords = matmul(&self.pca_basis, &h_unit)?.contiguous()?;
         coords.eval()?;
         Ok(coords.as_slice::<f32>().to_vec())
     }
@@ -3166,20 +3527,18 @@ impl RepeSensor {
         };
         let table = token_score_table(h_layer, span_start, &cfg)?;
 
+        let mean_pooled_scores = |sensor: &Self| -> Result<Vec<f32>> {
+            let pooled = sensor.pooled_state_lazy(h_layer, span_start)?;
+            let probe = sensor.probe_of(&pooled)?;
+            let dir_mat = stack(&dims, 0)?; // [C, D]
+            let proj = matmul(&dir_mat, &probe)?.contiguous()?;
+            proj.eval()?;
+            Ok(proj.as_slice::<f32>().to_vec())
+        };
+
         let (cluster_scores, peak_token, peak_cosine) = match self.pooling {
             Pooling::Mean => {
-                // The mean-pooled reading is a statistic of the *pooled* state,
-                // not of the tokens: recompute it exactly as `harm_cosine_of`
-                // does so the calibrated threshold keeps its meaning.
-                let pooled = self.pooled_state(h_layer, span_start)?;
-                let probe = self.probe_of(&pooled)?;
-                let mut scores = Vec::with_capacity(dims.len());
-                for dir in &dims {
-                    let projection = multiply(&probe, dir)?;
-                    let value = sum(&projection, false)?;
-                    value.eval()?;
-                    scores.push(value.item_exact::<f32>());
-                }
+                let scores = mean_pooled_scores(self)?;
                 let mut peak_token = Vec::with_capacity(dims.len());
                 let mut peak_cosine = Vec::with_capacity(dims.len());
                 for c in 0..dims.len() {
@@ -3196,6 +3555,20 @@ impl RepeSensor {
                 for c in 0..dims.len() {
                     let (pooled, idx, val) = lse_pool(&table, c, beta);
                     scores.push(pooled);
+                    peak_token.push(table.span_start + idx);
+                    peak_cosine.push(val);
+                }
+                (scores, peak_token, peak_cosine)
+            }
+            Pooling::Hybrid { beta, weight } => {
+                let w = weight.clamp(0.0, 1.0);
+                let mean_scores = mean_pooled_scores(self)?;
+                let mut scores = Vec::with_capacity(dims.len());
+                let mut peak_token = Vec::with_capacity(dims.len());
+                let mut peak_cosine = Vec::with_capacity(dims.len());
+                for (c, &m_val) in mean_scores.iter().enumerate() {
+                    let (lse_val, idx, val) = lse_pool(&table, c, beta);
+                    scores.push((1.0 - w) * m_val + w * lse_val);
                     peak_token.push(table.span_start + idx);
                     peak_cosine.push(val);
                 }
@@ -3244,19 +3617,34 @@ impl RepeSensor {
         h_layer: &mut Array,
         span_start: Option<usize>,
     ) -> Result<RepeProbeTelemetry> {
+        self.inspect_and_maybe_clamp_with_cached(h_layer, span_start, None)
+    }
+
+    /// Inline hook variant that reuses `(harm_cosine, SpanScores, pca_coords)` when
+    /// `record_full_layer_telemetry` already computed them at `target_layer`, and
+    /// vectorizes the entire per-token PCA + drift trace into one GPU GEMM.
+    pub fn inspect_and_maybe_clamp_with_cached(
+        &mut self,
+        h_layer: &mut Array,
+        span_start: Option<usize>,
+        cached: Option<(f32, SpanScores, Vec<f32>)>,
+    ) -> Result<RepeProbeTelemetry> {
         let seq_len = h_layer.shape()[1];
-        let pooled = self.pooled_state(h_layer, span_start)?;
-        let h_unit = Self::unit_norm(&pooled)?;
+        let pooled = self.pooled_state_lazy(h_layer, span_start)?;
 
-        // 1. Harm reading: the component of the *shift* the tool call caused
-        //    along the harm directions, pooled the way the artifact was
-        //    calibrated. Under mean pooling this is the cosine of the pooled
-        //    state; under LogSumExp pooling it is the temperature-pooled
-        //    maximum over the span's own tokens, with the token that peaked
-        //    kept as the attribution.
-        let (harm_cosine, span_scores) = self.span_harm_reading(h_layer, span_start)?;
+        let (harm_cosine, span_scores, pca_vec) = match cached {
+            Some(c) => c,
+            None => {
+                let h_unit = Self::unit_norm(&pooled)?;
+                let pca_arr = matmul(&self.pca_basis, &h_unit)?.contiguous()?;
+                pca_arr.eval()?;
+                let pca_v = pca_arr.as_slice::<f32>().to_vec();
+                let (harm, scores) = self.span_harm_reading(h_layer, span_start)?;
+                (harm, scores, pca_v)
+            }
+        };
 
-        // 2. TaskTracker Activation Delta: <unit(h_curr - h_user), v_drift>
+        // TaskTracker Activation Delta: <unit(h_curr - h_user), v_drift>
         let drift_cos_arr = if let Some(ref anchor) = self.trusted_user_anchor {
             let delta = subtract(&pooled, anchor)?;
             let delta_unit = Self::unit_norm(&delta)?;
@@ -3265,72 +3653,111 @@ impl RepeSensor {
             Array::from_f32(0.0)
         };
 
-        // 3. K-dimensional PCA Subspace Energy: ||pca_basis @ h_unit||_2
-        let pca_coords = matmul(&self.pca_basis, &h_unit)?;
-        let energy_arr = sqrt(&sum(&multiply(&pca_coords, &pca_coords)?, false)?)?;
+        self.last_pca_coords = pca_vec.clone();
+        let pca_subspace_energy = pca_vec.iter().map(|v| v * v).sum::<f32>().sqrt();
 
-        mlx_rs::transforms::eval([&drift_cos_arr, &energy_arr, &pca_coords])?;
-        self.last_pca_coords = pca_coords.as_slice::<f32>().to_vec();
-
-        let drift_cosine = drift_cos_arr.item_exact::<f32>();
-        let pca_subspace_energy = energy_arr.item_exact::<f32>();
-
-        // 3b. Per-token [PC1, PC2] coordinates and drift scores across the tool-call span
+        // Vectorized per-token [PC1, PC2] coordinates and drift scores across the span:
+        // single `[T, D] @ [D, K]` matmul instead of `T` sequential `.eval()` calls.
         self.token_trace.clear();
         let n_clusters = span_scores.cluster_scores.len().max(1);
-        let anchor_unit_opt = self
-            .user_anchor_by_layer
-            .get(self.target_layer)
-            .or(self.trusted_user_anchor.as_ref())
-            .and_then(|a| Self::unit_norm(a).ok());
-        for t in 0..span_scores.span_len {
-            let pos = (span_scores.span_start + t) as i32;
-            if pos >= seq_len {
-                break;
-            }
-            let h_tok = h_layer.index((0, pos, ..)).as_type::<f32>()?;
-            let h_tok_unit = Self::unit_norm(&h_tok)?;
-            let tok_pca = matmul(&self.pca_basis, &h_tok_unit)?;
-            let tok_drift = if let Some(ref a_unit) = anchor_unit_opt {
-                let d_arr = sum(&multiply(&h_tok_unit, a_unit)?, false)?;
-                mlx_rs::transforms::eval([&tok_pca, &d_arr])?;
-                (1.0 - d_arr.item_exact::<f32>()).clamp(0.0, 1.0)
-            } else {
-                tok_pca.eval()?;
-                0.0
-            };
-            let pca_sl = tok_pca.as_slice::<f32>();
-            let row_start = t * n_clusters;
-            let raw_harm = span_scores.token_scores
-                [row_start..(row_start + n_clusters).min(span_scores.token_scores.len())]
-                .iter()
-                .copied()
-                .fold(f32::NEG_INFINITY, f32::max);
-            self.token_trace.push(TokenTraceMetric {
-                idx: t,
-                raw_harm_cosine: if raw_harm.is_finite() { raw_harm } else { 0.0 },
-                drift_score: tok_drift,
-                pca_coords: [
-                    pca_sl.first().copied().unwrap_or(0.0),
-                    pca_sl.get(1).copied().unwrap_or(0.0),
-                ],
-            });
-        }
+        let start_i = (span_scores.span_start as i32).min(seq_len.saturating_sub(1));
+        let end_i = ((span_scores.span_start + span_scores.span_len) as i32).min(seq_len);
+        let eff_len = (end_i - start_i).max(0) as usize;
 
-        // 4. Optional In-Place Orthogonal Clamping on the last token:
-        //    h' = h - max(0, h · v_harm) * v_harm
-        //    The clamp still applies to the final token — that is the state
-        //    the model continues from — while the *measurement* above uses
-        //    the pooled tool-call span.
+        let drift_cosine = if eff_len > 0 {
+            let tok_slice = h_layer
+                .index((0, start_i..end_i, ..))
+                .as_type::<f32>()?
+                .reshape(&[eff_len as i32, -1])?;
+            let tok_sq = multiply(&tok_slice, &tok_slice)?;
+            let tok_norm = sqrt(&sum_axis(&tok_sq, -1, true)?)?;
+            let tok_unit = divide(&tok_slice, &add(&tok_norm, &Array::from_f32(1e-6))?)?;
+
+            let pca_f32 = self.pca_basis.as_type::<f32>()?;
+            let pca_k = pca_f32.shape().first().copied().unwrap_or(0).max(0) as usize;
+            let pca_t = transpose_axes(&pca_f32, &[1, 0])?; // [D, K]
+            let tok_pca_mat = matmul(&tok_unit, &pca_t)?.contiguous()?; // [T, K]
+
+            let anchor_opt = self
+                .user_anchor_by_layer
+                .get(self.target_layer)
+                .or(self.trusted_user_anchor.as_ref());
+            let tok_dots_opt = match anchor_opt {
+                Some(anchor) => {
+                    let a_col = Self::unit_norm(anchor)?.reshape(&[-1, 1])?; // [D, 1]
+                    Some(
+                        matmul(&tok_unit, &a_col)?
+                            .reshape(&[eff_len as i32])?
+                            .contiguous()?,
+                    )
+                }
+                None => None,
+            };
+
+            if let Some(ref tok_dots) = tok_dots_opt {
+                mlx_rs::transforms::eval([&drift_cos_arr, &tok_pca_mat, tok_dots])?;
+            } else {
+                mlx_rs::transforms::eval([&drift_cos_arr, &tok_pca_mat])?;
+            }
+
+            let pca_sl = tok_pca_mat.as_slice::<f32>();
+            let dots_sl = tok_dots_opt.as_ref().map(|d| d.as_slice::<f32>());
+            self.token_trace.reserve(eff_len);
+            for t in 0..eff_len {
+                let pc1 = if pca_k >= 1 { pca_sl[t * pca_k] } else { 0.0 };
+                let pc2 = if pca_k >= 2 { pca_sl[t * pca_k + 1] } else { 0.0 };
+                let tok_drift = match dots_sl {
+                    Some(ds) => (1.0 - ds[t]).clamp(0.0, 1.0),
+                    None => 0.0,
+                };
+                let row_start = t * n_clusters;
+                let raw_harm = span_scores.token_scores
+                    [row_start..(row_start + n_clusters).min(span_scores.token_scores.len())]
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
+                self.token_trace.push(TokenTraceMetric {
+                    idx: t,
+                    raw_harm_cosine: if raw_harm.is_finite() { raw_harm } else { 0.0 },
+                    drift_score: tok_drift,
+                    pca_coords: [pc1, pc2],
+                });
+            }
+            drift_cos_arr.item_exact::<f32>()
+        } else {
+            drift_cos_arr.eval()?;
+            drift_cos_arr.item_exact::<f32>()
+        };
+
+        // Optional In-Place Orthogonal Clamping when `harm_cosine > thresh`:
+        // project out the tripped cluster direction (and any other cluster direction
+        // exceeding `thresh`) on the final token, respecting `absolute_harm_reading`.
         let mut clamped_in_place = false;
         if let Some(thresh) = self.clamp_threshold {
             if harm_cosine > thresh {
-                let h_last = h_layer.index((0, seq_len - 1, ..)).as_type::<f32>()?;
-                let dot = sum(&multiply(&h_last, &self.v_harm)?, true)?;
-                let pos_proj = maximum(&dot, &Array::from_f32(0.0))?;
-                let correction = multiply(&pos_proj, &self.v_harm)?;
-                let h_clamped = subtract(&h_last, &correction)?.reshape(&[1, 1, -1])?;
-
+                let dirs = self.harm_directions();
+                let mut h_last = h_layer.index((0, seq_len - 1, ..)).as_type::<f32>()?;
+                for (c_idx, dir) in dirs.iter().enumerate() {
+                    let c_score = span_scores
+                        .cluster_scores
+                        .get(c_idx)
+                        .copied()
+                        .unwrap_or(harm_cosine);
+                    if c_idx == span_scores.argmax_cluster || c_score > thresh {
+                        let ref_vec = if self.absolute_harm_reading {
+                            h_last.clone()
+                        } else if let Some(ref anchor) = self.trusted_user_anchor {
+                            subtract(&h_last, anchor)?
+                        } else {
+                            h_last.clone()
+                        };
+                        let dot = sum(&multiply(&ref_vec, dir)?, true)?;
+                        let pos_proj = maximum(&dot, &Array::from_f32(0.0))?;
+                        let correction = multiply(&pos_proj, dir)?;
+                        h_last = subtract(&h_last, &correction)?;
+                    }
+                }
+                let h_clamped = h_last.reshape(&[1, 1, -1])?;
                 if seq_len > 1 {
                     let prefix = h_layer.index((.., 0..(seq_len - 1), ..));
                     *h_layer = concatenate(&[prefix, h_clamped], 1)?;
@@ -3364,19 +3791,50 @@ impl RepeSensor {
         })
     }
 
-    /// Calibrate top-K PCA directions via SVD from paired difference vectors `deltas` [N, D]
+    /// Calibrate top-K PCA directions via centered SVD from difference/state vectors `deltas` [N, D].
+    ///
+    /// Centers `deltas` along axis 0 when `N > 1` so PC1 captures genuine variance
+    /// rather than the uncentered mean direction, and guarantees strictly unit-norm
+    /// rows (`+/- 1` sign orientation, never zeroed by `sign(0.0)`).
     pub fn fit_pca_subspace(deltas: &Array, k: i32) -> Result<Array> {
         let deltas_f32 = deltas.as_type::<f32>()?;
+        let rows = deltas_f32.shape().first().copied().unwrap_or(0);
+        let cols = deltas_f32.shape().get(1).copied().unwrap_or(0);
+        let k_eff = k.min(rows).min(cols).max(1);
+
+        let centered = if rows > 1 {
+            let mu = mean_axes(&deltas_f32, &[0], true)?;
+            subtract(&deltas_f32, &mu)?
+        } else {
+            deltas_f32.clone()
+        };
+
         // MLX has no GPU implementation of the SVD — run it on the CPU stream.
         let cpu = mlx_rs::Stream::cpu();
-        let (_u, _s, vt) = mlx_rs::with_stream(&cpu, || svd(&deltas_f32))?;
-        let top_k = vt.index((0..k, ..));
+        let (_u, _s, vt) = mlx_rs::with_stream(&cpu, || svd(&centered))?;
+        let top_k = vt.index((0..k_eff, ..));
 
-        // Align signs so each PC has positive average dot product with the positive deltas
+        // Orient signs against uncentered `deltas` so positive harm deltas project positively,
+        // avoiding `sign(0.0) == 0.0` which would annihilate zero-mean principal axes.
         let proj = matmul(&deltas_f32, &transpose_axes(&top_k, &[1, 0])?)?;
-        let mean_proj = mean_axes(&proj, &[0], false)?;
-        let signs = sign(&mean_proj)?.reshape(&[k, 1])?;
-        let aligned = multiply(&top_k, &signs)?;
+        let mean_proj = mean_axes(&proj, &[0], false)?.contiguous()?;
+        mean_proj.eval()?;
+        let sign_vals: Vec<f32> = mean_proj
+            .as_slice::<f32>()
+            .iter()
+            .map(|&v| if v < 0.0 { -1.0 } else { 1.0 })
+            .collect();
+        let signs = Array::from_slice(&sign_vals, &[k_eff, 1]);
+        let oriented = multiply(&top_k, &signs)?;
+
+        // Normalize each row to unit length and pad to `k` rows if `rows < k`.
+        let sq = multiply(&oriented, &oriented)?;
+        let norm = sqrt(&sum_axis(&sq, -1, true)?)?;
+        let mut aligned = divide(&oriented, &add(&norm, &Array::from_f32(1e-6))?)?;
+        if k_eff < k {
+            let pad = Array::zeros::<f32>(&[k - k_eff, cols])?;
+            aligned = concatenate(&[aligned, pad], 0)?;
+        }
         aligned.eval()?;
         Ok(aligned)
     }
@@ -3589,6 +4047,127 @@ mod whitening_load {
         assert!(sensor.whitening.is_none());
         assert!(sensor.whitening_shrinkage.is_none());
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod repe_math_and_pooling_tests {
+    use super::*;
+
+    #[test]
+    fn lse_pool_is_length_invariant_and_bounded() {
+        let short = TokenScoreTable {
+            scores: vec![0.25, 0.25],
+            span_start: 0,
+            span_len: 2,
+            n_clusters: 1,
+        };
+        let long = TokenScoreTable {
+            scores: vec![0.25; 64],
+            span_start: 0,
+            span_len: 64,
+            n_clusters: 1,
+        };
+        let (s_short, _, _) = lse_pool(&short, 0, 12.0);
+        let (s_long, _, _) = lse_pool(&long, 0, 12.0);
+        assert!(
+            (s_short - 0.25).abs() < 1e-6 && (s_long - 0.25).abs() < 1e-6,
+            "uniform token cosines must be strictly invariant to span length: short={s_short}, long={s_long}"
+        );
+
+        let mixed = TokenScoreTable {
+            scores: vec![-0.1, 0.0, 0.2, 0.85],
+            span_start: 3,
+            span_len: 4,
+            n_clusters: 1,
+        };
+        let (pooled, peak_idx, peak_val) = lse_pool(&mixed, 0, 10.0);
+        let (avg, _, _) = mean_pool(&mixed, 0);
+        assert_eq!(peak_idx, 3);
+        assert!((peak_val - 0.85).abs() < 1e-6);
+        assert!(
+            pooled >= avg - 1e-6 && pooled <= peak_val + 1e-6,
+            "LogMeanExp ({pooled}) must lie inside [mean={avg}, max={peak_val}]"
+        );
+    }
+
+    #[test]
+    fn centered_pca_subspace_recovers_variance_axis_instead_of_cone_mean() {
+        // 4 vectors in R^4 sharing a huge cone offset [10, 0, 0, 0] with true variance along axis 1.
+        let data: [f32; 16] = [
+            10.0, -3.0, 0.1, 0.0,
+            10.0, -1.0, -0.1, 0.0,
+            10.0, 1.0, -0.1, 0.0,
+            10.0, 3.0, 0.1, 0.0,
+        ];
+        let arr = Array::from_slice(&data, &[4, 4]);
+        let basis = RepeSensor::fit_pca_subspace(&arr, 2).unwrap();
+        let b = basis.contiguous().unwrap();
+        b.eval().unwrap();
+        let sl = b.as_slice::<f32>();
+        // PC1 (row 0) must align with axis 1 (|sl[1]| > 0.99), NOT the mean offset axis 0!
+        assert!(
+            sl[1].abs() > 0.99 && sl[0].abs() < 1e-4,
+            "centered PC1 should align with axis 1, got row0={:?}",
+            &sl[0..4]
+        );
+        // PC2 (row 1) must be unit-norm (never zeroed by sign(0)) and align with axis 2.
+        let row1_norm: f32 = sl[4..8].iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!(
+            (row1_norm - 1.0).abs() < 1e-4 && sl[6].abs() > 0.99,
+            "centered PC2 must be unit length along axis 2, got row1={:?}",
+            &sl[4..8]
+        );
+    }
+
+    #[test]
+    fn hot_reload_contrastive_updates_matching_cluster_in_multi_cluster_sensor() {
+        let c0 = Array::from_slice(&[1.0f32, 0.0, 0.0, 0.0], &[4]);
+        let c1 = Array::from_slice(&[0.0f32, 1.0, 0.0, 0.0], &[4]);
+        let drift = Array::from_slice(&[0.0f32, 0.0, 0.0, 1.0], &[4]);
+        let mut sensor = RepeSensor::from_directions(
+            2,
+            vec![c0, c1],
+            drift,
+            None,
+            Pooling::Hybrid {
+                beta: 10.0,
+                weight: 0.35,
+            },
+            true,
+        )
+        .unwrap();
+
+        // Benign and adversarial tool-call spans [1, 3, 4], span_start = 1:
+        // cluster 1 initially points along axis 1; live exploit shifts along axis 1 + axis 2.
+        let h_benign = Array::from_slice(
+            &[
+                0.5f32, 0.0, 0.0, 0.0, // prompt token
+                0.8, -0.2, -0.4, 0.0,  // benign span token 1
+                0.8, -0.2, -0.4, 0.0,  // benign span token 2
+            ],
+            &[1, 3, 4],
+        );
+        let h_adv = Array::from_slice(
+            &[
+                0.5f32, 0.0, 0.0, 0.0, // prompt token
+                0.8, 0.5, 0.7, 0.0,    // adv span token 1
+                0.8, 0.5, 0.7, 0.0,    // adv span token 2
+            ],
+            &[1, 3, 4],
+        );
+        let (before_adv, _) = sensor.span_harm_reading(&h_adv, Some(1)).unwrap();
+        let (before_ben, _) = sensor.span_harm_reading(&h_benign, Some(1)).unwrap();
+        let (delta_norm, _align, _, _) = sensor
+            .hot_reload_contrastive_spans(&h_benign, Some(1), &h_adv, Some(1))
+            .unwrap();
+        assert!(delta_norm > 0.5);
+        let (after_adv, _) = sensor.span_harm_reading(&h_adv, Some(1)).unwrap();
+        let (after_ben, _) = sensor.span_harm_reading(&h_benign, Some(1)).unwrap();
+        assert!(
+            (after_adv - after_ben) > (before_adv - before_ben),
+            "multi-cluster hot reload must widen margin: before=({before_adv} - {before_ben}), after=({after_adv} - {after_ben})"
+        );
     }
 }
 REPE
@@ -4056,6 +4635,22 @@ pub trait GuardableEngine {
         Ok(None)
     }
 
+    /// Fast early-exit reference probe for Pass 3 fallback: runs only up to
+    /// `target_layer` and measures `probe_cosine` WITHOUT clobbering Pass 2's
+    /// recorded `layer_profile`, `layer_trace`, or `token_trace`.
+    fn probe_reference_only(
+        &mut self,
+        reference_ids: &Array,
+        probe_span_start: Option<usize>,
+    ) -> Result<f32> {
+        let saved_profile = self.layer_profile().to_vec();
+        let saved_clusters = self.layer_cluster_profile().to_vec();
+        let saved_pca = self.layer_pca_profile().to_vec();
+        let out = self.run_hooked(reference_ids, false, false, None, probe_span_start)?;
+        let _ = (saved_profile, saved_clusters, saved_pca);
+        Ok(out.repe_telemetry.map(|t| t.harm_cosine).unwrap_or(0.0))
+    }
+
     /// Clamp the tool-call span (`span_start..seq_len`) at `target_layer` along the
     /// triggered harm cluster directions, roll back the KV cache of upper layers
     /// `target_layer + 1 .. num_layers` to `span_start`, and recompute the upper
@@ -4108,14 +4703,27 @@ pub trait GuardableEngine {
         })
     }
 
+    /// Recompute `\Delta h_l = h_l^{adv} - h_l^{benign}` over the tool-call spans at
+    /// `target_layer`, orthogonalize against nuisance axes, and hot-reload both the
+    /// matching cluster direction and `v_harm`.
+    fn hot_reload_contrastive_pair_spans(
+        &mut self,
+        _benign_ids: &Array,
+        _benign_span_start: Option<usize>,
+        _adv_ids: &Array,
+        _adv_span_start: Option<usize>,
+    ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
+        Ok((0.0, 0.0, [0.0, 0.0], [0.0, 0.0]))
+    }
+
     /// Recompute `\Delta h_l = h_l^{adv} - h_l^{benign}` at `target_layer`, orthogonalize
     /// against benign axes, and hot-reload the active guard probe direction.
     fn hot_reload_contrastive_pair(
         &mut self,
-        _benign_ids: &Array,
-        _adv_ids: &Array,
+        benign_ids: &Array,
+        adv_ids: &Array,
     ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
-        Ok((0.0, 0.0, [0.0, 0.0], [0.0, 0.0]))
+        self.hot_reload_contrastive_pair_spans(benign_ids, None, adv_ids, None)
     }
 }
 
@@ -4240,12 +4848,12 @@ impl<L: QwenDecoderLayer> GuardableEngine for HookedQwenClefEngine<L> {
             .min(self.layers.len().saturating_sub(1));
         for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             h = layer.forward(&h, 0.0)?;
-            self.repe_sensor.record_layer_anchor(layer_idx, &h)?;
+            self.repe_sensor.record_layer_anchor_lazy(layer_idx, &h)?;
             if layer_idx == hook_layer {
-                self.repe_sensor.record_user_anchor(&h)?;
                 break;
             }
         }
+        self.repe_sensor.finalize_user_anchors()?;
         Ok(())
     }
 
@@ -4286,6 +4894,22 @@ impl<L: QwenDecoderLayer> GuardableEngine for HookedQwenClefEngine<L> {
         Ok(Some(cosine))
     }
 
+    fn probe_reference_only(
+        &mut self,
+        reference_ids: &Array,
+        probe_span_start: Option<usize>,
+    ) -> Result<f32> {
+        let hook_layer = self
+            .repe_sensor
+            .target_layer
+            .min(self.layers.len().saturating_sub(1));
+        let mut h = self.embed_tokens.take_axis(reference_ids, 0)?;
+        for layer in self.layers.iter_mut().take(hook_layer + 1) {
+            h = layer.forward(&h, 0.0)?;
+        }
+        self.repe_sensor.probe_cosine(&h, probe_span_start)
+    }
+
     fn clamp_and_rollback_span(
         &mut self,
         input_ids: &Array,
@@ -4295,10 +4919,12 @@ impl<L: QwenDecoderLayer> GuardableEngine for HookedQwenClefEngine<L> {
         self.clamp_and_rollback_span_impl(input_ids, span_start, alpha)
     }
 
-    fn hot_reload_contrastive_pair(
+    fn hot_reload_contrastive_pair_spans(
         &mut self,
         benign_ids: &Array,
+        benign_span_start: Option<usize>,
         adv_ids: &Array,
+        adv_span_start: Option<usize>,
     ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
         let hook_layer = self
             .repe_sensor
@@ -4312,7 +4938,8 @@ impl<L: QwenDecoderLayer> GuardableEngine for HookedQwenClefEngine<L> {
         for layer in self.layers.iter_mut().take(hook_layer + 1) {
             h_a = layer.forward(&h_a, 0.0)?;
         }
-        self.repe_sensor.hot_reload_contrastive(&h_b, &h_a)
+        self.repe_sensor
+            .hot_reload_contrastive_spans(&h_b, benign_span_start, &h_a, adv_span_start)
     }
 }
 
@@ -4360,28 +4987,29 @@ impl<L: QwenDecoderLayer> HookedQwenClefEngine<L> {
             }
 
             if lock_as_user_anchor {
-                self.repe_sensor.record_layer_anchor(layer_idx, &h)?;
+                self.repe_sensor.record_layer_anchor_lazy(layer_idx, &h)?;
                 if layer_idx == hook_layer {
-                    self.repe_sensor.record_user_anchor(&h)?;
+                    self.repe_sensor.finalize_user_anchors()?;
                     break;
                 }
                 continue;
             }
 
-            // Record the harm cosine, cluster breakdown, and 3D PCA coords at every layer.
-            let (cosine, clusters, pca) =
-                self.repe_sensor.probe_layer_telemetry(&h, probe_span_start)?;
-            self.repe_sensor.layer_profile.push(cosine);
-            self.repe_sensor.layer_cluster_profile.push(clusters);
-            self.repe_sensor.layer_pca_profile.push(pca);
-            self.repe_sensor
-                .record_layer_trace(layer_idx, &h, probe_span_start, cosine)?;
+            // Fused per-layer telemetry (1 single GPU batch per layer; caches SpanScores at hook_layer).
+            let cached = self.repe_sensor.record_full_layer_telemetry(
+                layer_idx,
+                &h,
+                probe_span_start,
+                layer_idx == hook_layer,
+            )?;
 
             if layer_idx == hook_layer {
                 // <--- INLINE REPE INTERCEPTION HAPPENS RIGHT HERE --->
-                let telemetry = self
-                    .repe_sensor
-                    .inspect_and_maybe_clamp(&mut h, probe_span_start)?;
+                let telemetry = self.repe_sensor.inspect_and_maybe_clamp_with_cached(
+                    &mut h,
+                    probe_span_start,
+                    cached,
+                )?;
                 repe_telemetry = Some(telemetry);
             }
         }
@@ -4458,7 +5086,11 @@ impl<L: QwenDecoderLayer> HookedQwenClefEngine<L> {
         let mut span_slice = h_hook
             .index((.., (span_start as i32)..(seq_len as i32), ..))
             .as_type::<f32>()?;
-        let anchor_opt = self.repe_sensor.trusted_user_anchor.clone();
+        let anchor_opt = if self.repe_sensor.absolute_harm_reading {
+            None
+        } else {
+            self.repe_sensor.trusted_user_anchor.clone()
+        };
         for _pass in 0..2 {
             let delta = match &anchor_opt {
                 Some(anchor) => {
@@ -4572,25 +5204,26 @@ impl GuardableEngine for HybridGuardEngine {
         for (layer_idx, layer) in self.backbone.layers.iter().enumerate() {
             h = layer.forward(&self.backbone.cfg, &h)?;
             if lock_as_user_anchor {
-                self.repe_sensor.record_layer_anchor(layer_idx, &h)?;
+                self.repe_sensor.record_layer_anchor_lazy(layer_idx, &h)?;
                 if layer_idx == hook_layer {
-                    self.repe_sensor.record_user_anchor(&h)?;
+                    self.repe_sensor.finalize_user_anchors()?;
                     break;
                 }
                 continue;
             }
-            let (cosine, clusters, pca) =
-                self.repe_sensor.probe_layer_telemetry(&h, probe_span_start)?;
-            self.repe_sensor.layer_profile.push(cosine);
-            self.repe_sensor.layer_cluster_profile.push(clusters);
-            self.repe_sensor.layer_pca_profile.push(pca);
-            self.repe_sensor
-                .record_layer_trace(layer_idx, &h, probe_span_start, cosine)?;
+            let cached = self.repe_sensor.record_full_layer_telemetry(
+                layer_idx,
+                &h,
+                probe_span_start,
+                layer_idx == hook_layer,
+            )?;
 
             if layer_idx == hook_layer {
-                let telemetry = self
-                    .repe_sensor
-                    .inspect_and_maybe_clamp(&mut h, probe_span_start)?;
+                let telemetry = self.repe_sensor.inspect_and_maybe_clamp_with_cached(
+                    &mut h,
+                    probe_span_start,
+                    cached,
+                )?;
                 repe_telemetry = Some(telemetry);
             }
         }
@@ -4714,19 +5347,37 @@ impl GuardableEngine for HybridGuardEngine {
             .min(self.backbone.layers.len().saturating_sub(1));
         for (layer_idx, layer) in self.backbone.layers.iter().enumerate() {
             h = layer.forward(&self.backbone.cfg, &h)?;
-            self.repe_sensor.record_layer_anchor(layer_idx, &h)?;
+            self.repe_sensor.record_layer_anchor_lazy(layer_idx, &h)?;
             if layer_idx == hook_layer {
-                self.repe_sensor.record_user_anchor(&h)?;
                 break;
             }
         }
+        self.repe_sensor.finalize_user_anchors()?;
         Ok(())
     }
 
-    fn hot_reload_contrastive_pair(
+    fn probe_reference_only(
+        &mut self,
+        reference_ids: &Array,
+        probe_span_start: Option<usize>,
+    ) -> Result<f32> {
+        let hook_layer = self
+            .repe_sensor
+            .target_layer
+            .min(self.backbone.layers.len().saturating_sub(1));
+        let mut h = self.backbone.embed(reference_ids)?;
+        for layer in self.backbone.layers.iter().take(hook_layer + 1) {
+            h = layer.forward(&self.backbone.cfg, &h)?;
+        }
+        self.repe_sensor.probe_cosine(&h, probe_span_start)
+    }
+
+    fn hot_reload_contrastive_pair_spans(
         &mut self,
         benign_ids: &Array,
+        benign_span_start: Option<usize>,
         adv_ids: &Array,
+        adv_span_start: Option<usize>,
     ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
         let hook_layer = self
             .repe_sensor
@@ -4740,7 +5391,8 @@ impl GuardableEngine for HybridGuardEngine {
         for layer in self.backbone.layers.iter().take(hook_layer + 1) {
             h_a = layer.forward(&self.backbone.cfg, &h_a)?;
         }
-        self.repe_sensor.hot_reload_contrastive(&h_b, &h_a)
+        self.repe_sensor
+            .hot_reload_contrastive_spans(&h_b, benign_span_start, &h_a, adv_span_start)
     }
 }
 
@@ -4814,26 +5466,29 @@ impl GuardableEngine for RemoteBackboneEngine {
         for (idx, h) in layers.into_iter().enumerate() {
             let mut h = h;
             if lock_as_user_anchor {
-                self.repe_sensor.record_layer_anchor(idx, &h)?;
+                self.repe_sensor.record_layer_anchor_lazy(idx, &h)?;
                 if idx == hook_layer {
-                    self.repe_sensor.record_user_anchor(&h)?;
+                    self.repe_sensor.finalize_user_anchors()?;
                 }
                 continue;
             }
-            let (cosine, clusters, pca) =
-                self.repe_sensor.probe_layer_telemetry(&h, probe_span_start)?;
-            self.repe_sensor.layer_profile.push(cosine);
-            self.repe_sensor.layer_cluster_profile.push(clusters);
-            self.repe_sensor.layer_pca_profile.push(pca);
-            self.repe_sensor
-                .record_layer_trace(idx, &h, probe_span_start, cosine)?;
+            let cached = self.repe_sensor.record_full_layer_telemetry(
+                idx,
+                &h,
+                probe_span_start,
+                idx == hook_layer,
+            )?;
             if idx == hook_layer {
                 // Reading only: a clamp here would edit a copy nothing decodes from.
-                repe_telemetry = Some(
-                    self.repe_sensor
-                        .inspect_and_maybe_clamp(&mut h, probe_span_start)?,
-                );
+                repe_telemetry = Some(self.repe_sensor.inspect_and_maybe_clamp_with_cached(
+                    &mut h,
+                    probe_span_start,
+                    cached,
+                )?);
             }
+        }
+        if lock_as_user_anchor {
+            self.repe_sensor.finalize_user_anchors()?;
         }
         Ok(HookedForwardOutput {
             h_final,
@@ -4841,6 +5496,61 @@ impl GuardableEngine for RemoteBackboneEngine {
             clef_decisions: None,
             attention_probs: None,
         })
+    }
+    fn probe_reference_only(
+        &mut self,
+        reference_ids: &Array,
+        probe_span_start: Option<usize>,
+    ) -> Result<f32> {
+        let ids: Vec<u32> = reference_ids
+            .as_type::<i32>()?
+            .as_slice::<i32>()
+            .iter()
+            .map(|&v| v as u32)
+            .collect();
+        let (layers, _) = self.fetch(&ids)?;
+        let hook_layer = self
+            .repe_sensor
+            .target_layer
+            .min(layers.len().saturating_sub(1));
+        let h = layers
+            .get(hook_layer)
+            .ok_or_else(|| anyhow::anyhow!("remote backbone returned empty layers"))?;
+        self.repe_sensor.probe_cosine(h, probe_span_start)
+    }
+    fn hot_reload_contrastive_pair_spans(
+        &mut self,
+        benign_ids: &Array,
+        benign_span_start: Option<usize>,
+        adv_ids: &Array,
+        adv_span_start: Option<usize>,
+    ) -> Result<(f32, f32, [f32; 2], [f32; 2])> {
+        let to_u32 = |arr: &Array| -> Result<Vec<u32>> {
+            Ok(arr
+                .as_type::<i32>()?
+                .as_slice::<i32>()
+                .iter()
+                .map(|&v| v as u32)
+                .collect())
+        };
+        let (b_layers, _) = self.fetch(&to_u32(benign_ids)?)?;
+        let (a_layers, _) = self.fetch(&to_u32(adv_ids)?)?;
+        let b_idx = self
+            .repe_sensor
+            .target_layer
+            .min(b_layers.len().saturating_sub(1));
+        let a_idx = self
+            .repe_sensor
+            .target_layer
+            .min(a_layers.len().saturating_sub(1));
+        let h_b = b_layers
+            .get(b_idx)
+            .ok_or_else(|| anyhow::anyhow!("remote backbone returned empty benign layers"))?;
+        let h_a = a_layers
+            .get(a_idx)
+            .ok_or_else(|| anyhow::anyhow!("remote backbone returned empty adv layers"))?;
+        self.repe_sensor
+            .hot_reload_contrastive_spans(h_b, benign_span_start, h_a, adv_span_start)
     }
     fn target_layer(&self) -> usize { self.repe_sensor.target_layer }
     fn d_model(&self) -> i32 { self.repe_sensor.v_harm.shape()[0] }
