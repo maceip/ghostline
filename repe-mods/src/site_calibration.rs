@@ -820,6 +820,35 @@ pub fn harm_reading(
             }
             Ok(best)
         }
+        Pooling::TopK { k } => {
+            let flat = encode_ids(tokenizer, text);
+            let len = flat.len() as i32;
+            let input = Array::from_slice(&flat, &[1, len]);
+            engine.run_hooked(&input, false, false, None, span_start)?;
+            let hidden = engine
+                .probe_hidden
+                .clone()
+                .context("the probe layer was never reached during the forward pass")?;
+            let cfg = TokenScoreConfig {
+                anchor: anchor.cloned(),
+                copy_dir: Some(copy_dir.clone()),
+                directions: clusters.to_vec(),
+            };
+            let table = qwen_clef_repe_guard::repe_sensor::token_score_table(
+                &hidden,
+                span_start,
+                &cfg,
+            )?;
+            let mut best = f32::NEG_INFINITY;
+            for cluster in 0..clusters.len() {
+                let (pooled, _idx, _value) =
+                    qwen_clef_repe_guard::repe_sensor::topk_pool(&table, cluster, k);
+                if pooled > best {
+                    best = pooled;
+                }
+            }
+            Ok(best)
+        }
     }
 }
 

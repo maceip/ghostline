@@ -298,6 +298,25 @@ pub trait GuardableEngine {
         Ok((0.0, 0.0, [0.0, 0.0], [0.0, 0.0]))
     }
 
+    /// Fast early-exit per-cluster reference probe for structured tool Pass 3:
+    /// runs only up to `target_layer` and returns each harm cluster's pooled score
+    /// without mutating Pass 2's recorded profiles.
+    fn probe_reference_clusters(
+        &mut self,
+        reference_ids: &Array,
+        probe_span_start: Option<usize>,
+    ) -> Result<Vec<f32>> {
+        Ok(vec![self.probe_reference_only(reference_ids, probe_span_start)?])
+    }
+
+    /// Read the active span pooling mode on the underlying `RepeSensor`.
+    fn sensor_pooling(&self) -> crate::repe_sensor::Pooling {
+        crate::repe_sensor::Pooling::Mean
+    }
+
+    /// Temporarily override the active span pooling mode on the underlying `RepeSensor`.
+    fn set_sensor_pooling(&mut self, _pooling: crate::repe_sensor::Pooling) {}
+
     /// Recompute `\Delta h_l = h_l^{adv} - h_l^{benign}` at `target_layer`, orthogonalize
     /// against benign axes, and hot-reload the active guard probe direction.
     fn hot_reload_contrastive_pair(
@@ -406,6 +425,14 @@ impl<L: QwenDecoderLayer> GuardableEngine for HookedQwenClefEngine<L> {
         self.capture_attention = on;
     }
 
+    fn sensor_pooling(&self) -> crate::repe_sensor::Pooling {
+        self.repe_sensor.pooling
+    }
+
+    fn set_sensor_pooling(&mut self, pooling: crate::repe_sensor::Pooling) {
+        self.repe_sensor.pooling = pooling;
+    }
+
     fn embed_option_tokens(&self, token_ids: &[u32]) -> Result<Option<Array>> {
         if token_ids.is_empty() {
             return Ok(None);
@@ -490,6 +517,26 @@ impl<L: QwenDecoderLayer> GuardableEngine for HookedQwenClefEngine<L> {
             h = layer.forward(&h, 0.0)?;
         }
         self.repe_sensor.probe_cosine(&h, probe_span_start)
+    }
+
+    fn probe_reference_clusters(
+        &mut self,
+        reference_ids: &Array,
+        probe_span_start: Option<usize>,
+    ) -> Result<Vec<f32>> {
+        let hook_layer = self
+            .repe_sensor
+            .target_layer
+            .min(self.layers.len().saturating_sub(1));
+        let mut h = self.embed_tokens.take_axis(reference_ids, 0)?;
+        for layer in self.layers.iter_mut().take(hook_layer + 1) {
+            h = layer.forward(&h, 0.0)?;
+        }
+        Ok(self
+            .repe_sensor
+            .span_harm_reading(&h, probe_span_start)?
+            .1
+            .cluster_scores)
     }
 
     fn clamp_and_rollback_span(
@@ -905,6 +952,14 @@ impl GuardableEngine for HybridGuardEngine {
         self.backbone.layers.len()
     }
 
+    fn sensor_pooling(&self) -> crate::repe_sensor::Pooling {
+        self.repe_sensor.pooling
+    }
+
+    fn set_sensor_pooling(&mut self, pooling: crate::repe_sensor::Pooling) {
+        self.repe_sensor.pooling = pooling;
+    }
+
     fn embed_option_tokens(&self, token_ids: &[u32]) -> Result<Option<Array>> {
         if token_ids.is_empty() {
             return Ok(None);
@@ -952,6 +1007,26 @@ impl GuardableEngine for HybridGuardEngine {
             h = layer.forward(&self.backbone.cfg, &h)?;
         }
         self.repe_sensor.probe_cosine(&h, probe_span_start)
+    }
+
+    fn probe_reference_clusters(
+        &mut self,
+        reference_ids: &Array,
+        probe_span_start: Option<usize>,
+    ) -> Result<Vec<f32>> {
+        let hook_layer = self
+            .repe_sensor
+            .target_layer
+            .min(self.backbone.layers.len().saturating_sub(1));
+        let mut h = self.backbone.embed(reference_ids)?;
+        for layer in self.backbone.layers.iter().take(hook_layer + 1) {
+            h = layer.forward(&self.backbone.cfg, &h)?;
+        }
+        Ok(self
+            .repe_sensor
+            .span_harm_reading(&h, probe_span_start)?
+            .1
+            .cluster_scores)
     }
 
     fn hot_reload_contrastive_pair_spans(
@@ -1100,6 +1175,31 @@ impl GuardableEngine for RemoteBackboneEngine {
             .ok_or_else(|| anyhow::anyhow!("remote backbone returned empty layers"))?;
         self.repe_sensor.probe_cosine(h, probe_span_start)
     }
+    fn probe_reference_clusters(
+        &mut self,
+        reference_ids: &Array,
+        probe_span_start: Option<usize>,
+    ) -> Result<Vec<f32>> {
+        let ids: Vec<u32> = reference_ids
+            .as_type::<i32>()?
+            .as_slice::<i32>()
+            .iter()
+            .map(|&v| v as u32)
+            .collect();
+        let (layers, _) = self.fetch(&ids)?;
+        let hook_layer = self
+            .repe_sensor
+            .target_layer
+            .min(layers.len().saturating_sub(1));
+        let h = layers
+            .get(hook_layer)
+            .ok_or_else(|| anyhow::anyhow!("remote backbone returned empty layers"))?;
+        Ok(self
+            .repe_sensor
+            .span_harm_reading(h, probe_span_start)?
+            .1
+            .cluster_scores)
+    }
     fn hot_reload_contrastive_pair_spans(
         &mut self,
         benign_ids: &Array,
@@ -1155,6 +1255,8 @@ impl GuardableEngine for RemoteBackboneEngine {
     fn pca_coordinates(&self) -> Vec<f32> { self.repe_sensor.last_pca_coords.clone() }
     fn num_layers(&self) -> usize { self.num_layers }
     fn set_capture_attention(&mut self, _on: bool) {}
+    fn sensor_pooling(&self) -> crate::repe_sensor::Pooling { self.repe_sensor.pooling }
+    fn set_sensor_pooling(&mut self, pooling: crate::repe_sensor::Pooling) { self.repe_sensor.pooling = pooling; }
 }
 
 #[cfg(test)]

@@ -354,6 +354,11 @@ def parse_pooling_spec(spec: str, default_beta: float, default_weight: float) ->
     trimmed = spec.strip().lower()
     if trimmed == "mean":
         return "mean", default_beta, 0.0, "mean"
+    if trimmed in ("cvar", "topk"):
+        return "cvar", 4.0, 1.0, "cvar:4"
+    if trimmed.startswith("cvar:") or trimmed.startswith("topk:"):
+        k = max(1, int(trimmed.split(":", 1)[1]))
+        return "cvar", float(k), 1.0, f"cvar:{k}"
     if trimmed == "lse":
         return "lse", default_beta, 1.0, f"lse:{default_beta:g}" if default_beta == int(default_beta) else f"lse:{default_beta}"
     if trimmed.startswith("lse:"):
@@ -1194,7 +1199,15 @@ def main():
         anchor: mx.array | None,
         c_mat: mx.array = active_cluster_matrix,
     ) -> float:
-        """The harm reading of one rendered tool call under `mean`, `lse`, or `hybrid` pooling."""
+        """The harm reading of one rendered tool call under `mean`, `lse`, `hybrid`, or `cvar` pooling."""
+        if pooling_mode == "cvar":
+            k = max(1, int(round(pooling_beta)))
+            t_scores = token_cluster_scores(tokens, anchor, c_mat)  # [T, C]
+            k_eff = min(k, int(t_scores.shape[0]))
+            sorted_scores = mx.sort(t_scores, axis=0)[-k_eff:, :]
+            pooled_scores = mx.mean(sorted_scores, axis=0)
+            mx.eval(pooled_scores)
+            return float(mx.max(pooled_scores).item())
         if pooling_mode == "lse":
             pooled_scores = lse_pool(token_cluster_scores(tokens, anchor, c_mat), pooling_beta)
             return float(mx.max(pooled_scores).item())

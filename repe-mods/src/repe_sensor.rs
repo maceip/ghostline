@@ -231,6 +231,11 @@ pub enum Pooling {
     /// Convex combination `(1 - weight) * mean_pooled_cosine + weight * LogMeanExp_beta`,
     /// preserving holistic command semantics while surfacing short dangerous clauses.
     Hybrid { beta: f32, weight: f32 },
+    /// Conditional Value-at-Risk (CVaR / Top-`k` mean) pooling across per-token cosines:
+    /// averages the `min(k, T)` highest-scoring tokens in the span, suppressing single-token
+    /// BPE coincidences (`k > 1`) while preventing multi-key JSON syntax trees from diluting
+    /// localized dangerous arguments.
+    TopK { k: usize },
 }
 
 impl Default for Pooling {
@@ -241,11 +246,25 @@ impl Default for Pooling {
 
 impl Pooling {
     /// Parse a pooling specification string (`"mean"`, `"lse"`, `"lse:<beta>"`,
-    /// `"hybrid"`, or `"hybrid:<beta>:<weight>"`).
+    /// `"hybrid"`, `"hybrid:<beta>:<weight>"`, `"cvar"`, `"cvar:<k>"`, or `"topk:<k>"`).
     pub fn parse_spec(spec: &str) -> Self {
         let trimmed = spec.trim();
         if trimmed.eq_ignore_ascii_case("mean") || trimmed.is_empty() {
             return Pooling::Mean;
+        }
+        if trimmed.eq_ignore_ascii_case("cvar") || trimmed.eq_ignore_ascii_case("topk") {
+            return Pooling::TopK { k: 4 };
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("cvar:")
+            .or_else(|| trimmed.strip_prefix("topk:"))
+        {
+            return rest
+                .parse::<usize>()
+                .ok()
+                .filter(|k| *k >= 1)
+                .map(|k| Pooling::TopK { k })
+                .unwrap_or(Pooling::TopK { k: 4 });
         }
         if trimmed.eq_ignore_ascii_case("lse") {
             return Pooling::LogSumExp { beta: 12.0 };
@@ -296,6 +315,7 @@ impl Pooling {
             Pooling::Mean => "mean".to_string(),
             Pooling::LogSumExp { beta } => format!("lse:{beta}"),
             Pooling::Hybrid { beta, weight } => format!("hybrid:{beta}:{weight}"),
+            Pooling::TopK { k } => format!("cvar:{k}"),
         }
     }
 }
@@ -510,6 +530,24 @@ pub fn lse_pool(table: &TokenScoreTable, cluster: usize, beta: f32) -> (f32, usi
     let mean_exp = (acc / table.span_len as f32).max(1e-30);
     let pooled = peak_val + mean_exp.ln() / beta;
     (pooled, peak_idx, peak_val)
+}
+
+/// Conditional Value-at-Risk (CVaR / Top-`k` mean) pooling of one cluster's token scores.
+///
+/// Averages the `min(k, T)` largest token scores in the span (`k >= 1`), strictly bounded in
+/// `[mean_t s(t), max_t s(t)]`.
+pub fn topk_pool(table: &TokenScoreTable, cluster: usize, k: usize) -> (f32, usize, f32) {
+    if table.span_len == 0 {
+        return (0.0, 0, 0.0);
+    }
+    let (peak_idx, peak_val) = argmax_row(table, cluster);
+    let k_eff = k.max(1).min(table.span_len);
+    let mut vals: Vec<f32> = (0..table.span_len)
+        .map(|t| table.scores[t * table.n_clusters + cluster])
+        .collect();
+    vals.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let sum_top: f32 = vals[..k_eff].iter().sum();
+    (sum_top / k_eff as f32, peak_idx, peak_val)
 }
 
 /// The mean of one cluster's token scores — the plain average, used when the
@@ -1569,6 +1607,18 @@ impl RepeSensor {
                 }
                 (scores, peak_token, peak_cosine)
             }
+            Pooling::TopK { k } => {
+                let mut scores = Vec::with_capacity(dims.len());
+                let mut peak_token = Vec::with_capacity(dims.len());
+                let mut peak_cosine = Vec::with_capacity(dims.len());
+                for c in 0..dims.len() {
+                    let (pooled, idx, val) = topk_pool(&table, c, k);
+                    scores.push(pooled);
+                    peak_token.push(table.span_start + idx);
+                    peak_cosine.push(val);
+                }
+                (scores, peak_token, peak_cosine)
+            }
         };
 
         let argmax_cluster = cluster_scores
@@ -2163,5 +2213,38 @@ mod repe_math_and_pooling_tests {
             (after_adv - after_ben) > (before_adv - before_ben),
             "multi-cluster hot reload must widen margin: before=({before_adv} - {before_ben}), after=({after_adv} - {after_ben})"
         );
+    }
+
+    #[test]
+    fn topk_cvar_pool_resists_json_dilution_and_single_token_noise() {
+        assert_eq!(
+            Pooling::parse_spec("cvar:6").metadata_string(),
+            "cvar:6"
+        );
+        // 4 high-signal tokens (0.20) inside 20 structural boilerplate tokens (0.00):
+        let mut harm_scores = vec![0.0f32; 24];
+        for s in &mut harm_scores[4..8] {
+            *s = 0.20;
+        }
+        let harm_table = TokenScoreTable {
+            scores: harm_scores,
+            span_start: 0,
+            span_len: 24,
+            n_clusters: 1,
+        };
+        // Benign span with 1 coincidental BPE outlier (0.18) and 23 low tokens (0.02):
+        let mut ben_scores = vec![0.02f32; 24];
+        ben_scores[3] = 0.18;
+        let ben_table = TokenScoreTable {
+            scores: ben_scores,
+            span_start: 0,
+            span_len: 24,
+            n_clusters: 1,
+        };
+        let (h_cvar, _, _) = topk_pool(&harm_table, 0, 4);
+        let (b_cvar, _, _) = topk_pool(&ben_table, 0, 4);
+        assert!((h_cvar - 0.20).abs() < 1e-6);
+        assert!((b_cvar - 0.06).abs() < 1e-6);
+        assert!(h_cvar - b_cvar > 0.13);
     }
 }

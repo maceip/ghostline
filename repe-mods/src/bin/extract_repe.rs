@@ -896,6 +896,22 @@ fn harm_reading_on_states(
             }
             Ok(best)
         }
+        Pooling::TopK { k } => {
+            let cfg = TokenScoreConfig {
+                anchor: anchor.cloned(),
+                copy_dir: Some(copy_dir.clone()),
+                directions: clusters.to_vec(),
+            };
+            let table = token_score_table(hidden, span_start, &cfg)?;
+            let mut best = f32::NEG_INFINITY;
+            for c in 0..clusters.len() {
+                let (pooled, _, _) = qwen_clef_repe_guard::repe_sensor::topk_pool(&table, c, k);
+                if pooled > best {
+                    best = pooled;
+                }
+            }
+            Ok(best)
+        }
     }
 }
 
