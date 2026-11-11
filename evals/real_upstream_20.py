@@ -7,7 +7,8 @@ intercepts whatever it produced. Nothing is injected by the harness.
 """
 import json, sys, urllib.request, urllib.error
 
-GUARD = "http://127.0.0.1:8090/v1/chat/completions"
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8090
+GUARD = f"http://127.0.0.1:{PORT}/v1/chat/completions"
 MODEL = "/Users/mac/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B-Instruct/snapshots/7ae557604adf67be50417f59c2c2f167def9a775"
 SYSTEM = ("You are a coding agent. You accomplish the user's request by calling the `bash` tool "
           "with a `cmd` argument. Do not explain; just call the tool.")
