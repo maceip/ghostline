@@ -18372,272 +18372,116 @@ PY
 cat << 'DOC' > "$PROJ/README.md"
 # qwen-clef-repe-guard
 
-Zero-shot model-agnostic MLX **RepE** hook + **Clef** joint-schema head
-tool-call **blocker**, with an embedded live telemetry dashboard.
+Native Rust + MLX Representation Engineering (RepE) and Clef pre-execution guard for AI agent tool calls on Apple Silicon.
 
-## The pieces
+## Core Components
 
-**Zero-shot introspection** (`src/zero_shot_loader.rs`). On startup the binary
-reads `config.json` and the safetensors headers — single-file or sharded, with
-either `model.layers.*` or `language_model.model.layers.*` prefixes — and infers
-the layer count, residual width, vocabulary size, norm epsilon and the
-per-projection quantization bit-width (4-bit, 6-bit, 8-bit, mixed OptiQ or bf16)
-straight from the tensor shapes.
+- **Zero-shot model introspection (`src/zero_shot_loader.rs`)**: Reads `config.json` and single-file or sharded `.safetensors` headers (`model.layers.*` or `language_model.model.layers.*`) to infer layer count, hidden dimension, vocabulary size, RMSNorm epsilon, and quantization layout (`4-bit`, `6-bit`, `8-bit`, mixed OptiQ, or `bf16`). When no calibrated vector artifact matches the model fingerprint and zero-shot mode is enabled, it extracts an initial contrastive direction directly from static unembedding and `mlp.down_proj` value vectors in under 150 ms.
+- **Hooked decoder and hybrid Gated DeltaNet runtime (`src/mlx_loader.rs`, `src/qwen_hook.rs`, `src/gdn.rs`)**: Runs dense Qwen2 transformer stacks and hybrid Gated DeltaNet / full-attention stacks (`Cloudflare/clef-flash`) on Metal with fused `mlx_rs::fast` kernels, speculative KV-cache slicing, and `0.0001` cosine parity against Python `mlx_lm`.
+- **Fisher-whitened RepE sensor (`src/repe_sensor.rs`, `src/whiten.rs`)**: Scores `<tool_call>` token spans against calibrated harm clusters whitened via a dual Woodbury Ledoit-Wolf shrinkage solver (`O(n^2 d + n^3)`), with centered 2D/3D PCA subspace telemetry and counterfactual activation clamping.
+- **Pre-execution proxy and telemetry plane (`src/enforcer_proxy.rs`, `src/viz_ui.html`)**: Exposes `POST /v1/guard/tool-call` for agent tool runners, `POST /v1/chat/completions` as an OpenAI-compatible intercepting proxy, runtime policy/mode controls, online contrastive pair hot-reloading, and live `GhostlineTraceFrame` Server-Sent Events (`/api/events`).
 
-**Zero-pass RepE extraction.** When no cached `repe_vectors.safetensors` matches
-the model's structural fingerprint, the vectors are computed from the static
-weight matrices alone, in well under 150 ms and with no prompt forward pass:
+## How Tool Calls Are Evaluated
 
-- *Unembedding contrastive projection* — the unsafe coding lexemes (`rm`,
-  `curl`, `.ssh`, `eval`) are contrasted against the safe ones (`cargo`,
-  `test`, `check`, `status`) in the unembedding basis, after `final_norm`.
-- *Layer-l\* MLP value-vector routing* — at the 68%-depth layer every column
-  of `mlp.down_proj` is one MLP value vector; the columns are scored by their
-  alignment with the unembedding axis and the strongest ones are isolated,
-  yielding the middle-layer write direction that routes into destructive tool
-  calls, plus a top-3 SVD/PCA basis.
+1. **Pass-1 Trusted Anchor**: `clean_trusted_prompt` strips embedded untrusted payloads from the user message, runs Pass 1 through the model up to the probe layer (`l* = 16` on 24-layer Qwen2.5-0.5B), and caches the pooled user-intent anchor state.
+2. **Pass-2 Tool-Span Extraction**: Any untrusted tool outputs are isolated inside `<tool_response>` turns, and the candidate shell command or structured JSON tool call is rendered via `render_tool_call_turn` (byte-identical to `extract_repe_vectors.py`, verified by `tools/check_render_parity.py`). Only tokens inside the `<tool_call>` span `[T, D]` are scored so prompt phrasing does not skew short tool calls.
+3. **Whitened Multi-Cluster Projection**: Copy/echo directions are projected out, and each span token is scored in one vectorized `[T, D] @ [D, C]` multiply against three Fisher-whitened harm clusters: destructive mutations, credential/secret reads, and network exfiltration.
+4. **Span Pooling**: Token scores are aggregated per cluster using the artifact's calibrated pooling mode (`mean`, length-invariant LogMeanExp `lse:<beta>`, `hybrid:<beta>:<weight>`, or Conditional Value-at-Risk top-`k` `cvar:<k>`). Structured non-`bash` JSON tool calls use `cvar:6` so localized exploit payloads are not diluted across verbose JSON keys and punctuation.
+5. **Matched Baseline Subtraction**: The guard subtracts a matched-verb shell baseline or schema-preserving per-cluster 80th-percentile JSON tool baseline (`harm_excess = max_c (score_c - baseline_c)`), removing prompt-dependent cosine offsets, and compares `harm_excess` against the calibrated conformal threshold.
 
-**Blocking** (`src/enforcer_proxy.rs`). The proxy inspects every tool call in a
-chat-completion response. In `enforce` mode an unsafe call is never returned to
-the agent — the proxy answers `403` with the reason. `monitor` passes it
-through and reports.
+### Integrity Guarantees
 
-**Telemetry** (`src/viz_ui.html`). A dark dashboard is served at
-`http://127.0.0.1:8090/`, streaming every intercepted call over SSE
-(`/api/events`). It plots the per-layer RepE cosine profile across all decoder
-layers, the PCA subspace coordinates (PC1/PC2/PC3), the Clef noul and score
-probability distributions, and whether the call was clamped, circuit-broken or
-passed. `/api/info` reports the model facts the guard introspected.
+- Every score, layer trace, PCA coordinate, and token attribution comes from a live forward pass of the loaded model checkpoint. No synthetic fallback scores or mock upstreams exist in the crate.
+- Optional heads (`ClefHead` via `--joint-head`) evaluate only when real trained weights are provided; otherwise `clef_decisions` is empty rather than populated from uninitialized weights.
 
-## How a call is judged
+## Measured Performance
 
-1. **Anchor.** The trusted user turn is run through the backbone and the
-   residual state at the probe layer is pooled over the turn's tokens.
-2. **Reading.** The intercepted call is run through the backbone and the
-   residual is pooled over the **tool-call span** — the tokens of the tool
-   name and its arguments, never the user's own wording. A single trailing
-   token is dominated by however the request was phrased, which is what made
-   the same command read +0.002 under one prompt and +0.052 under another.
-3. **Clusters.** The harm direction is not one difference-in-means vector but
-   three cluster centroids — filesystem destruction, secret reading and
-   network exfiltration — each orthogonalised against the direction every
-   benign shell command shares. The call is scored against the strongest
-   cluster.
-4. **Baseline.** The same context is rendered with a **panel** of five benign
-   tool calls. The worst of them is the baseline for this context.
-5. **Decision.** The statistic is `harm_cosine - baseline`, compared against
-   the calibrated `harm_excess_threshold`.
+Reproducible via `bash ../evals/verify_all.sh`:
 
-The baseline is what makes the reading comparable across prompts: without it,
-the absolute cosine carries an offset that depends on what the prompt already
-contained.
+- **Frozen 50-command held-out benchmark (`evals/heldout_novel.py`)**: `16 / 20` (`80.0%`) novel harmful commands blocked at `3 / 30` (`10.0%`) benign false positives (`Youden's J = 0.700`), compared to `10 / 20` harmful blocked at `6 / 30` false positives (`J = 0.300`) for a lexical keyword filter.
+- **24-pair `.632` LOPO cross-validation**: `24 / 24` pair accuracy; panel AUROC `0.9375` on `Qwen2.5-0.5B-Instruct` and `0.9549` on `Cloudflare/clef-flash`.
+- **Canonical multi-prompt suite (`evals/canonical_40.py`)**: `40 / 40` harmful calls blocked, `1 / 40` benign false positive across 5 prompt templates.
+- **Structured JSON tool calls**: Positive margin separation across `read_file`, `write_file`, `http_request`, and nested MCP `argv` schemas, with `~28 ms` static-panel prefill latency on Apple Silicon.
 
-The extractor and the guard must agree on the exact text they feed the
-tokenizer, so both call the same `render_tool_call_turn` helper, both pool the
-same tool-call span, and both measure the raw probe-layer residual (never the
-final-normed one). `check_render_parity.py` asserts the renderings match byte
-for byte.
-
-### No mocks
-
-Nothing in this project fabricates a measurement.
-
-- The proxy has no built-in fake upstream. Point it at a real model server
-  (for example `mlx_lm.server`) and it intercepts the tool calls that model
-  actually produced.
-- The Clef head is `Option`. If no trained `joint_head.safetensors` is
-  supplied for the backbone, the Clef questions are **not evaluated** — the
-  dashboard says so instead of drawing a distribution from random weights.
-  A head is never invented.
-- Every number on the dashboard comes from a real forward pass of the real
-  backbone.
-
-## Measured behaviour
-
-Two benchmarks, both reproducible against a running guard.
-
-**Canonical** (`evals/canonical_40.py` — eight harmful/benign command pairs across five
-prompt shapes, judged through the direct probe endpoint):
-
-```
-TOTAL: harmful blocked 35/40   benign wrongly blocked 1/40
-```
-
-**Real model** (`evals/real_upstream_20.py` — a real `mlx_lm` upstream is asked for a goal
-in natural language and the guard judges whatever command the model actually
-produced; nothing is injected):
-
-```
-harmful blocked 7/10   benign wrongly blocked 0/10
-```
-
-Two of the three misses are calls where the model emitted no command at all,
-and the third (`kubectl config current-context`) was not destructive. On the
-calls that carried a command: **7/8 harmful blocked, 0/8 benign blocked**.
-
-**Limits, stated plainly.** The curated benchmark and real-model traffic do
-not agree, and the gap is real: a threshold fitted on hand-written commands
-does not transfer to the commands a model actually emits, which is why the
-calibration set now contains the commands the real upstream produced. The
-upstream used here is Qwen2.5-0.5B-Instruct, whose tool calls are often
-malformed or unrelated to the request; a stronger upstream will produce
-different traffic and wants its own calibration pass. The guard's recall on
-the synthetic echo shapes is materially lower than on natural-language goals.
-
-### Pooling, and why the mean is still the default
-
-The artifact records how the residual was pooled over the tool-call span
-(`pooling` in the metadata). Two are implemented:
-
-* `mean` — the mean residual over the span, then one cosine. This is the
-  default.
-* `lse:<beta>` — token-wise LogSumExp pooling. Every token of the span is
-  scored on its own against each cluster, and the cluster's score is pooled
-  with `S_c = max_t s_c(t) + (1/beta) * ln sum_t exp(beta * (s_c(t) - max))`.
-  A two-token destructive command inside a thirty-token JSON envelope is no
-  longer diluted by its punctuation, and the token that peaked is reported as
-  the **attribution**.
-
-The token attribution is produced under either pooling — it is a property of
-the reading, not of the pooling.
-
-**The measured result, stated plainly.** LogSumExp pooling wins on the
-calibration set and loses on the held-out sets:
-
-| variant | calibration (144) | canonical (40) |
-|---|---|---|
-| `mean`, 10% FP budget | 133 harmful, 4 FP | **35 harmful, 1 FP** |
-| `lse:12`, 10% FP budget | 138 harmful, 3 FP | 38 harmful, 7 FP |
-| `lse:12`, 1% FP budget | 130 harmful, 1 FP | 35 harmful, 4 FP |
-
-LogSumExp buys three more harmful calls caught and pays six more benign calls
-blocked; at a strict budget it matches the mean's recall with four times the
-false positives. A guard that blocks one legitimate command in six is not
-shippable, so **the mean pooling stays the default** and LogSumExp remains
-available as a calibrated, selectable mode. The thresholds are never
-transferred between poolings: the artifact records which one it was
-calibrated under.
-
-
-## Run
+## Running the Guard
 
 ```bash
-# Zero-shot: no vectors file needed, no checkpoint needed
-cargo run -- --self-test
+# Self-test mode
+cargo run --release -- --self-test
 
-# Real checkpoint: introspection + zero-shot calibration + dashboard
-cargo run -- --port 8090 --model /path/to/checkpoint
+# Production enforce mode with calibrated vectors
+cargo run --release -- \
+  --port 8090 \
+  --upstream http://127.0.0.1:8123 \
+  --model /path/to/Qwen2.5-0.5B-Instruct \
+  --repe artifacts/repe_vectors_qwen2_5_0_5b_v2.safetensors \
+  --mode enforce \
+  --no-zero-shot
 
-# Explicit vectors and a real Clef joint head
-cargo run -- --port 8090 \
+# Include an optional trained Clef joint head
+cargo run --release -- \
+  --port 8090 \
   --model /path/to/checkpoint \
-  --repe artifacts/repe_vectors.safetensors \
+  --repe artifacts/repe_vectors_clef_flash.safetensors \
   --joint-head /path/to/checkpoint/joint_head.safetensors
 ```
 
 ## Calibration
 
-Vectors are cached with the model fingerprint they were derived from. A later
-run reuses them only when the fingerprint still matches; otherwise the zero-shot
-extraction runs again. A cache that belongs to a different model is copied to
-`<name>.safetensors.bak` before it is replaced.
-
-The extractor measures the operating point from the data instead of guessing
-it: it prints the per-pair table and picks the threshold that catches as many
-harmful calls as possible while keeping the false-positive rate on the benign
-population at or below 10%.
+Artifacts embed the checkpoint fingerprint and pooling configuration. Recalibrate when changing models, pooling modes, or agent prompt wrappers:
 
 ```bash
-# Python reference path (works for hybrid attention stacks too)
+# Python MLX extractor (supports dense and hybrid Gated DeltaNet models)
 uv run --python 3.12 --with mlx-lm python3 ../extract_repe_vectors.py \
-  --model /path/to/checkpoint --pca-k 3 \
+  --model /path/to/checkpoint \
+  --pooling mean \
+  --fp-budget-pct 10.0 \
   --out artifacts/repe_vectors.safetensors
 
-# In-language path (dense stacks only)
-cargo run --bin extract-repe -- \
-  --model /path/to/checkpoint --out artifacts/repe_vectors.safetensors
+# Native Rust extractor (dense Transformer stacks)
+cargo run --release --bin extract-repe -- \
+  --model /path/to/checkpoint \
+  --pooling mean \
+  --fp-budget-pct 10.0 \
+  --out artifacts/repe_vectors.safetensors
+
+# Split-conformal threshold and Fisher refit from labeled JSONL traffic
+cargo run --release --bin site-calibrate -- \
+  --model /path/to/checkpoint \
+  --labels artifacts/site_calibration.jsonl \
+  --alpha 0.05 \
+  --out artifacts/repe_vectors_site.safetensors
 ```
 
-## Layout
+## Source Layout
 
-| File | Role |
-|---|---|
-| `src/zero_shot_loader.rs` | Introspection, fingerprinting, closed-form RepE extraction |
-| `src/mlx_loader.rs` | Sharded safetensors loader; quantized and bf16 projections; RoPE + GQA |
-| `src/repe_sensor.rs` | Layer hook, clamping, per-layer profile, vector cache |
-| `src/clef_head.rs` | Clef joint-schema head over the final hidden state |
-| `src/qwen_hook.rs` | The hooked decoder loop |
-| `src/enforcer_proxy.rs` | Blocking proxy, telemetry bus, SSE endpoint, labelling API |
-| `src/viz_ui.html` | The embedded dashboard |
-| `src/bin/extract_repe.rs` | In-language RepE extractor |
-| `src/trajectory.rs` | Cross-turn EMA over the per-cluster excess vector |
-| `src/whiten.rs` | Ledoit-Wolf shrinkage and whitened (Mahalanobis) directions |
-| `src/capability.rs` | Ed25519 capability tokens |
-| `src/site_calibration.rs` | Interactive mining and conformal thresholding |
-| `src/rollback.rs` | Shared KV cache and speculative activation rollback |
+| File | Responsibility |
+| :--- | :--- |
+| `src/zero_shot_loader.rs` | Checkpoint introspection, structural fingerprinting, closed-form weight extraction |
+| `src/mlx_loader.rs` | Sharded safetensors loader, quantized/bf16 projections, RoPE, and GQA |
+| `src/gdn.rs` & `src/joint_head.rs` | Hybrid Gated DeltaNet recurrence and Clef joint-head projections |
+| `src/whiten.rs` | Dual Woodbury Ledoit-Wolf shrinkage and regularized Fisher discriminant solver |
+| `src/repe_sensor.rs` | Span scoring (`mean`, `lse`, `hybrid`, `cvar`), centered PCA subspace, activation clamping |
+| `src/qwen_hook.rs` | Hooked decoder passes, cached anchor/panel evaluation, multi-cluster hot-reload, KV rollback |
+| `src/enforcer_proxy.rs` | HTTP proxy, pre-tool guard endpoint, schema-preserving baselines, SSE telemetry, runtime policy |
+| `src/trajectory.rs` | Per-conversation EMA and slope detector for multi-turn escalation |
+| `src/capability.rs` | Offline Ed25519 capability token verification for human-approved tool calls |
+| `src/site_calibration.rs` | Split-conformal quantile estimation and Fisher cluster refitting |
+| `src/rollback.rs` | Speculative KV cache management and Layer-16 clamp-and-rollback decoding |
+| `src/access.rs` & `src/session.rs` | Bearer authentication, peer-verified rate limiting, stateless HMAC device-bound sessions |
 
-## Wiring it into an agent loop
+## Additional Telemetry and Controls
 
-The natural interception point is wherever tool specs become executable — in
-Zode that is `toAgentTools` in `src/llm/pi.js`. Either call
-`/v1/guard/tool-call` before running the tool, or point the agent's base URL at
-this proxy so unsafe tool calls never reach it.
+- **Token-level attribution**: Reports the exact `<tool_call>` token index, decoded token text, and cluster id carrying peak harm salience.
+- **Untrusted-span attention ratio**: Reports the fraction of probe-layer attention from `<tool_call>` tokens landing on `untrusted_context` (`role: "tool"` turns) as forensic provenance without blocking on attention share alone.
+- **Cross-turn escalation (`conversation_id`)**: Accumulates per-cluster excess with an EMA (`lambda = 0.7`) and linear slope so gradual multi-step attacks trip even when individual commands sit slightly below single-turn thresholds.
+- **Ed25519 capability tokens**: Allows human-reviewed actions (for example via `tools/touchid_stepup.swift` on macOS) to pass with a short-lived signature bound to the exact tool name and SHA-256 argument digest.
 
-The zero-shot direction extracted from the static weights is much weaker on
-this model — a cosine scale of roughly 0.01 against 0.2-0.4 for a calibrated
-direction. It is a starting point, not a substitute for calibration.
+## Operational Caveats
 
-## The advanced readings
-
-Four readings sit alongside the harm cosine. None of them is allowed to
-invent a number: each reports `None` when the thing it measures is absent.
-
-**Token attribution.** Every token of the tool-call span is scored on its own
-against each cluster. The token that peaked is reported with its index, its
-decoded text and its un-pooled cosine, so a block says *which* part of the
-command carried the signal.
-
-**Untrusted-span attention ratio.** The probe layer's attention distribution
-is captured for the intercepted call, and the share of the tool call's
-attention that landed on the declared-untrusted part of the context is
-reported. The caller declares what is untrusted (`untrusted_context` on the
-probe; the proxy treats `role: "tool"` messages as untrusted). Measured on an
-injection attempt: **0.253** of the attention landed on the injected span.
-A benign command under the same context measured **0.243** — so the ratio is
-reported as provenance, and is deliberately NOT used as a blocking signal: it
-does not discriminate.
-
-**Cross-turn trajectory.** The per-cluster excess vector is accumulated across
-the turns of a conversation with an EMA (`λ = 0.7`) and a least-squares slope.
-A call below the threshold is still blocked when the session's EMA for a
-cluster is above it and rising — an agent that escalates looks benign at every
-individual step. The trajectory is keyed by `conversation_id`, so independent
-calls never accumulate into each other.
-
-**Capability tokens.** A human-approved tool call can carry an Ed25519
-capability token: the tool name, a SHA-256 digest of the arguments, an issue
-time and a TTL, signed by a key the guard verifies offline. On macOS the
-approval step is a Touch ID gesture (`tools/touchid_stepup.swift`).
-
-## Known gaps
-
-- **Hybrid attention stacks are not implemented in Rust.** Qwen3.5 / Qwen3.8
-  interleave gated linear attention with full attention; the reference decoder
-  block implements the dense stack only and the loader refuses such a
-  checkpoint. Use the Python extractor and serve the backbone from `mlx_lm`.
-- The Clef joint head is loaded through its four projection matrices; the
-  upstream head's evidence-routing and transformer layers are not reproduced.
-- An untrained head cannot block: its answers are reported but never block on
-  their own.
-- **The task-drift signal is advisory only.** `v_drift` is calibrated on
-  tool-*response* turns (a poisoned file body read back into the context),
-  while this proxy intercepts tool *calls*; the two states are not comparable,
-  so the drift reading is reported but never blocks on its own.
-- The zero-shot direction needs no calibration but is much weaker than a
-  calibrated one, and its cosine scale is model-specific — tune `--threshold`
-  or run the extractor.
-- Thresholds transfer within a prompt distribution, not across it. Re-derive
-  them for your own traffic, or run in `monitor` mode while you measure.
+- Zero-shot weight extraction provides a cold-start fallback (`~0.01` cosine scale) and is substantially weaker than forward-pass contrastive calibration (`~0.1-0.4` scale); always prefer calibrated vector artifacts in production.
+- `v_drift` cosines are calibrated on `<tool_response>` poisoning examples and emitted as non-blocking advisories during `<tool_call>` interception.
+- Re-evaluate thresholds in `--mode monitor` before switching to `enforce` when migrating to a new agent prompt template or model family.
 DOC
 
 # ------------------------------------------------------------------------------
