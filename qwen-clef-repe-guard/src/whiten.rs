@@ -526,3 +526,344 @@ pub fn mahalanobis_direction(w: &LedoitWolf, point: &[f64]) -> Vec<f64> {
     let centered: Vec<f64> = (0..d).map(|index| point[index] - w.mean[index]).collect();
     mat_vec(&w.precision, &centered)
 }
+
+/// Fitted high-dimensional within-class Ledoit–Wolf (2004) shrinkage model
+/// evaluated in dual Gram space (`O(n^2 d + n^3)` instead of `O(d^3)`).
+///
+/// Given `n` zero-mean nuisance/within-class residual vectors `Z` (`[n][d]`):
+/// * `S = (1/n) Zᵀ Z`
+/// * `F = m · I_d` with `m = trace(S) / d`
+/// * `d² = ‖S − m · I_d‖_F² = ‖G‖_F² / n² − d · m²`, where `G = Z Zᵀ` (`[n][n]`)
+/// * `b̄² = min(d², (1/n²) Σ_i G_{ii}² − (1/n) ‖S‖_F²)` (Ledoit & Wolf 2004, Lemma 3.1)
+/// * `λ = max(shrinkage_floor, b̄² / d²)` (or `1.0` when `d² <= 0`)
+///
+/// Applying `Σ_W⁻¹ v` for `Σ_W = (1 − λ) S + λ m I_d = γ I_d + η Zᵀ Z` uses
+/// the exact Sherman–Morrison–Woodbury identity over the `n × n` Cholesky
+/// factor of `γ I_n + η G`.
+#[derive(Debug, Clone)]
+pub struct DualShrinkageModel {
+    /// Effective shrinkage intensity `λ ∈ [0, 1]`.
+    pub shrinkage: f64,
+    /// Unclamped analytical Ledoit–Wolf shrinkage intensity in `[0, 1]`.
+    pub analytical_shrinkage: f64,
+    /// Isotropic target scale `m = trace(S) / d`.
+    pub target_scale: f64,
+    /// Ambient feature dimension `d`.
+    pub dim: usize,
+    /// Number of residual samples `n`.
+    pub samples: usize,
+    residuals: Vec<Vec<f64>>,
+    woodbury_factor: Option<Vec<Vec<f64>>>,
+    gamma: f64,
+    eta: f64,
+}
+
+impl DualShrinkageModel {
+    /// Solves `Σ_W · x = rhs` for `x = Σ_W⁻¹ rhs` without forming a `d × d` matrix.
+    pub fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, String> {
+        if rhs.len() != self.dim {
+            return Err(format!(
+                "DualShrinkageModel::solve: rhs has length {} but model has dim {}",
+                rhs.len(),
+                self.dim
+            ));
+        }
+        if self.eta == 0.0 || self.woodbury_factor.is_none() {
+            let scale = if self.gamma > PIVOT_EPS {
+                1.0 / self.gamma
+            } else {
+                1.0
+            };
+            return Ok(rhs.iter().map(|v| v * scale).collect());
+        }
+        let factor = self.woodbury_factor.as_ref().unwrap();
+        // z_rhs = Z · rhs  ([n])
+        let mut z_rhs = vec![0.0; self.samples];
+        for (i, row) in self.residuals.iter().enumerate() {
+            let mut acc = 0.0;
+            for (a, val) in row.iter().enumerate() {
+                acc += val * rhs[a];
+            }
+            z_rhs[i] = acc;
+        }
+        // w = (γ I_n + η G)⁻¹ (Z · rhs)  ([n])
+        let w = solve_cholesky(factor, &z_rhs)?;
+        // x = (1 / γ) · (rhs − η Zᵀ w)  ([d])
+        let inv_gamma = 1.0 / self.gamma;
+        let mut out = rhs.to_vec();
+        for (i, row) in self.residuals.iter().enumerate() {
+            let coeff = self.eta * w[i];
+            for a in 0..self.dim {
+                out[a] -= coeff * row[a];
+            }
+        }
+        for val in &mut out {
+            *val *= inv_gamma;
+        }
+        Ok(out)
+    }
+}
+
+/// Fits the exact Ledoit–Wolf (2004) shrinkage covariance model on zero-mean
+/// within-class/nuisance `residuals` (`[n][d]`) in `O(n² d + n³)` time.
+///
+/// `shrinkage_floor` clamps the minimum shrinkage intensity in `(0, 1]` so small
+/// calibration sets cannot overfit low-variance directions.
+pub fn fit_dual_zero_mean(
+    residuals: &[Vec<f64>],
+    shrinkage_floor: f64,
+) -> Result<DualShrinkageModel, String> {
+    let (n, d) = dimensions(residuals)?;
+    let floor = shrinkage_floor.clamp(1.0e-6, 1.0);
+
+    // Gram matrix G = Z · Zᵀ ([n][n]).
+    let mut gram = vec![vec![0.0; n]; n];
+    let mut trace_g = 0.0;
+    for i in 0..n {
+        for j in 0..=i {
+            let mut dot = 0.0;
+            for a in 0..d {
+                dot += residuals[i][a] * residuals[j][a];
+            }
+            gram[i][j] = dot;
+            gram[j][i] = dot;
+        }
+        trace_g += gram[i][i];
+    }
+
+    let n_f = n as f64;
+    let d_f = d as f64;
+    let trace_s = trace_g / n_f;
+    let target_scale = trace_s / d_f;
+
+    if !(target_scale > PIVOT_EPS) || !target_scale.is_finite() {
+        return Ok(DualShrinkageModel {
+            shrinkage: 1.0,
+            analytical_shrinkage: 1.0,
+            target_scale: 1.0,
+            dim: d,
+            samples: n,
+            residuals: Vec::new(),
+            woodbury_factor: None,
+            gamma: 1.0,
+            eta: 0.0,
+        });
+    }
+
+    // ‖S‖_F² = (1 / n²) · Σ_{i,j} G_{ij}²
+    let mut gram_frob_sq = 0.0;
+    for row in &gram {
+        for &val in row {
+            gram_frob_sq += val * val;
+        }
+    }
+    let s_frob_sq = gram_frob_sq / (n_f * n_f);
+
+    // d_scaled = ‖S − m I_d‖_F² = ‖S‖_F² − d · m²
+    let d_scaled = (s_frob_sq - d_f * target_scale * target_scale).max(0.0);
+
+    // b_scaled = (1 / n²) Σ_i ‖z_i‖⁴ − (1 / n) ‖S‖_F²
+    let mut diag_fourth = 0.0;
+    for (i, row) in gram.iter().enumerate() {
+        let nii = row[i];
+        diag_fourth += nii * nii;
+    }
+    let b_raw = (diag_fourth / (n_f * n_f) - s_frob_sq / n_f).max(0.0);
+    let analytical_shrinkage = if d_scaled <= PIVOT_EPS {
+        1.0
+    } else {
+        (b_raw.min(d_scaled) / d_scaled).clamp(0.0, 1.0)
+    };
+    let shrinkage = analytical_shrinkage.max(floor).clamp(0.0, 1.0);
+
+    let gamma = shrinkage * target_scale;
+    let eta = (1.0 - shrinkage) / n_f;
+    if eta <= PIVOT_EPS {
+        return Ok(DualShrinkageModel {
+            shrinkage: 1.0,
+            analytical_shrinkage,
+            target_scale,
+            dim: d,
+            samples: n,
+            residuals: Vec::new(),
+            woodbury_factor: None,
+            gamma: target_scale,
+            eta: 0.0,
+        });
+    }
+
+    // Woodbury core M = γ I_n + η G ([n][n]), strictly SPD for γ > 0.
+    let mut core = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            core[i][j] = eta * gram[i][j];
+        }
+        core[i][i] += gamma;
+    }
+    let (factor, _jitter) = cholesky_with_jitter(&core)?;
+
+    Ok(DualShrinkageModel {
+        shrinkage,
+        analytical_shrinkage,
+        target_scale,
+        dim: d,
+        samples: n,
+        residuals: residuals.to_vec(),
+        woodbury_factor: Some(factor),
+        gamma,
+        eta,
+    })
+}
+
+/// Projects `orthogonal_to` directions sequentially out of `vector` (Gram–Schmidt).
+pub fn project_orthogonal(vector: &[f64], orthogonal_to: &[Vec<f64>]) -> Result<Vec<f64>, String> {
+    let mut current = vector.to_vec();
+    for axis in orthogonal_to {
+        if axis.len() != current.len() {
+            return Err(format!(
+                "project_orthogonal: axis has dimension {} but vector has {}",
+                axis.len(),
+                current.len()
+            ));
+        }
+        let unit_axis = match l2_normalize(axis) {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+        let mut dot = 0.0;
+        for i in 0..current.len() {
+            dot += current[i] * unit_axis[i];
+        }
+        for i in 0..current.len() {
+            current[i] -= dot * unit_axis[i];
+        }
+    }
+    Ok(current)
+}
+
+/// Computes regularized Fisher / Mahalanobis discriminant unit directions
+/// `w_c = unit(proj_⊥(Σ_W⁻¹ Δμ_c))` for multiple cluster contrastive shifts `deltas`,
+/// sharing a single dual Ledoit–Wolf covariance fit over zero-mean `residuals`.
+///
+/// Because `⟨u, Σ_W⁻¹ Δμ_c⟩ = ⟨L⁻¹ u, L⁻¹ Δμ_c⟩`, scoring an unwhitened unit
+/// probe `u` at runtime via `⟨u, w_c⟩` evaluates the true Mahalanobis linear
+/// discriminant while remaining tangent to every nuisance direction in
+/// `orthogonal_to` (e.g. `v_benign_shell` and `v_copy_mode`).
+pub fn fisher_discriminant_directions(
+    residuals: &[Vec<f64>],
+    deltas: &[Vec<f64>],
+    orthogonal_to: &[Vec<f64>],
+    shrinkage_floor: f64,
+) -> Result<(DualShrinkageModel, Vec<Vec<f64>>), String> {
+    if deltas.is_empty() {
+        return Err("fisher_discriminant_directions: no delta vectors supplied".to_string());
+    }
+    let model = fit_dual_zero_mean(residuals, shrinkage_floor)?;
+    let mut directions = Vec::with_capacity(deltas.len());
+    for delta in deltas {
+        let solved = model.solve(delta)?;
+        let projected = project_orthogonal(&solved, orthogonal_to)?;
+        let mut unit = l2_normalize(&projected)?;
+        // Guarantee positive orientation along the raw contrastive shift Δμ_c.
+        let mut align = 0.0;
+        for i in 0..unit.len() {
+            align += unit[i] * delta[i];
+        }
+        if align < 0.0 {
+            for val in &mut unit {
+                *val = -*val;
+            }
+        }
+        directions.push(unit);
+    }
+    Ok((model, directions))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dual_woodbury_matches_primal_cholesky_to_machine_precision() {
+        // Rectangular high-dimensional regime: n = 18 < d = 48.
+        let n = 18usize;
+        let d = 48usize;
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next_f64 = || -> f64 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) * (1.0 / 9007199254740992.0) - 0.5
+        };
+
+        let mut raw = vec![vec![0.0; d]; n];
+        for row in &mut raw {
+            for val in row.iter_mut() {
+                *val = next_f64();
+            }
+        }
+        let mu = mean(&raw);
+        let residuals: Vec<Vec<f64>> = raw
+            .iter()
+            .map(|r| r.iter().zip(mu.iter()).map(|(x, m)| x - m).collect())
+            .collect();
+
+        let dual = fit_dual_zero_mean(&residuals, 0.20).expect("dual fit");
+        let s = sample_covariance(&residuals, &vec![0.0; d]);
+        let m = trace(&s) / d as f64;
+        let lam = dual.shrinkage;
+        let mut sigma_primal = vec![vec![0.0; d]; d];
+        for a in 0..d {
+            for b in 0..d {
+                sigma_primal[a][b] = (1.0 - lam) * s[a][b];
+            }
+            sigma_primal[a][a] += lam * m;
+        }
+        let (l_primal, _) = cholesky_with_jitter(&sigma_primal).expect("primal cholesky");
+
+        let rhs: Vec<f64> = (0..d).map(|_| next_f64()).collect();
+        let sol_dual = dual.solve(&rhs).expect("dual solve");
+        let sol_primal = solve_cholesky(&l_primal, &rhs).expect("primal solve");
+
+        for i in 0..d {
+            let err = (sol_dual[i] - sol_primal[i]).abs();
+            assert!(
+                err < 1.0e-11,
+                "component {i} mismatch: dual={} primal={} err={err:e}",
+                sol_dual[i],
+                sol_primal[i]
+            );
+        }
+    }
+
+    #[test]
+    fn fisher_discriminant_suppresses_high_variance_nuisance_axis() {
+        // Axis 0: true harm signal (shift = +1.0, low within-class std = 0.05)
+        // Axis 1: shared verb nuisance (e.g. `rm -rf`, shift = +0.8, huge benign std = 2.5)
+        // Axis 2: benign cone axis to project out (`orthogonal_to`)
+        let mut residuals = Vec::new();
+        for k in -10..=10 {
+            if k == 0 {
+                continue;
+            }
+            let kf = k as f64 / 10.0;
+            residuals.push(vec![0.05 * kf, 2.5 * kf, 0.0, 0.02 * kf]);
+        }
+        let delta = vec![1.0, 0.8, 0.4, 0.0];
+        let shell_axis = vec![0.0, 0.0, 1.0, 0.0];
+
+        let (_model, dirs) =
+            fisher_discriminant_directions(&residuals, &[delta.clone()], &[shell_axis.clone()], 0.05)
+                .expect("fisher discriminant");
+        let w = &dirs[0];
+        let raw_unit = l2_normalize(&project_orthogonal(&delta, &[shell_axis]).unwrap()).unwrap();
+
+        // Orthogonal to shell_axis (axis 2).
+        assert!(w[2].abs() < 1.0e-12);
+        // Fisher discriminant puts vastly more weight on clean signal axis 0 and suppresses noisy verb axis 1.
+        assert!(
+            w[0] > raw_unit[0] && w[1].abs() < 0.15 * raw_unit[1].abs(),
+            "expected nuisance suppression: w={w:?}, raw={raw_unit:?}"
+        );
+    }
+}
